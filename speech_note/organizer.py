@@ -52,13 +52,15 @@ def default_server_command(
     context_tokens: int,
     gpu_layers: str = "auto",
     kv_offload: bool = True,
+    model_path: Path | None = None,
 ) -> list[str] | None:
+    model_path = model_path or DEFAULT_GGUF_MODEL
     llama_server = shutil.which("llama-server")
-    if not llama_server or not DEFAULT_GGUF_MODEL.exists():
+    if not llama_server or not model_path.exists():
         return None
     command = [
         llama_server,
-        "--model", str(DEFAULT_GGUF_MODEL),
+        "--model", str(model_path),
         "--host", "127.0.0.1",
         "--port", "8011",
         "--parallel", "1",
@@ -593,18 +595,20 @@ def build_organizer(config: "Config") -> tuple[Organizer, LocalServerSupervisor 
     if config.organizer_provider == "local":
         launch_command = config.organizer_server_command
         if launch_command is None:
+            model_path = config.organizer_gguf or DEFAULT_GGUF_MODEL
             launch_command = default_server_command(
                 context_tokens=config.organizer_context_tokens,
                 gpu_layers=config.organizer_gpu_layers,
                 kv_offload=config.organizer_kv_offload,
+                model_path=model_path,
             )
-            if launch_command is None and shutil.which("llama-server") and not DEFAULT_GGUF_MODEL.exists():
+            if launch_command is None and shutil.which("llama-server") and not model_path.exists():
                 # Unlike the ASR models, the cleanup GGUF has no pinned download
                 # source, so we can't auto-install it — point the user at the fix.
                 print(
-                    f"note: local cleanup model not found at {DEFAULT_GGUF_MODEL}. "
-                    "Place a GGUF there (or pass --organizer-server-command), or use "
-                    "--online-free / --online-paid for OpenRouter cleanup. Falling back "
+                    f"note: local cleanup model not found at {model_path}. "
+                    "Place a GGUF there (or pass --organizer-gguf / --organizer-server-command), "
+                    "or use --online-free / --online-paid for OpenRouter cleanup. Falling back "
                     "to the primary transcript for now.",
                     file=sys.stderr,
                 )

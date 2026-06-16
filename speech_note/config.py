@@ -43,6 +43,29 @@ WHISPER_CPP_MODEL_ALIASES = {
     "medium-q8": "medium-q8_0",
 }
 
+DEFAULT_PRIMARY_HINT = "primary ASR pass; usually the most accurate source"
+# Per-primary-model presentation for the cleanup prompt: a friendly display name
+# and a reliability hint shown to the cleanup LM alongside the transcript. Keyed by
+# --asr-model. Models not listed use their resolved filename and the default hint.
+ASR_MODEL_NOTES: dict[str, dict[str, str]] = {
+    "large-v3-turbo-q5_k": {
+        "display": "Whisper Large V3 Turbo Q5_K",
+        "hint": (
+            "primary ASR pass (Warning: this model has a tendency to repeat words "
+            "and phrases; if other transcripts do not corroborate a repetition, "
+            "ignore it)"
+        ),
+    },
+}
+
+
+def primary_model_presentation(asr_model: str, effective_model: str) -> tuple[str, str]:
+    """(display name, cleanup-prompt reliability hint) for the primary transcript."""
+    note = ASR_MODEL_NOTES.get(asr_model)
+    if note is not None:
+        return note["display"], note["hint"]
+    return effective_model, DEFAULT_PRIMARY_HINT
+
 # --- secondary ASR ---
 SECONDARY_BACKENDS = ("sherpa", "onnx", "crispasr", "ctc", "pocketsphinx")
 # Backends that run as an external subprocess (their runtimes cannot share the

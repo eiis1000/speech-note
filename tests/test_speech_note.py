@@ -724,6 +724,23 @@ class ServerCommandTests(unittest.TestCase):
         with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", Path("/nonexistent.gguf")):
             self.assertIsNone(default_server_command(context_tokens=4096))
 
+    def test_default_server_command_model_path_override(self) -> None:
+        # A stronger local cleanup model can be dropped in via model_path (the
+        # --organizer-gguf flag), overriding the bundled gemma-E2B default.
+        with tempfile.TemporaryDirectory() as tmp:
+            stronger = Path(tmp) / "gemma-31b.gguf"
+            stronger.write_text("fake")
+            with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", Path("/nonexistent.gguf")):
+                with mock.patch("speech_note.organizer.shutil.which", return_value="/bin/llama-server"):
+                    command = default_server_command(context_tokens=4096, model_path=stronger)
+                    self.assertIsNotNone(command)
+                    self.assertIn(str(stronger), command)
+
+    def test_cli_organizer_gguf_flag(self) -> None:
+        config = make_config("--organizer-gguf", "/models/big.gguf")
+        self.assertEqual(config.organizer_gguf, Path("/models/big.gguf"))
+        self.assertIsNone(make_config().organizer_gguf)
+
 
 class ArchiveTests(unittest.TestCase):
     def test_discover_archive_inputs(self) -> None:
@@ -918,6 +935,34 @@ class SessionTests(unittest.TestCase):
             ArtifactStore(config.artifacts_dir, config.archive_dir).commit(session)
             self.assertTrue((tmp / "recording.latest.wav").exists())
             self.assertTrue((tmp / "raw.latest").read_text().startswith("some text"))
+
+
+class PrimaryModelPresentationTests(unittest.TestCase):
+    def test_default_model_uses_filename_and_default_hint(self) -> None:
+        from speech_note.config import DEFAULT_PRIMARY_HINT, primary_model_presentation
+
+        display, hint = primary_model_presentation("medium-q8_0", "ggml-medium-q8_0.bin")
+        self.assertEqual(display, "ggml-medium-q8_0.bin")
+        self.assertEqual(hint, DEFAULT_PRIMARY_HINT)
+
+    def test_turbo_q5_k_gets_display_name_and_repetition_warning(self) -> None:
+        from speech_note.config import primary_model_presentation
+
+        display, hint = primary_model_presentation("large-v3-turbo-q5_k", "ggml-large-v3-turbo-q5_k.bin")
+        self.assertEqual(display, "Whisper Large V3 Turbo Q5_K")
+        self.assertIn("repeat", hint.lower())
+        self.assertIn("ignore it", hint.lower())
+
+    def test_warning_reaches_the_cleanup_prompt(self) -> None:
+        from speech_note.config import primary_model_presentation
+        from speech_note.organizer import build_user_prompt
+
+        display, hint = primary_model_presentation("large-v3-turbo-q5_k", "x.bin")
+        prompt = build_user_prompt([
+            Transcript("primary", display, "asr-final", "hello world", quality_hint=hint),
+        ])
+        self.assertIn("Whisper Large V3 Turbo Q5_K", prompt)
+        self.assertIn("tendency to repeat", prompt)
 
 
 class ModelConsentTests(unittest.TestCase):

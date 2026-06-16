@@ -24,6 +24,7 @@ from .config import (
     ARCHIVE_AUDIO_EXTENSIONS,
     ARCHIVE_TRANSCRIPT_EXTENSIONS,
     SUBPROCESS_SECONDARY_BACKENDS,
+    primary_model_presentation,
 )
 from .model import AsrOutcome, Transcript
 from .naming import unique_output_path
@@ -137,17 +138,18 @@ def run_primary_pass(
     if not text:
         outcome.error = "primary ASR produced no text"
         return outcome
-    model = (
+    effective = (
         transcriber.effective_model
         if isinstance(transcriber, WhisperCppTranscriber)
         else config.asr_model
     )
+    display_model, quality_hint = primary_model_presentation(config.asr_model, effective)
     outcome.transcript = Transcript(
         label="primary",
-        model=model,
+        model=display_model,
         kind="asr-final",
         text=text,
-        quality_hint="primary ASR pass; usually the most accurate source",
+        quality_hint=quality_hint,
     )
     return outcome
 

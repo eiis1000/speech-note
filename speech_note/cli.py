@@ -80,6 +80,7 @@ class Config:
     organizer_max_output_tokens: int
     organizer_gpu_layers: str
     organizer_kv_offload: bool
+    organizer_gguf: Path | None
     organizer_server_command: tuple[str, ...] | None
 
     def with_archive_contents(self, audio_path: Path, transcript_paths: list[Path]) -> "Config":
@@ -296,6 +297,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--organizer-gguf",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a local cleanup-LM GGUF, overriding the bundled gemma-4-E2B. Use a "
+            "stronger model if your hardware allows — required to clean up the looping that "
+            "--asr-model large-v3-turbo-q5_k tends to produce (gemma-E2B is too small for it). "
+            "Ignored when --organizer-server-command is given."
+        ),
+    )
+    parser.add_argument(
         "--organizer-server-command",
         nargs="*",
         default=None,
@@ -438,6 +450,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         organizer_max_output_tokens=max_output_tokens,
         organizer_gpu_layers=args.organizer_gpu_layers,
         organizer_kv_offload=args.organizer_kv_offload,
+        organizer_gguf=args.organizer_gguf,
         organizer_server_command=(
             tuple(args.organizer_server_command)
             if args.organizer_server_command is not None

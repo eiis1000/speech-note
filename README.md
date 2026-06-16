@@ -15,6 +15,11 @@ The pipeline for every run:
    `recording.latest.wav` (live capture only), `diagnostics.latest.json`, and a
    timestamped copy of each under `logs/`
 
+**A note for other users:** I highly recommend changing the settings to suit your
+hardware, and in particular if you have an OpenRouter API key and are not concerned
+with privacy **I recommend using the OpenRouter organizer path** rather than the 
+mildly-weak gemma-4-E2B default.
+
 Code layout: the `speech_note/` package is the program (`cli` → `pipeline` /
 `capture` → `transcribers` / `secondary` / `organizer`, with `session` holding
 the run record). Supporting modules: `config` (all defaults and the backend
@@ -176,6 +181,25 @@ whisper-cpp-download-ggml-model medium-q8_0
   index to pick a GPU); `python tools/whisper_cpp_probe.py` checks whether
   whisper-cli sees the Vulkan backend
 
+### `large-v3-turbo-q5_k` — available, but needs a strong cleanup LM
+
+`--asr-model large-v3-turbo-q5_k` is offered as an option, but **with a caveat**:
+on long recordings this model tends to *hallucinate repeats* — degenerate loops
+where a word or phrase is emitted many times in a row ("and and and …", "you can
+believe that it's an action." ×8). It is also no faster than `medium-q8_0` on an
+iGPU (turbo prunes only the decoder; the encoder — the bottleneck here — is
+unchanged), so on this machine there's no reason to prefer it. It's wired up
+mainly for people on hardware where it might pay off.
+
+The cleanup LM is expected to remove these loops (a second transcript from the
+secondary ASR won't corroborate the repetition, and the prompt tells the model to
+drop uncorroborated repeats — when you pick this model the cleanup prompt also
+gets an explicit warning about its looping). **The bundled gemma-4-E2B is too
+small to do this reliably** — it strips the worst loops but lets others through.
+So if you use `large-v3-turbo-q5_k`, pair it with a stronger cleanup model:
+`--organizer-gguf /path/to/bigger.gguf` for a larger local model (see
+[Cleanup LM](#cleanup-lm)), or `--online-paid` / `--online-free` for OpenRouter.
+
 Whisper-only run:
 
 ```sh
@@ -257,15 +281,21 @@ it from. A shell export always wins.
 
 **Local (default):** launches the bundled Vulkan `llama-server` on
 `127.0.0.1:8011` with the GGUF configured in `speech_note/config.py`
-(`DEFAULT_GGUF_MODEL`) — place a chat GGUF at that path (this is the one model
-that isn't auto-installed), or point elsewhere with `--organizer-server-command`.
+(`DEFAULT_GGUF_MODEL`, gemma-4-E2B) — place a chat GGUF at that path (this is the
+one model that isn't auto-installed). To run a **stronger local cleanup model**
+without touching the config or hand-writing a launch command, point
+`--organizer-gguf /path/to/model.gguf` at any chat GGUF; speech-note serves it
+with the same flags. (A bigger model is worth it if your hardware allows — and is
+effectively required to clean up the looping that `--asr-model
+large-v3-turbo-q5_k` produces, which gemma-E2B can't.) For full control over the
+server invocation, use `--organizer-server-command` instead.
 Run uses full layer offload and KV-cache offload to the GPU
 (~1.5x faster generation — measured 37 vs 24 tok/s on a 3.9k-token prompt). The
 old Gemma-4-GGUF/Vulkan slot-init hang that forced KV onto the CPU is fixed in
 the current llama.cpp; `--no-organizer-kv-offload` restores the workaround for
 older stacks. The model the server *says* it served is what gets recorded.
 
-**OpenRouter (long recordings):**
+**OpenRouter (better accuracy at faster speed):**
 
 ```sh
 export OPENROUTER_API_KEY=...   # checked at startup, not mid-run
@@ -301,8 +331,8 @@ the most out of better hardware.
   autoregressive transducer; its decode loop is dominated by per-step launch
   overhead unless you have NVIDIA's CUDA-graph conditional-node decoding, which
   doesn't exist on ROCm. On this iGPU the GPU path bottoms out around 18–21×
-  realtime. sherpa-onnx runs the *same* model's decode loop in C++ on the CPU at
-  48–70× — faster *and* it leaves the GPU free for the Whisper primary, so the two
+  realtime. sherpa-onnx runs the *same* model's decode loop on the CPU in C++
+  *and* it leaves the GPU free for the Whisper primary, so the two
   passes overlap (the iGPU is shared, so a GPU secondary would just serialize
   behind Whisper). On a discrete card with its own VRAM, neither constraint holds.
 - **Whisper and the cleanup LM use Vulkan**, the portable GPU backend that works on
@@ -325,9 +355,13 @@ the most out of better hardware.
 - **Whisper:** `whisper.cpp` has a CUDA build (or use a CUDA `faster-whisper` via
   `--asr-backend faster-whisper --asr-device cuda`); both are faster than Vulkan on
   NVIDIA. If you have a discrete GPU rather than an iGPU, you can also afford 
-  `large-v3` instead of `medium`.
-- **Cleanup LM:** point `llama.cpp` at CUDA, and/or run a bigger GGUF — with more
-  VRAM a 7–12B cleanup model is realistic. Or sidestep local entirely with
+  `large-v3` instead of `medium` and the larger organizer required to handle the
+  hallucinated repetitions thereof.
+- **Cleanup LM:** point `llama.cpp` at CUDA and run a bigger GGUF — with more
+  VRAM a 7–12B cleanup model is realistic. Just pass `--organizer-gguf
+  /path/to/model.gguf` (no config edit needed). A stronger cleanup model also
+  matters if you use `--asr-model large-v3-turbo-q5_k`, whose hallucinated repeats
+  the bundled gemma-E2B can't fully remove. Or sidestep local entirely with
   `--online-paid` / `--online-free` (OpenRouter).
 - **Quantization:** more memory means you can move up from int8/q8 to fp16 or
   larger checkpoints for quality.
