@@ -149,12 +149,22 @@ class Session:
                 return transcript
         return None
 
+    def asr_transcripts(self) -> list["Transcript"]:
+        """Final ASR transcripts in collection order (no primary/secondary roles)."""
+        return [t for t in self.transcripts if t.kind == "asr-final"]
+
     def raw_text(self) -> str:
-        primary = self.transcript_by_label("primary") or self.transcript_by_label("live")
-        if primary is not None:
-            return primary.text
+        # The raw/fallback transcript is the first ASR source in collection order
+        # (order is a soft preference, not a type), then the live preview, then any
+        # user-supplied text.
         for transcript in self.transcripts:
-            if transcript.kind in {"asr-final", "asr-live", "user"}:
+            if transcript.kind == "asr-final":
+                return transcript.text
+        live = self.transcript_by_label("live")
+        if live is not None:
+            return live.text
+        for transcript in self.transcripts:
+            if transcript.kind in {"asr-live", "user"}:
                 return transcript.text
         return ""
 

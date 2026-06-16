@@ -89,20 +89,20 @@ class ArchiveFullStackTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return run_archive_pipeline(config)
 
-    def _assert_primary_and_secondary_ran(self, session) -> None:
-        primary = session.transcript_by_label("primary")
-        self.assertIsNotNone(primary, "primary Whisper pass produced no transcript")
-        # The fixture says "testing ... live transcription"; Whisper should hear it.
-        self.assertIn("transcription", primary.text.lower())
-        secondary = session.transcript_by_label("secondary")
-        self.assertIsNotNone(secondary, "secondary ASR produced no transcript")
-        self.assertTrue(secondary.text.strip())
-        asr = {o.name: o for o in session.asr_outcomes}
-        self.assertTrue(asr["primary"].ok)
-        self.assertTrue(asr["secondary"].ok)
-        # Real timing was recorded for both passes.
-        self.assertIsNotNone(asr["primary"].seconds)
-        self.assertIsNotNone(asr["secondary"].seconds)
+    def _assert_both_asr_sources_ran(self, session) -> None:
+        # The default collection is two sources (whisper-cpp + sherpa); both should
+        # produce a transcript, with no primary/secondary roles.
+        transcripts = session.asr_transcripts()
+        self.assertEqual(len(transcripts), 2, "expected two ASR transcripts")
+        # The fixture says "testing ... live transcription"; the first source
+        # (whisper) should hear it.
+        self.assertIn("transcription", transcripts[0].text.lower())
+        self.assertTrue(transcripts[1].text.strip())
+        outcomes = [o for o in session.asr_outcomes if o.name.startswith("asr")]
+        self.assertEqual(len(outcomes), 2)
+        for outcome in outcomes:
+            self.assertTrue(outcome.ok)
+            self.assertIsNotNone(outcome.seconds)
 
     def test_off_mode_real_asr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -111,9 +111,9 @@ class ArchiveFullStackTests(unittest.TestCase):
             _build_archive(zip_path)
             session = self._run(tmp, zip_path, "--organizer-mode", "off")
             self.assertFalse(session.run_failed)
-            self._assert_primary_and_secondary_ran(session)
+            self._assert_both_asr_sources_ran(session)
             # "off" => clean output is the primary transcript verbatim.
-            self.assertEqual(session.cleanup.text, session.transcript_by_label("primary").text)
+            self.assertEqual(session.cleanup.text, session.asr_transcripts()[0].text)
             self.assertIn("transcription", (tmp / "clean.latest").read_text().lower())
             self.assertEqual(json.loads((tmp / "diagnostics.latest.json").read_text())["schema"], 2)
 
@@ -124,7 +124,7 @@ class ArchiveFullStackTests(unittest.TestCase):
             _build_archive(zip_path)
             session = self._run(tmp, zip_path, "--organizer-mode", "heuristic")
             self.assertFalse(session.run_failed)
-            self._assert_primary_and_secondary_ran(session)
+            self._assert_both_asr_sources_ran(session)
             self.assertEqual(session.cleanup.method, "heuristic")
             self.assertTrue(session.cleanup.text.strip())
 
@@ -148,7 +148,7 @@ class ArchiveFullStackTests(unittest.TestCase):
             _build_archive(zip_path)
             session = self._run(tmp, zip_path, "--organizer-mode", "llama")
             self.assertFalse(session.run_failed)
-            self._assert_primary_and_secondary_ran(session)
+            self._assert_both_asr_sources_ran(session)
             cleanup = session.cleanup
             self.assertEqual(cleanup.method, "llama")
             self.assertIsNone(cleanup.error)
@@ -209,13 +209,14 @@ class SecondarySherpaFullStackTests(unittest.TestCase):
         if not _have("ffmpeg"):
             raise unittest.SkipTest("ffmpeg not on PATH")
 
-    def test_sherpa_is_the_default_secondary_on_cpu(self) -> None:
+    def test_sherpa_is_in_the_default_collection_on_cpu(self) -> None:
         config = resolve_config(parse_args(["--organizer-mode", "off"]))
-        self.assertEqual(config.secondary_asr_backend, "sherpa")
-        self.assertEqual(config.secondary_asr_device, "cpu")
+        sherpa = next(s for s in config.asr_sources if s.backend == "sherpa")
+        self.assertEqual(sherpa.device, "cpu")
 
     def test_transcribes_long_audio_with_full_coverage(self) -> None:
-        from speech_note.secondary import run_secondary
+        from speech_note.asr import run_source
+        from speech_note.config import parse_asr_source
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
@@ -236,8 +237,10 @@ class SecondarySherpaFullStackTests(unittest.TestCase):
             )
             self.assertGreater(duration, 400.0)
             config = resolve_config(parse_args(["--organizer-mode", "off"]))
-            self.assertEqual(config.secondary_asr_backend, "sherpa")
-            outcome = run_secondary(config, clip, duration_seconds=duration)
+            outcome = run_source(
+                config, parse_asr_source("sherpa"), clip,
+                label="asr1", duration=duration, transcriber=None,
+            )
             self.assertTrue(
                 outcome.ok,
                 msg=f"sherpa failed on {duration:.0f}s: {outcome.error or outcome.skip_reason}",
@@ -273,14 +276,15 @@ class SecondaryCtcLongFormFullStackTests(unittest.TestCase):
         return out
 
     def test_ctc_chunk_window_under_position_cliff(self) -> None:
-        from speech_note.secondary import ctc_chunk_config
+        from speech_note.asr import ctc_chunk_config
 
         chunk_length, stride = ctc_chunk_config()
         self.assertEqual(chunk_length, 240.0)
         self.assertLess(stride, chunk_length)
 
     def test_transcribes_audio_past_the_position_cliff(self) -> None:
-        from speech_note.secondary import run_secondary
+        from speech_note.asr import run_source
+        from speech_note.config import parse_asr_source
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
@@ -293,13 +297,11 @@ class SecondaryCtcLongFormFullStackTests(unittest.TestCase):
                 ).stdout.strip()
             )
             self.assertGreater(duration, 400.0, "clip must exceed the position cliff")
-            config = resolve_config(
-                parse_args(
-                    ["--secondary-asr-backend", "ctc", "--secondary-asr-device", "cpu",
-                     "--organizer-mode", "off"]
-                )
+            config = resolve_config(parse_args(["--asr", "ctc@cpu", "--organizer-mode", "off"]))
+            outcome = run_source(
+                config, parse_asr_source("ctc@cpu"), clip,
+                label="asr1", duration=duration, transcriber=None,
             )
-            outcome = run_secondary(config, clip, duration_seconds=duration)
             self.assertTrue(
                 outcome.ok, msg=f"CTC failed on {duration:.0f}s: {outcome.error or outcome.skip_reason}"
             )

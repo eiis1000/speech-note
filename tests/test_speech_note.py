@@ -12,6 +12,7 @@ import json
 import os
 import struct
 import tempfile
+import types
 import unittest
 import wave
 import zipfile
@@ -28,6 +29,7 @@ from speech_note.organizer import (
     Organizer,
     build_user_prompt,
     default_server_command,
+    ensure_default_cleanup_model,
     request_timeout_seconds,
 )
 from speech_note.pipeline import (
@@ -36,14 +38,14 @@ from speech_note.pipeline import (
     extract_subtitle_text,
     extract_zip_safely,
     run_dry_text_pipeline,
-    should_parallelize_asr,
 )
-from speech_note.secondary import (
-    build_local_secondary_transcriber,
+from speech_note.asr import (
     build_subprocess_command,
+    build_transcriber,
     ctc_chunk_config,
-    run_secondary,
+    run_source,
 )
+from speech_note.config import ASR_BACKENDS, parse_asr_source
 from speech_note.session import ArtifactStore, Session
 from speech_note.transcribers import (
     SherpaTranscriber,
@@ -246,25 +248,26 @@ class NamingTests(unittest.TestCase):
 
 
 class ConfigResolutionTests(unittest.TestCase):
-    def test_secondary_model_defaults_per_backend(self) -> None:
-        # sherpa is the default backend.
-        self.assertEqual(make_config().secondary_asr_backend, "sherpa")
-        self.assertEqual(
-            make_config().secondary_asr_model,
-            "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
-        )
-        self.assertEqual(
-            make_config("--secondary-asr-backend", "onnx").secondary_asr_model,
-            "nemo-parakeet-tdt-0.6b-v2",
-        )
-        self.assertEqual(
-            make_config("--secondary-asr-backend", "ctc").secondary_asr_model,
-            "nvidia/parakeet-ctc-0.6b",
-        )
-        self.assertEqual(
-            make_config("--secondary-asr-backend", "crispasr").secondary_asr_model,
-            "parakeet-tdt-0.6b-v2-q4_k.gguf",
-        )
+    def test_default_collection_is_whisper_plus_sherpa(self) -> None:
+        sources = make_config().asr_sources
+        self.assertEqual([s.backend for s in sources], ["whisper-cpp", "sherpa"])
+        self.assertEqual(sources[0].model, "medium-q8_0")
+        self.assertEqual(sources[1].model, "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8")
+        # Different devices → they can overlap.
+        self.assertEqual([s.device_kind for s in sources], ["gpu", "cpu"])
+
+    def test_asr_flag_overrides_collection(self) -> None:
+        sources = make_config("--asr", "ctc@cpu").asr_sources
+        self.assertEqual([(s.backend, s.model, s.device) for s in sources],
+                         [("ctc", "nvidia/parakeet-ctc-0.6b", "cpu")])
+
+    def test_asr_flag_repeatable_and_comma_separated(self) -> None:
+        sources = make_config("--asr", "whisper-cpp:medium-q8_0", "--asr", "sherpa,ctc@cpu").asr_sources
+        self.assertEqual([s.backend for s in sources], ["whisper-cpp", "sherpa", "ctc"])
+
+    def test_model_defaults_per_backend(self) -> None:
+        self.assertEqual(parse_asr_source("onnx").model, "nemo-parakeet-tdt-0.6b-v2")
+        self.assertEqual(parse_asr_source("crispasr").model, "parakeet-tdt-0.6b-v2-q4_k.gguf")
 
     def test_offline_flag_forces_local_provider(self) -> None:
         config = make_config("--offline", "--organizer-mode", "llama")
@@ -362,27 +365,37 @@ class ConfigResolutionTests(unittest.TestCase):
             validate(make_config("--full-auto"))
 
 
-class ParallelismTests(unittest.TestCase):
-    def test_auto_parallel_when_devices_differ(self) -> None:
-        # Default: whisper.cpp on GPU + sherpa on CPU -> parallel.
-        self.assertTrue(should_parallelize_asr(make_config()))
+class AsrSourceTests(unittest.TestCase):
+    def test_device_kind_for_scheduling(self) -> None:
+        # whisper.cpp on GPU + sherpa on CPU -> different device groups, so they
+        # overlap; ctc defaults to CPU; crispasr forced to cpu is a cpu source.
+        self.assertEqual(parse_asr_source("whisper-cpp@gpu").device_kind, "gpu")
+        self.assertEqual(parse_asr_source("sherpa").device_kind, "cpu")
+        self.assertEqual(parse_asr_source("ctc").device_kind, "cpu")
+        self.assertEqual(parse_asr_source("ctc@cuda:0").device_kind, "gpu")
+        self.assertEqual(parse_asr_source("crispasr@cpu").device_kind, "cpu")
+        self.assertEqual(parse_asr_source("crispasr").device_kind, "gpu")
 
-    def test_auto_sequential_when_both_gpu(self) -> None:
-        config = make_config("--secondary-asr-backend", "crispasr")
-        self.assertFalse(should_parallelize_asr(config))
+    def test_default_device_per_backend(self) -> None:
+        # No @device -> the backend's natural device string.
+        self.assertEqual(parse_asr_source("whisper-cpp").device, "0")
+        self.assertEqual(parse_asr_source("sherpa").device, "cpu")
+        self.assertEqual(parse_asr_source("crispasr").device, "vulkan")
 
-    def test_ctc_default_runs_parallel_on_cpu(self) -> None:
-        # CTC defaults to CPU, so it overlaps the GPU primary instead of
-        # serializing on the shared iGPU.
-        self.assertTrue(should_parallelize_asr(make_config("--secondary-asr-backend", "ctc")))
-        # Forced onto the GPU it shares the iGPU with the primary -> sequential.
-        config = make_config("--secondary-asr-backend", "ctc", "--secondary-asr-device", "cuda:0")
-        self.assertFalse(should_parallelize_asr(config))
+    def test_unknown_backend_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_asr_source("not-a-backend")
 
-    def test_explicit_flag_overrides_auto(self) -> None:
-        self.assertFalse(should_parallelize_asr(make_config("--no-parallel-asr")))
-        config = make_config("--secondary-asr-backend", "crispasr", "--parallel-asr")
-        self.assertTrue(should_parallelize_asr(config))
+    def test_user_config_file_supplies_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "asr"
+            cfg.write_text("# my collection\nwhisper-cpp:small.en@gpu\nctc@cpu\n")
+            from speech_note import config as config_module
+
+            sources = config_module.load_user_asr_sources(cfg)
+        self.assertEqual([(s.backend, s.model, s.device, s.device_kind) for s in sources],
+                         [("whisper-cpp", "small.en", "gpu", "gpu"),
+                          ("ctc", "nvidia/parakeet-ctc-0.6b", "cpu", "cpu")])
 
 
 class WhisperCppNamingTests(unittest.TestCase):
@@ -393,7 +406,7 @@ class WhisperCppNamingTests(unittest.TestCase):
         )
 
 
-class SecondaryTests(unittest.TestCase):
+class AsrBackendTests(unittest.TestCase):
     def test_ctc_chunk_window_under_position_cliff(self) -> None:
         # CTC long-form striding: window stays under the model's ~400s position
         # limit, stride overlaps it. No length cap — any length is transcribed.
@@ -402,32 +415,18 @@ class SecondaryTests(unittest.TestCase):
         self.assertEqual(stride, 5.0)
         self.assertLess(stride, chunk_length)
 
-    def test_ctc_defaults_to_cpu_device(self) -> None:
-        # CTC on CPU is faster than its ROCm path here and overlaps the GPU
-        # primary; other backends keep the shared "auto" default.
-        self.assertEqual(make_config("--secondary-asr-backend", "ctc").secondary_asr_device, "cpu")
-        self.assertEqual(make_config("--secondary-asr-backend", "crispasr").secondary_asr_device, "auto")
-        self.assertEqual(
-            make_config("--secondary-asr-backend", "ctc", "--secondary-asr-device", "cuda:0").secondary_asr_device,
-            "cuda:0",
-        )
+    def test_registry_marks_subprocess_backends(self) -> None:
+        self.assertFalse(ASR_BACKENDS["onnx"].in_process)
+        self.assertFalse(ASR_BACKENDS["crispasr"].in_process)
+        self.assertTrue(ASR_BACKENDS["sherpa"].in_process)
+        self.assertTrue(ASR_BACKENDS["whisper-cpp"].in_process)
 
-    def test_sherpa_is_default_backend_on_cpu(self) -> None:
-        config = make_config()
-        self.assertEqual(config.secondary_asr_backend, "sherpa")
-        # CPU so it overlaps the GPU Whisper primary instead of serializing on the
-        # shared iGPU.
-        self.assertEqual(config.secondary_asr_device, "cpu")
-        self.assertEqual(
-            make_config("--secondary-asr-backend", "sherpa", "--secondary-asr-device", "cuda:0").secondary_asr_device,
-            "cuda:0",
-        )
-
-    def test_sherpa_is_in_process_not_subprocess(self) -> None:
-        # sherpa runs in-process; it must not be routed through the subprocess path.
+    def test_sherpa_builds_in_process_not_subprocess(self) -> None:
+        source = parse_asr_source("sherpa")
+        # In-process backends have no subprocess command.
         with self.assertRaises(ValueError):
-            build_subprocess_command(make_config(), Path("/tmp/audio.wav"))
-        transcriber = build_local_secondary_transcriber(make_config())
+            build_subprocess_command(make_config(), source, Path("/tmp/audio.wav"))
+        transcriber = build_transcriber(make_config(), source)
         assert isinstance(transcriber, SherpaTranscriber)
         self.assertEqual(transcriber.device, "cpu")
         self.assertEqual(
@@ -436,47 +435,61 @@ class SecondaryTests(unittest.TestCase):
 
     def test_onnx_command(self) -> None:
         command = build_subprocess_command(
-            make_config("--secondary-asr-backend", "onnx"), Path("/tmp/audio.wav")
+            make_config(), parse_asr_source("onnx"), Path("/tmp/audio.wav")
         )
         self.assertEqual(command[0], "onnx-asr")
         self.assertIn("nemo-parakeet-tdt-0.6b-v2", command)
         self.assertIn("/tmp/audio.wav", command)
 
     def test_crispasr_command_device_mapping(self) -> None:
-        config = make_config("--secondary-asr-backend", "crispasr")
-        command = build_subprocess_command(config, Path("/tmp/audio.wav"))
+        command = build_subprocess_command(
+            make_config(), parse_asr_source("crispasr"), Path("/tmp/audio.wav")
+        )
         self.assertEqual(command[0], "crispasr")
         self.assertIn("vulkan", command)
-        config = make_config("--secondary-asr-backend", "crispasr", "--secondary-asr-device", "cpu")
-        self.assertIn("cpu", build_subprocess_command(config, Path("/tmp/audio.wav")))
+        cpu_command = build_subprocess_command(
+            make_config(), parse_asr_source("crispasr@cpu"), Path("/tmp/audio.wav")
+        )
+        self.assertIn("cpu", cpu_command)
 
-    def test_unknown_backend_is_not_a_subprocess(self) -> None:
-        # crispasr/onnx are the only subprocess backends; in-process ones raise.
+    def test_in_process_backend_has_no_subprocess_command(self) -> None:
         with self.assertRaises(ValueError):
-            build_subprocess_command(make_config("--secondary-asr-backend", "ctc"), Path("/tmp/a.wav"))
+            build_subprocess_command(make_config(), parse_asr_source("ctc"), Path("/tmp/a.wav"))
 
-    def test_run_secondary_strips_parakeet_timestamps(self) -> None:
-        config = make_config("--secondary-asr-backend", "onnx")
+    def test_run_source_strips_parakeet_timestamps(self) -> None:
+        source = parse_asr_source("onnx")
         completed = mock.Mock(returncode=0, stdout="[ 0.0, 1.0]: hello [1.0, 2.0]: world\n", stderr="")
-        with mock.patch("speech_note.secondary.subprocess.run", return_value=completed):
-            outcome = run_secondary(config, Path("/tmp/a.wav"), duration_seconds=2.0)
+        with mock.patch("speech_note.asr.subprocess.run", return_value=completed):
+            outcome = run_source(
+                make_config(), source, Path("/tmp/a.wav"),
+                label="asr1", duration=2.0, transcriber=None,
+            )
         self.assertTrue(outcome.ok)
         self.assertEqual(outcome.transcript.text, "hello world")
-        self.assertEqual(outcome.transcript.label, "secondary")
+        self.assertEqual(outcome.transcript.label, "asr1")
+        self.assertEqual(outcome.transcript.model, "nemo-parakeet-tdt-0.6b-v2")
+        self.assertIsNone(outcome.transcript.quality_hint)  # un-noted source: no reliability claim
         self.assertIsNotNone(outcome.realtime_factor)
 
-    def test_run_secondary_can_keep_timestamps(self) -> None:
-        config = make_config("--secondary-asr-backend", "onnx", "--no-secondary-asr-strip-times")
+    def test_run_source_can_keep_timestamps(self) -> None:
+        config = make_config("--no-strip-asr-timestamps")
+        source = parse_asr_source("onnx")
         completed = mock.Mock(returncode=0, stdout="[ 0.0, 1.0]: hello\n", stderr="")
-        with mock.patch("speech_note.secondary.subprocess.run", return_value=completed):
-            outcome = run_secondary(config, Path("/tmp/a.wav"), duration_seconds=1.0)
+        with mock.patch("speech_note.asr.subprocess.run", return_value=completed):
+            outcome = run_source(
+                config, source, Path("/tmp/a.wav"),
+                label="asr1", duration=1.0, transcriber=None,
+            )
         self.assertEqual(outcome.transcript.text, "[ 0.0, 1.0]: hello")
 
-    def test_run_secondary_failure_is_an_error_outcome(self) -> None:
-        config = make_config("--secondary-asr-backend", "onnx")
+    def test_run_source_failure_is_an_error_outcome(self) -> None:
+        source = parse_asr_source("onnx")
         completed = mock.Mock(returncode=3, stdout="", stderr="model exploded")
-        with mock.patch("speech_note.secondary.subprocess.run", return_value=completed):
-            outcome = run_secondary(config, Path("/tmp/a.wav"), duration_seconds=1.0)
+        with mock.patch("speech_note.asr.subprocess.run", return_value=completed):
+            outcome = run_source(
+                make_config(), source, Path("/tmp/a.wav"),
+                label="asr1", duration=1.0, transcriber=None,
+            )
         self.assertFalse(outcome.ok)
         self.assertIn("model exploded", outcome.error)
         self.assertIsNone(outcome.skip_reason)
@@ -741,6 +754,43 @@ class ServerCommandTests(unittest.TestCase):
         self.assertEqual(config.organizer_gguf, Path("/models/big.gguf"))
         self.assertIsNone(make_config().organizer_gguf)
 
+    def test_ensure_default_cleanup_model_already_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "cleanup.gguf"
+            model.write_text("fake")
+            with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", model):
+                # Present already: returns True without importing/calling the downloader.
+                self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
+
+    def test_ensure_default_cleanup_model_declined(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "missing.gguf"
+            with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", model):
+                # Non-interactive without --auto-download declines, no download attempted.
+                self.assertFalse(
+                    ensure_default_cleanup_model(auto_yes=False, interactive=False)
+                )
+
+    def test_ensure_default_cleanup_model_downloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "sub" / "cleanup.gguf"
+
+            def fake_download(repo: str, filename: str, *, local_dir: str) -> str:
+                dest = Path(local_dir) / filename
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text("downloaded")
+                # the real model path is local_dir/<DEFAULT_GGUF_MODEL.name>; here we
+                # mirror that by writing the patched model path directly
+                model.write_text("downloaded")
+                return str(dest)
+
+            fake_hub = types.ModuleType("huggingface_hub")
+            fake_hub.hf_hub_download = fake_download  # type: ignore[attr-defined]
+            with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", model):
+                with mock.patch.dict("sys.modules", {"huggingface_hub": fake_hub}):
+                    self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
+            self.assertTrue(model.exists())
+
 
 class ArchiveTests(unittest.TestCase):
     def test_discover_archive_inputs(self) -> None:
@@ -937,29 +987,32 @@ class SessionTests(unittest.TestCase):
             self.assertTrue((tmp / "raw.latest").read_text().startswith("some text"))
 
 
-class PrimaryModelPresentationTests(unittest.TestCase):
-    def test_default_model_uses_filename_and_default_hint(self) -> None:
-        from speech_note.config import DEFAULT_PRIMARY_HINT, primary_model_presentation
+class AsrSourcePresentationTests(unittest.TestCase):
+    def test_unnoted_model_uses_filename_and_no_hint(self) -> None:
+        from speech_note.config import asr_source_presentation
 
-        display, hint = primary_model_presentation("medium-q8_0", "ggml-medium-q8_0.bin")
+        # An un-annotated source carries no reliability claim — no source is
+        # privileged as "most accurate".
+        display, hint = asr_source_presentation("medium-q8_0", "ggml-medium-q8_0.bin")
         self.assertEqual(display, "ggml-medium-q8_0.bin")
-        self.assertEqual(hint, DEFAULT_PRIMARY_HINT)
+        self.assertIsNone(hint)
 
     def test_turbo_q5_k_gets_display_name_and_repetition_warning(self) -> None:
-        from speech_note.config import primary_model_presentation
+        from speech_note.config import asr_source_presentation
 
-        display, hint = primary_model_presentation("large-v3-turbo-q5_k", "ggml-large-v3-turbo-q5_k.bin")
+        display, hint = asr_source_presentation("large-v3-turbo-q5_k", "ggml-large-v3-turbo-q5_k.bin")
         self.assertEqual(display, "Whisper Large V3 Turbo Q5_K")
+        assert hint is not None
         self.assertIn("repeat", hint.lower())
         self.assertIn("ignore it", hint.lower())
 
     def test_warning_reaches_the_cleanup_prompt(self) -> None:
-        from speech_note.config import primary_model_presentation
+        from speech_note.config import asr_source_presentation
         from speech_note.organizer import build_user_prompt
 
-        display, hint = primary_model_presentation("large-v3-turbo-q5_k", "x.bin")
+        display, hint = asr_source_presentation("large-v3-turbo-q5_k", "x.bin")
         prompt = build_user_prompt([
-            Transcript("primary", display, "asr-final", "hello world", quality_hint=hint),
+            Transcript("asr1", display, "asr-final", "hello world", quality_hint=hint),
         ])
         self.assertIn("Whisper Large V3 Turbo Q5_K", prompt)
         self.assertIn("tendency to repeat", prompt)

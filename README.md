@@ -6,11 +6,11 @@ The pipeline for every run:
 
 1. capture or load audio
 2. probe its duration once, then gain-normalize it
-3. transcribe with Whisper (primary) and optionally a secondary local ASR model —
-   in parallel when the two use different devices (the default pairing is
-   whisper.cpp on the GPU plus sherpa-onnx Parakeet on the CPU, which don't contend)
+3. transcribe with a collection of local ASR sources, running sources on
+   different devices concurrently (the default collection is whisper.cpp on the
+   GPU plus sherpa-onnx Parakeet on the CPU, which don't contend)
 4. clean the transcript with an LM that sees every source named, with its
-   model and a reliability hint
+   model and any reliability note
 5. commit all artifacts once: `raw.latest`, `clean.latest`,
    `recording.latest.wav` (live capture only), `diagnostics.latest.json`, and a
    timestamped copy of each under `logs/`
@@ -21,7 +21,7 @@ with privacy **I recommend using the OpenRouter organizer path** rather than the
 mildly-weak gemma-4-E2B default.
 
 Code layout: the `speech_note/` package is the program (`cli` → `pipeline` /
-`capture` → `transcribers` / `secondary` / `organizer`, with `session` holding
+`capture` → `transcribers` / `asr` / `organizer`, with `session` holding
 the run record). Supporting modules: `config` (all defaults and the backend
 tables), `models` (consent-gated model download), `hardware` (GPU detection),
 `audio` / `devices` / `terminal` / `naming` / `textproc`. `tools/` has the
@@ -29,13 +29,10 @@ whisper.cpp Vulkan probe and `tests/` the test suites.
 
 Extending it (where new code goes):
 
-- **a secondary ASR backend** — add it to `SECONDARY_BACKENDS` +
-  `SECONDARY_DEFAULT_MODELS` in `config.py`, then either a `*Transcriber` class in
-  `transcribers.py` (in-process, wired in `secondary.build_local_secondary_transcriber`)
-  or a command in `secondary.build_subprocess_command` (+ list it in
-  `SUBPROCESS_SECONDARY_BACKENDS`).
-- **a primary ASR backend** — a class in `transcribers.py`, selected in
-  `pipeline.build_primary_transcriber`.
+- **an ASR backend** — add a `BackendSpec` to the `ASR_BACKENDS` registry in
+  `config.py`, then either a `*Transcriber` class in `transcribers.py` (in-process,
+  wired in `asr.build_transcriber`) or, for an external CLI, a command in
+  `asr.build_subprocess_command` (with `in_process=False` in the registry).
 - **a cleanup provider** — extend `organizer.py` (`build_organizer` / `ChatClient`).
 - **a model that needs downloading** — detect "missing", then route through
   `models.require_consent` / `models.load_or_install` so it shares the install UX.
@@ -63,13 +60,13 @@ for PyTorch). They run on CPU anywhere, and NVIDIA users should read
 
 Models are fetched on first use, not bundled: the first run that needs a missing
 model prompts before downloading it (or pass `--auto-download` to skip the
-prompts). The one model with no auto-install source is the cleanup GGUF — see
-[Cleanup LM](#cleanup-lm). See "Models and network" below for the full policy.
+prompts) — including the default cleanup GGUF. See "Models and network" below for
+the full policy, and [Cleanup LM](#cleanup-lm) for using a different one.
 
 Inside the shell, `speech-note` runs the Nix-store copy of the code — edits to
 the working tree are picked up by `python -m speech_note` (or by re-entering
 the shell). Tests: `python -m unittest discover -s tests` (fast logic suite).
-The full-stack no-mock suite — real Whisper, real secondary ASR, real local
+The full-stack no-mock suite — real Whisper, real Parakeet ASR, real local
 cleanup LM — runs on demand and self-skips any stage whose model *or* test
 fixture is missing. It needs two recordings you supply: `tests/fixtures/short.wav`
 (~15 s) and `tests/fixtures/long.wav` (~50 s; looped past the 400 s mark to
@@ -84,13 +81,14 @@ speech-note --list-input-devices
 ```
 
 Models and network: nothing is bundled — models download on first use. When a
-required model (Whisper ggml, the secondary ASR model, etc.) is missing, an
+required model (Whisper ggml, a Parakeet ASR model, etc.) is missing, an
 interactive run **asks first** — "*&lt;model&gt; is not installed. download ~&lt;size&gt;
 into &lt;dir&gt;? [y/N]*" — and only fetches it if you agree. `--auto-download` answers
 yes to all (for scripts/`--full-auto`); a non-interactive run without it fails
-with a message naming the model and where to put it. The cleanup GGUF is the one
-exception: it has no pinned download source, so place it at the path in
-`config.DEFAULT_GGUF_MODEL` yourself (or use `--online-free` / `--online-paid`).
+with a message naming the model and where to put it. This includes the default
+cleanup GGUF (fetched from `config.DEFAULT_GGUF_REPO`); if its download fails or
+is declined, place a GGUF at `config.DEFAULT_GGUF_MODEL` yourself, point
+`--organizer-gguf` elsewhere, or use `--online-free` / `--online-paid`.
 After the first fetch everything runs offline.
 
 ## Terminal dictation
@@ -161,104 +159,105 @@ Replay an audio file through the live-capture path (timing/debugging):
 speech-note --replay-input-file rec.m4a --replay-speed 1.0
 ```
 
-## Primary ASR (Whisper)
+## ASR
 
-Default: `whisper.cpp` with Vulkan, model `medium-q8_0` from
-`~/.cache/whisper.cpp`. The first run prompts to download it; to pre-install (or
-fetch a different model) manually:
+A run transcribes the audio with an ordered **collection** of ASR sources and
+hands every transcript to the cleanup LM as a peer. Two independent engines that
+make different errors give the cleanup LM the cross-checks it needs to tell a real
+word from an ASR artifact. There is no "primary"/"secondary" — order is only a
+soft preference for which transcript is surfaced as the raw fallback when cleanup
+is off or fails.
 
-```sh
-mkdir -p ~/.cache/whisper.cpp && cd ~/.cache/whisper.cpp
-whisper-cpp-download-ggml-model medium-q8_0
-```
+The default collection is GPU Whisper plus CPU Parakeet:
 
-- `--asr-model tiny.en` etc. selects another ggml model (faster-whisper model
-  names are aliased automatically)
-- `--whisper-cpp-model /path/model.bin` uses an explicit file; diagnostics
-  record the file that actually ran, not the alias
-- `--asr-backend faster-whisper` is the CPU fallback
-- `--whisper-cpp-device cpu` forces CPU (default is GPU index 0; pass another
-  index to pick a GPU); `python tools/whisper_cpp_probe.py` checks whether
-  whisper-cli sees the Vulkan backend
+| source | model | runs on |
+|---|---|---|
+| `whisper-cpp` | `medium-q8_0` (ggml) | GPU (Vulkan) |
+| `sherpa` | `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8` | CPU |
 
-### `large-v3-turbo-q5_k` — available, but needs a strong cleanup LM
+They use different devices, so they run concurrently and the pair finishes in
+roughly the time of the slower one. Sources that share a device run sequentially
+within their device group.
 
-`--asr-model large-v3-turbo-q5_k` is offered as an option, but **with a caveat**:
-on long recordings this model tends to *hallucinate repeats* — degenerate loops
-where a word or phrase is emitted many times in a row ("and and and …", "you can
-believe that it's an action." ×8). It is also no faster than `medium-q8_0` on an
-iGPU (turbo prunes only the decoder; the encoder — the bottleneck here — is
-unchanged), so on this machine there's no reason to prefer it. It's wired up
-mainly for people on hardware where it might pay off.
+### Choosing the collection
 
-The cleanup LM is expected to remove these loops (a second transcript from the
-secondary ASR won't corroborate the repetition, and the prompt tells the model to
-drop uncorroborated repeats — when you pick this model the cleanup prompt also
-gets an explicit warning about its looping). **The bundled gemma-4-E2B is too
-small to do this reliably** — it strips the worst loops but lets others through.
-So if you use `large-v3-turbo-q5_k`, pair it with a stronger cleanup model:
-`--organizer-gguf /path/to/bigger.gguf` for a larger local model (see
-[Cleanup LM](#cleanup-lm)), or `--online-paid` / `--online-free` for OpenRouter.
-
-Whisper-only run:
+`--asr` adds a source. It is repeatable, and each value may be a comma-separated
+list. A source is `backend[:model][@device]`; the model and device are optional
+and fall back to the backend's defaults:
 
 ```sh
-speech-note --input-audio rec.m4a --no-secondary-asr --organizer-mode off
+speech-note --input-audio rec.m4a --asr whisper-cpp:small.en@gpu --asr sherpa
+speech-note --input-audio rec.m4a --asr 'whisper-cpp:medium-q8_0,ctc@cpu'
+speech-note --input-audio rec.m4a --asr sherpa --organizer-mode off   # one source, raw
 ```
 
-## Secondary ASR
+With no `--asr`, the collection comes from the user config file
+`~/.config/speech-note/asr` if present (one `backend[:model][@device]` per line,
+`#` comments allowed), otherwise the built-in default above.
 
-`--secondary-asr-backend` selects the engine; the model defaults to the standard
-one for that backend, so changing the backend never silently reuses a mismatched
-model name (override with `--secondary-asr-model`):
+Available backends:
 
 | backend | default model | runs on |
 |---|---|---|
-| `sherpa` (default) | `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8` | CPU (overlaps the GPU primary) |
+| `whisper-cpp` | `medium-q8_0` (ggml) | GPU (Vulkan); `@cpu` or a GPU index |
+| `faster-whisper` | `Systran/faster-whisper-medium.en` | CPU |
+| `sherpa` | `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8` | CPU |
+| `ctc` | `nvidia/parakeet-ctc-0.6b` | CPU (`@cuda:0` to force GPU) |
 | `onnx` | `nemo-parakeet-tdt-0.6b-v2` int8 | CPU |
 | `crispasr` | `parakeet-tdt-0.6b-v2-q4_k.gguf` | GPU (Vulkan) |
-| `ctc` | `nvidia/parakeet-ctc-0.6b` | CPU by default (overlaps the GPU primary; `--secondary-asr-device` to force GPU) |
 | `pocketsphinx` | bundled en-us | CPU |
 
-Secondary-only transcription of a file:
+Each source's model is fetched on first use (consent-gated; `--auto-download` to
+skip the prompt). Other knobs: `--whisper-cpp-model /path/model.bin` points
+whisper-cpp sources at an explicit ggml file (diagnostics record the file that
+actually ran); `--asr-cpu-threads` sets the CPU thread budget;
+`--no-strip-asr-timestamps` keeps Parakeet `[hh:mm:ss]` markers;
+`python tools/whisper_cpp_probe.py` checks whether whisper-cli sees Vulkan.
 
-```sh
-speech-note --secondary-only --input-audio rec.m4a
-speech-note --secondary-only --input-audio rec.m4a --secondary-asr-backend crispasr
-```
+### Backend notes
 
-Notes:
-
-- the default `sherpa` backend runs the same Parakeet-TDT-0.6B-v2 int8 model as
-  `onnx`, but decodes the transducer in C++ instead of onnx-asr's Python
-  per-segment loop. On the CPU that is ~3x faster (48–70x realtime here vs ~18x for
-  `onnx`), and it keeps the pass off the GPU so it overlaps the Vulkan Whisper
-  primary. Output carries punctuation and casing. There is **no length limit**:
-  silero VAD segments the audio (each segment capped at `SHERPA_MAX_SEGMENT_SECONDS`,
-  20s) so the FastConformer encoder never sees the long sequence that OOMs a single
-  full-attention pass; decoding is sequential, not batched (on the CPU, batching
+- **`sherpa`** decodes the Parakeet-TDT-0.6B-v2 transducer in C++ at ~48–70x
+  realtime on the CPU, with punctuation and casing. It has no length limit: silero
+  VAD segments the audio (each segment capped at `SHERPA_MAX_SEGMENT_SECONDS`, 20s)
+  so the FastConformer encoder never sees the long sequence that OOMs a single
+  full-attention pass. Decoding is sequential, not batched (on the CPU, batching
   only adds padding waste — it is a GPU occupancy lever). The model bundle and the
-  silero VAD file come from the Hugging Face cache (offline by default;
-  `--auto-download` fetches them once, ~650 MB)
-- the `onnx` backend is the same Parakeet-TDT model run through onnx-asr's Python
-  decode loop — kept as a portable fallback, but ~3x slower than `sherpa` on the
-  CPU. `crispasr` runs Parakeet-TDT on the GPU (Vulkan), useful only for
-  `--secondary-only` since it contends with the Whisper primary
-- the CTC backend has no length limit: audio past Parakeet CTC's ~400s
-  position-embedding cliff is transcribed by the HF pipeline's native long-form
-  striding (240s windows with a 5s stride), which windows the audio and stitches
-  at the logit level. The transformers Parakeet-CTC port omits
-  `config.inputs_to_logits_ratio`, which the pipeline needs to align strides
-  (without it only the first window survives — ~755 words for a 600s clip vs
-  ~1840); the backend sets it from the encoder subsampling factor x hop length
-  (8 x 160 = 1280)
-- a backend that finds no speech (e.g. its VAD saw none) is reported as a note,
-  separately from errors, in both the terminal output and diagnostics
+  silero VAD file are ~650 MB total.
+- **`onnx`** runs the same Parakeet-TDT model through onnx-asr's Python decode
+  loop — a portable fallback, ~3x slower than `sherpa` on the CPU. **`crispasr`**
+  runs Parakeet-TDT on the GPU (Vulkan).
+- **`ctc`** has no length limit: audio past Parakeet CTC's ~400s position-embedding
+  cliff is transcribed by the HF pipeline's native long-form striding (240s windows
+  with a 5s stride), windowing the audio and stitching at the logit level. The
+  transformers Parakeet-CTC port omits `config.inputs_to_logits_ratio`, which the
+  pipeline needs to align strides (without it only the first window survives —
+  ~755 words for a 600s clip vs ~1840); the backend sets it from the encoder
+  subsampling factor x hop length (8 x 160 = 1280).
+- A source that finds no speech (e.g. its VAD saw none) is reported as a note,
+  separately from errors, in both the terminal output and diagnostics.
+
+### `large-v3-turbo-q5_k` — available, but needs a strong cleanup LM
+
+`--asr whisper-cpp:large-v3-turbo-q5_k` is offered as a Whisper model option, but
+**with a caveat**: on long recordings it tends to *hallucinate repeats* —
+degenerate loops where a word or phrase is emitted many times in a row ("and and
+and …", "you can believe that it's an action." ×8). It is also no faster than
+`medium-q8_0` on an iGPU (turbo prunes only the decoder; the encoder — the
+bottleneck here — is unchanged), so on this hardware there is little reason to
+prefer it; it is wired up for machines where it might pay off.
+
+The cleanup LM is meant to remove these loops: another source in the collection
+won't corroborate the repetition, the prompt tells the model to drop uncorroborated
+repeats, and this model's transcript carries an explicit warning about its looping.
+**The bundled gemma-4-E2B is too small to do this reliably** — it strips the worst
+loops but lets others through. So pair `large-v3-turbo-q5_k` with a stronger cleanup
+model: `--organizer-gguf /path/to/bigger.gguf` for a larger local model (see
+[Cleanup LM](#cleanup-lm)), or `--online-paid` / `--online-free` for OpenRouter.
 
 ## Cleanup LM
 
 `--organizer-mode llama` (default) sends all sources to an OpenAI-compatible
-endpoint; `heuristic` is a cheap regex cleanup; `off` passes the primary
+endpoint; `heuristic` is a cheap regex cleanup; `off` passes the first ASR
 transcript through.
 
 **Connectivity presets** (work with or without `--full-auto`; explicit
@@ -281,14 +280,15 @@ it from. A shell export always wins.
 
 **Local (default):** launches the bundled Vulkan `llama-server` on
 `127.0.0.1:8011` with the GGUF configured in `speech_note/config.py`
-(`DEFAULT_GGUF_MODEL`, gemma-4-E2B) — place a chat GGUF at that path (this is the
-one model that isn't auto-installed). To run a **stronger local cleanup model**
-without touching the config or hand-writing a launch command, point
+(`DEFAULT_GGUF_MODEL`, gemma-4-E2B). It is fetched from `DEFAULT_GGUF_REPO` on
+first use like the other models (consent-gated; `--auto-download` to skip the
+prompt) — or place a GGUF at that path yourself. To run a **stronger local
+cleanup model** without touching the config or hand-writing a launch command, point
 `--organizer-gguf /path/to/model.gguf` at any chat GGUF; speech-note serves it
 with the same flags. (A bigger model is worth it if your hardware allows — and is
-effectively required to clean up the looping that `--asr-model
-large-v3-turbo-q5_k` produces, which gemma-E2B can't.) For full control over the
-server invocation, use `--organizer-server-command` instead.
+effectively required to clean up the looping that `--asr
+whisper-cpp:large-v3-turbo-q5_k` produces, which gemma-E2B can't.) For full control
+over the server invocation, use `--organizer-server-command` instead.
 Run uses full layer offload and KV-cache offload to the GPU
 (~1.5x faster generation — measured 37 vs 24 tok/s on a 3.9k-token prompt). The
 old Gemma-4-GGUF/Vulkan slot-init hang that forced KV onto the CPU is fixed in
@@ -327,14 +327,14 @@ the most out of better hardware.
 
 **What the AMD iGPU forced, and why:**
 
-- **Secondary ASR runs on the CPU (sherpa-onnx), not the GPU.** Parakeet-TDT is an
-  autoregressive transducer; its decode loop is dominated by per-step launch
+- **The Parakeet source runs on the CPU (sherpa-onnx), not the GPU.** Parakeet-TDT
+  is an autoregressive transducer; its decode loop is dominated by per-step launch
   overhead unless you have NVIDIA's CUDA-graph conditional-node decoding, which
   doesn't exist on ROCm. On this iGPU the GPU path bottoms out around 18–21×
   realtime. sherpa-onnx runs the *same* model's decode loop on the CPU in C++
-  *and* it leaves the GPU free for the Whisper primary, so the two
-  passes overlap (the iGPU is shared, so a GPU secondary would just serialize
-  behind Whisper). On a discrete card with its own VRAM, neither constraint holds.
+  *and* it leaves the GPU free for the Whisper source, so the two run concurrently
+  (the iGPU is shared, so a second GPU source would just serialize behind Whisper).
+  On a discrete card with its own VRAM, neither constraint holds.
 - **Whisper and the cleanup LM use Vulkan**, the portable GPU backend that works on
   AMD, via `whisper.cpp` and `llama.cpp`.
 - **Small, quantized models** (Whisper `medium-q8_0`, Parakeet int8, a 2B-class
@@ -346,22 +346,22 @@ the most out of better hardware.
 - **PyTorch:** for NVIDIA, swap `torchWithRocm` for the CUDA build in `flake.nix`'s
   `pythonEnv` (nixpkgs `python3Packages.torchWithCuda`). Only PyTorch-based paths
   need this; the defaults don't use PyTorch at all.
-- **Secondary ASR:** sherpa-onnx (CPU) is still excellent and keeps the GPU free,
-  so it's a fine default to keep. If you specifically want GPU TDT, sherpa-onnx
-  also has CUDA execution providers, and on NVIDIA the autoregressive decode is
-  fast (CUDA graphs) rather than overhead-bound. With dedicated VRAM you can also
-  drop the "secondary must be CPU to overlap the primary" rule and run both on the
-  GPU.
-- **Whisper:** `whisper.cpp` has a CUDA build (or use a CUDA `faster-whisper` via
-  `--asr-backend faster-whisper --asr-device cuda`); both are faster than Vulkan on
-  NVIDIA. If you have a discrete GPU rather than an iGPU, you can also afford 
-  `large-v3` instead of `medium` and the larger organizer required to handle the
-  hallucinated repetitions thereof.
+- **Parakeet:** sherpa-onnx (CPU) is excellent and keeps the GPU free, so it's a
+  fine default to keep. If you specifically want GPU TDT, sherpa-onnx also has CUDA
+  execution providers, and on NVIDIA the autoregressive decode is fast (CUDA graphs)
+  rather than overhead-bound. With dedicated VRAM you can run every source on the
+  GPU (`--asr whisper-cpp@gpu --asr ctc@cuda:0`) since they no longer have to share
+  one iGPU.
+- **Whisper:** `whisper.cpp` has a CUDA build (or use a CUDA faster-whisper source
+  via `--asr faster-whisper@cuda`); both are faster than Vulkan on NVIDIA. If you
+  have a discrete GPU rather than an iGPU, you can also afford `large-v3` instead of
+  `medium` and the larger organizer required to handle the hallucinated repetitions
+  thereof.
 - **Cleanup LM:** point `llama.cpp` at CUDA and run a bigger GGUF — with more
   VRAM a 7–12B cleanup model is realistic. Just pass `--organizer-gguf
   /path/to/model.gguf` (no config edit needed). A stronger cleanup model also
-  matters if you use `--asr-model large-v3-turbo-q5_k`, whose hallucinated repeats
-  the bundled gemma-E2B can't fully remove. Or sidestep local entirely with
+  matters if you use `--asr whisper-cpp:large-v3-turbo-q5_k`, whose hallucinated
+  repeats the bundled gemma-E2B can't fully remove. Or sidestep local entirely with
   `--online-paid` / `--online-free` (OpenRouter).
 - **Quantization:** more memory means you can move up from int8/q8 to fp16 or
   larger checkpoints for quality.

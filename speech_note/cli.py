@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 
 from . import config as defaults
+from .config import AsrSource
 from .devices import coerce_input_device, print_input_devices, select_input_device
 from .terminal import read_single_choice
 
@@ -46,29 +47,17 @@ class Config:
     artifacts_dir: Path
     archive_dir: Path
     full_auto: bool
-    # primary ASR
-    asr_backend: str
-    asr_model: str
-    asr_device: str
-    asr_compute_type: str
+    # ASR: an ordered collection of sources, all fed to the cleanup LM as peers.
+    asr_sources: tuple[AsrSource, ...]
+    asr_compute_type: str  # faster-whisper compute type (applies to faster-whisper sources)
     asr_cpu_threads: int
     live_asr_cpu_threads: int
     whisper_cpp_binary: Path | None
-    whisper_cpp_model: Path | None
-    whisper_cpp_device: int
-    whisper_cpp_gpu: bool
-    # secondary ASR
-    secondary_asr_enabled: bool
-    secondary_asr_backend: str
-    secondary_asr_model: str
-    secondary_asr_device: str
-    secondary_asr_strip_times: bool
-    secondary_only: bool
-    # shared ASR
+    whisper_cpp_model: Path | None  # explicit ggml path, applied to whisper-cpp sources
+    strip_asr_timestamps: bool
     language: str
     auto_download: bool
     download_root: Path | None
-    parallel_final_asr: bool | None  # None = auto (parallel when devices differ)
     # organizer
     organizer_mode: str
     organizer_provider: str
@@ -185,57 +174,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "temporary directory."
         ),
     )
-    # primary ASR
+    # ASR collection
     parser.add_argument(
-        "--asr-backend",
-        choices=["faster-whisper", "whisper-cpp"],
-        default=defaults.DEFAULT_ASR_BACKEND,
+        "--asr",
+        action="append",
+        default=None,
+        metavar="BACKEND[:MODEL][@DEVICE]",
+        help=(
+            "An ASR source to add to the collection. Repeatable, and each value may be a "
+            "comma-separated list, e.g. --asr whisper-cpp:medium-q8_0@gpu --asr sherpa, or "
+            "--asr 'whisper-cpp,ctc@cpu'. Model and device are optional (backend defaults "
+            "apply). Backends: " + ", ".join(sorted(defaults.ASR_BACKENDS)) + ". "
+            "If omitted, the collection comes from the user config file "
+            f"({defaults.USER_ASR_FILE}) or the built-in default (whisper-cpp + sherpa). "
+            "All sources are fed to the cleanup LM as peers; order is only a soft preference "
+            "for which transcript is the raw fallback."
+        ),
     )
-    parser.add_argument("--asr-model", default=defaults.DEFAULT_ASR_MODEL)
-    parser.add_argument("--asr-device", default="cpu")
     parser.add_argument("--asr-compute-type", default="int8")
     parser.add_argument("--asr-cpu-threads", type=int, default=defaults.DEFAULT_ASR_CPU_THREADS)
     parser.add_argument("--live-asr-cpu-threads", type=int, default=2)
     parser.add_argument("--whisper-cpp-binary", type=Path, default=None)
-    parser.add_argument("--whisper-cpp-model", type=Path, default=None)
     parser.add_argument(
-        "--whisper-cpp-device",
-        default="0",
-        help="Whisper.cpp device: 'cpu', or a GPU index (default 0 = first GPU).",
-    )
-    # secondary ASR
-    parser.add_argument(
-        "--secondary-asr", dest="secondary_asr_enabled",
-        action=argparse.BooleanOptionalAction, default=True,
-        help="Run a secondary ASR pass alongside Whisper (default: on).",
+        "--whisper-cpp-model", type=Path, default=None,
+        help="Explicit ggml model file, applied to whisper-cpp sources.",
     )
     parser.add_argument(
-        "--secondary-asr-backend",
-        choices=sorted(defaults.SECONDARY_BACKENDS),
-        default=defaults.DEFAULT_SECONDARY_ASR_BACKEND,
+        "--strip-asr-timestamps", action=argparse.BooleanOptionalAction, default=True,
+        help="Strip Parakeet [hh:mm:ss] timestamps from ASR output (default: on).",
     )
-    parser.add_argument(
-        "--secondary-asr-model",
-        default=None,
-        help="Defaults to the standard model for the chosen backend.",
-    )
-    parser.add_argument(
-        "--secondary-asr-device",
-        default=None,
-        help=(
-            "Device for in-process secondary backends. Default: cpu for sherpa and ctc "
-            "(so they overlap the GPU primary pass and avoid ROCm init overhead), auto otherwise."
-        ),
-    )
-    parser.add_argument(
-        "--secondary-asr-strip-times", action=argparse.BooleanOptionalAction, default=True
-    )
-    parser.add_argument(
-        "--secondary-only",
-        action="store_true",
-        help="Run only the secondary ASR backend on --input-audio and print its transcript.",
-    )
-    # shared ASR
     parser.add_argument("--language", default="en")
     parser.add_argument(
         "--auto-download",
@@ -244,13 +211,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Allow model loaders to download missing files (default: local caches only).",
     )
     parser.add_argument("--download-root", type=Path, default=None)
-    parser.add_argument(
-        "--parallel-asr",
-        dest="parallel_final_asr",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Default: automatic — parallel when primary and secondary use different devices.",
-    )
     # connectivity presets: bundle organizer provider + model list. ASR stays local
     # in every mode (no usable OpenRouter ASR beats local whisper+sherpa). Explicit
     # --organizer-provider / --organizer-model still override. Work with/without --full-auto.
@@ -316,21 +276,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _parse_whisper_cpp_device(raw: str) -> tuple[bool, int]:
-    """Map the --whisper-cpp-device string to (use_gpu, gpu_index).
-
-    'cpu'/'none' disables the GPU; an integer selects that GPU index (and enables
-    the GPU). Defaults to GPU index 0.
-    """
-    text = raw.strip().lower()
-    if text in ("cpu", "none", ""):
-        return False, 0
-    try:
-        return True, int(text)
-    except ValueError:
-        raise SystemExit(
-            f"--whisper-cpp-device must be 'cpu' or a GPU index, got {raw!r}"
-        ) from None
+def resolve_asr_sources(args: argparse.Namespace) -> tuple[AsrSource, ...]:
+    """The ASR collection: --asr (CLI) > user config file > built-in default."""
+    if args.asr:
+        try:
+            return defaults.parse_asr_sources(args.asr)
+        except ValueError as exc:
+            raise SystemExit(f"--asr: {exc}") from None
+    from_file = defaults.load_user_asr_sources()
+    if from_file:
+        return from_file
+    return tuple(source.resolved() for source in defaults.DEFAULT_ASR_SOURCES)
 
 
 def resolve_config(args: argparse.Namespace) -> Config:
@@ -343,23 +299,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
     elif connectivity in ("online-free", "online-paid"):
         args.organizer_provider = "openrouter"
 
-    secondary_model = args.secondary_asr_model
-    if secondary_model is None:
-        secondary_model = defaults.SECONDARY_DEFAULT_MODELS[args.secondary_asr_backend]
-
-    secondary_device = args.secondary_asr_device
-    if secondary_device is None:
-        # sherpa and CTC run fastest on the CPU here: "auto" would land them on the
-        # ROCm GPU, which shares the iGPU with the Vulkan primary (so they serialize)
-        # and pays heavy init overhead. CPU is faster and overlaps the GPU primary.
-        cpu_default_backends = {"sherpa", "ctc"}
-        secondary_device = (
-            "cpu"
-            if args.secondary_asr_backend in cpu_default_backends
-            else defaults.DEFAULT_SECONDARY_ASR_DEVICE
-        )
-
-    whisper_cpp_gpu, whisper_cpp_device = _parse_whisper_cpp_device(args.whisper_cpp_device)
+    asr_sources = resolve_asr_sources(args)
 
     if args.organizer_provider == "openrouter":
         api_base = args.organizer_api_base or defaults.DEFAULT_OPENROUTER_API_BASE
@@ -420,26 +360,16 @@ def resolve_config(args: argparse.Namespace) -> Config:
         artifacts_dir=artifacts_dir,
         archive_dir=artifacts_dir / "logs",
         full_auto=args.full_auto,
-        asr_backend=args.asr_backend,
-        asr_model=args.asr_model,
-        asr_device=args.asr_device,
+        asr_sources=asr_sources,
         asr_compute_type=args.asr_compute_type,
         asr_cpu_threads=args.asr_cpu_threads,
         live_asr_cpu_threads=args.live_asr_cpu_threads,
         whisper_cpp_binary=args.whisper_cpp_binary,
         whisper_cpp_model=args.whisper_cpp_model,
-        whisper_cpp_device=whisper_cpp_device,
-        whisper_cpp_gpu=whisper_cpp_gpu,
-        secondary_asr_enabled=args.secondary_asr_enabled,
-        secondary_asr_backend=args.secondary_asr_backend,
-        secondary_asr_model=secondary_model,
-        secondary_asr_device=secondary_device,
-        secondary_asr_strip_times=args.secondary_asr_strip_times,
-        secondary_only=args.secondary_only,
+        strip_asr_timestamps=args.strip_asr_timestamps,
         language=args.language,
         auto_download=args.auto_download,
         download_root=args.download_root,
-        parallel_final_asr=args.parallel_final_asr,
         organizer_mode=args.organizer_mode,
         organizer_provider=args.organizer_provider,
         organizer_api_base=api_base,
@@ -480,8 +410,6 @@ def validate(config: Config) -> None:
         )
     if config.secondary_transcript is not None and config.primary_transcript is None:
         raise SystemExit("--secondary-transcript requires --primary-transcript")
-    if config.secondary_only and config.input_file is None:
-        raise SystemExit("--secondary-only requires --input-audio")
     if config.full_auto and all(value is None for value in inputs) and config.input_device is None:
         raise SystemExit(
             "--full-auto needs --input-audio, --input-archive, --replay-input-file, "
@@ -549,9 +477,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import pipeline
 
-    if config.secondary_only:
-        session = pipeline.run_secondary_only(config)
-    elif config.primary_transcript is not None:
+    if config.primary_transcript is not None:
         session = pipeline.run_transcript_pipeline(config)
     elif config.input_archive is not None:
         session = pipeline.run_archive_pipeline(config)

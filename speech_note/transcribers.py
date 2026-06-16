@@ -515,8 +515,14 @@ class PocketSphinxTranscriber:
         return normalize_spacing(hypothesis.hypstr if hypothesis is not None else "")
 
 
-PrimaryTranscriber = FasterWhisperTranscriber | WhisperCppTranscriber
-LocalSecondaryTranscriber = SherpaTranscriber | CTCTranscriber | PocketSphinxTranscriber
+# Every transcriber exposes transcribe_file(path, language[, duration_seconds]) -> str.
+AsrTranscriber = (
+    FasterWhisperTranscriber
+    | WhisperCppTranscriber
+    | SherpaTranscriber
+    | CTCTranscriber
+    | PocketSphinxTranscriber
+)
 
 
 def thread_env(cpu_threads: int) -> dict[str, str]:

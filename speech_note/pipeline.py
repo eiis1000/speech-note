@@ -7,7 +7,6 @@ computes.
 
 from __future__ import annotations
 
-import concurrent.futures
 import contextlib
 import re
 import shutil
@@ -19,20 +18,15 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .asr import build_transcribers, ensure_loaded, run_asr_collection
 from .audio import normalize_audio_for_asr, probe_duration_seconds
 from .config import (
     ARCHIVE_AUDIO_EXTENSIONS,
     ARCHIVE_TRANSCRIPT_EXTENSIONS,
-    SUBPROCESS_SECONDARY_BACKENDS,
-    primary_model_presentation,
 )
-from .model import AsrOutcome, Transcript
+from .model import Transcript
 from .naming import unique_output_path
 from .organizer import Organizer, build_organizer
-from .secondary import (
-    build_local_secondary_transcriber,
-    run_secondary,
-)
 from .session import ArtifactStore, Session
 from .terminal import (
     copy_with_wl_copy,
@@ -41,117 +35,14 @@ from .terminal import (
     short_label,
     status_timer,
 )
-from .transcribers import (
-    FasterWhisperTranscriber,
-    PrimaryTranscriber,
-    WhisperCppTranscriber,
-)
+from .transcribers import WhisperCppTranscriber
 
 if TYPE_CHECKING:
+    from .asr import Transcriber
     from .cli import Config
-    from .transcribers import LocalSecondaryTranscriber
 
 
 # --- building blocks ---
-
-
-def build_primary_transcriber(config: "Config", *, live: bool = False) -> PrimaryTranscriber:
-    if live:
-        # Live preview always uses a small resident faster-whisper model: a
-        # per-segment whisper.cpp subprocess would reload the model and
-        # re-initialize the GPU for every utterance.
-        from .config import LIVE_ASR_MODEL
-
-        return FasterWhisperTranscriber(
-            model_name=LIVE_ASR_MODEL,
-            device="cpu",
-            compute_type="int8",
-            cpu_threads=config.live_asr_cpu_threads,
-            download_root=config.download_root,
-        )
-    if config.asr_backend == "whisper-cpp":
-        return WhisperCppTranscriber(
-            model_name=config.asr_model,
-            model_path=config.whisper_cpp_model,
-            binary=config.whisper_cpp_binary,
-            cpu_threads=config.asr_cpu_threads,
-            device=config.whisper_cpp_device,
-            use_gpu=config.whisper_cpp_gpu,
-            auto_download=config.auto_download,
-        )
-    return FasterWhisperTranscriber(
-        model_name=config.asr_model,
-        device=config.asr_device,
-        compute_type=config.asr_compute_type,
-        cpu_threads=config.asr_cpu_threads,
-        download_root=config.download_root,
-    )
-
-
-def primary_device_kind(config: "Config") -> str:
-    if config.asr_backend == "whisper-cpp":
-        return "gpu" if config.whisper_cpp_gpu else "cpu"
-    return "gpu" if config.asr_device.lower().startswith("cuda") else "cpu"
-
-
-def secondary_device_kind(config: "Config") -> str:
-    backend = config.secondary_asr_backend
-    device = config.secondary_asr_device.lower()
-    if backend in {"onnx", "pocketsphinx"}:
-        return "cpu"
-    if device == "cpu":
-        return "cpu"
-    return "gpu"
-
-
-def should_parallelize_asr(config: "Config") -> bool:
-    """Run primary and secondary concurrently when they use different devices.
-
-    --parallel-final-asr / --no-parallel-final-asr overrides; the default is
-    automatic because e.g. GPU whisper.cpp and CPU ONNX Parakeet do not contend.
-    """
-    if config.parallel_final_asr is not None:
-        return config.parallel_final_asr
-    if not config.secondary_asr_enabled:
-        return False
-    return primary_device_kind(config) != secondary_device_kind(config)
-
-
-def run_primary_pass(
-    config: "Config",
-    transcriber: PrimaryTranscriber,
-    audio_path: Path,
-    *,
-    duration_seconds: float | None,
-) -> AsrOutcome:
-    outcome = AsrOutcome(name="primary")
-    started = time.monotonic()
-    try:
-        text = transcriber.transcribe_file(audio_path, config.language)
-    except Exception as exc:
-        outcome.error = str(exc)
-        outcome.seconds = time.monotonic() - started
-        return outcome
-    outcome.seconds = time.monotonic() - started
-    if duration_seconds and outcome.seconds:
-        outcome.realtime_factor = round(duration_seconds / outcome.seconds, 2)
-    if not text:
-        outcome.error = "primary ASR produced no text"
-        return outcome
-    effective = (
-        transcriber.effective_model
-        if isinstance(transcriber, WhisperCppTranscriber)
-        else config.asr_model
-    )
-    display_model, quality_hint = primary_model_presentation(config.asr_model, effective)
-    outcome.transcript = Transcript(
-        label="primary",
-        model=display_model,
-        kind="asr-final",
-        text=text,
-        quality_hint=quality_hint,
-    )
-    return outcome
 
 
 def run_final_asr(
@@ -159,30 +50,29 @@ def run_final_asr(
     session: Session,
     final_audio_path: Path,
     *,
-    primary_transcriber: PrimaryTranscriber | None,
-    secondary_transcriber: "LocalSecondaryTranscriber | None",
+    built: list[tuple[object, "Transcriber | None"]],
 ) -> None:
-    """Probe, normalize, then run the enabled ASR passes."""
+    """Probe, normalize, then run the ASR collection."""
     try:
         session.input_duration_seconds = round(probe_duration_seconds(final_audio_path), 3)
     except Exception as exc:
         session.add_error(f"could not determine audio duration: {exc}")
     duration = session.input_duration_seconds
 
-    run_secondary_pass = config.secondary_asr_enabled
-
+    # Preload in-process models while we normalize so loading overlaps audio I/O.
+    in_process = [transcriber for _source, transcriber in built if transcriber is not None]
     preload_thread: threading.Thread | None = None
-    if run_secondary_pass and secondary_transcriber is not None:
-        preload_errors: list[str] = []
+    if in_process:
 
         def preload() -> None:
             started = time.monotonic()
             try:
-                secondary_transcriber.ensure_loaded()
-            except Exception as exc:
-                preload_errors.append(str(exc))
+                for transcriber in in_process:
+                    ensure_loaded(transcriber)
+            except Exception:
+                pass  # a load failure surfaces (with its real error) when the source runs
             finally:
-                session.note_timing("secondary_preload_seconds", time.monotonic() - started)
+                session.note_timing("asr_preload_seconds", time.monotonic() - started)
 
         preload_thread = threading.Thread(target=preload, daemon=True)
         preload_thread.start()
@@ -206,63 +96,28 @@ def run_final_asr(
             session.note_timing("normalization_seconds", time.monotonic() - started)
             if preload_thread is not None:
                 preload_thread.join()
+            run_asr_collection(config, session, asr_audio_path, built=built, duration=duration)
 
-            def primary_job() -> AsrOutcome:
-                assert primary_transcriber is not None
-                return run_primary_pass(
-                    config, primary_transcriber, asr_audio_path, duration_seconds=duration
-                )
-
-            def secondary_job() -> AsrOutcome:
-                return run_secondary(
-                    config,
-                    asr_audio_path,
-                    duration_seconds=duration,
-                    transcriber=secondary_transcriber,
-                )
-
-            jobs: list[tuple[str, object]] = []
-            if primary_transcriber is not None:
-                jobs.append((config.asr_model, primary_job))
-            if run_secondary_pass:
-                jobs.append((config.secondary_asr_model, secondary_job))
-            if not jobs:
-                return
-
-            if len(jobs) > 1 and should_parallelize_asr(config):
-                labels = " + ".join(short_label(name) for name, _job in jobs)
-                with status_timer(f"Running ASR passes in parallel: {labels}"):
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as executor:
-                        futures = [executor.submit(job) for _name, job in jobs]  # type: ignore[arg-type]
-                        for future in concurrent.futures.as_completed(futures):
-                            session.record_asr_outcome(future.result())
-            else:
-                for index, (name, job) in enumerate(jobs, start=1):
-                    with status_timer(f"Running ASR pass {index}/{len(jobs)}: {short_label(name)}"):
-                        session.record_asr_outcome(job())  # type: ignore[operator]
-
-    if isinstance(primary_transcriber, WhisperCppTranscriber):
-        summary = primary_transcriber.backend_summary()
-        if summary:
-            session.note_fact("whisper_cpp_backend", summary)
+    for _source, transcriber in built:
+        if isinstance(transcriber, WhisperCppTranscriber):
+            summary = transcriber.backend_summary()
+            if summary:
+                session.note_fact("whisper_cpp_backend", summary)
+            break
 
 
 # --- cleanup stage ---
 
 
 def cleanup_sources(session: Session) -> list[Transcript]:
-    """Sources for the cleanup LM: final ASR results, the live transcript only
-    as a fallback when the primary final pass failed, then external inputs."""
-    sources: list[Transcript] = []
-    primary = session.transcript_by_label("primary")
-    live = session.transcript_by_label("live")
-    if primary is not None:
-        sources.append(primary)
-    elif live is not None:
-        sources.append(live)
-    secondary = session.transcript_by_label("secondary")
-    if secondary is not None:
-        sources.append(secondary)
+    """Sources for the cleanup LM: every final ASR transcript in collection order,
+    the live transcript only as a fallback when no final ASR pass succeeded, then
+    external inputs."""
+    sources: list[Transcript] = list(session.asr_transcripts())
+    if not sources:
+        live = session.transcript_by_label("live")
+        if live is not None:
+            sources.append(live)
     included = {id(source) for source in sources}
     sources.extend(
         t
@@ -340,12 +195,13 @@ def commit_artifacts(config: "Config", session: Session) -> None:
 
 def review_panels(config: "Config", session: Session) -> list[tuple[str, str]]:
     panels: list[tuple[str, str]] = []
-    primary = session.transcript_by_label("primary") or session.transcript_by_label("live")
-    if primary is not None:
-        panels.append((primary.model, primary.text))
-    secondary = session.transcript_by_label("secondary")
-    if secondary is not None:
-        panels.append((secondary.model, secondary.text))
+    asr = session.asr_transcripts()
+    if asr:
+        panels.extend((t.model, t.text) for t in asr)
+    else:
+        live = session.transcript_by_label("live")
+        if live is not None:
+            panels.append((live.model, live.text))
     cleanup = session.cleanup
     if cleanup is not None and cleanup.text:
         label = "clean"
@@ -356,15 +212,23 @@ def review_panels(config: "Config", session: Session) -> list[tuple[str, str]]:
 
 
 def print_review(panels: list[tuple[str, str]]) -> None:
-    if len(panels) >= 3:
+    # Typical cases keep the familiar layout: two ASR panels side by side, or two
+    # side by side plus the cleanup below. With more sources than that, stack them.
+    if len(panels) == 2:
+        print_side_by_side(panels[0][0], panels[0][1], panels[1][0], panels[1][1])
+    elif len(panels) == 3:
         print_side_by_side(panels[0][0], panels[0][1], panels[1][0], panels[1][1])
         print()
         print(panels[2][0])
         print()
         print(panels[2][1])
         print()
-    elif len(panels) == 2:
-        print_side_by_side(panels[0][0], panels[0][1], panels[1][0], panels[1][1])
+    else:
+        for title, text in panels:
+            print(title)
+            print()
+            print(text)
+            print()
 
 
 def choose_and_copy(session: Session, panels: list[tuple[str, str]]) -> None:
@@ -524,17 +388,10 @@ def run_file_pipeline(config: "Config") -> Session:
     session = Session(config)
     organizer, supervisor = build_organizer(config)
     load_extra_transcripts(config, session)
-    primary_transcriber = build_primary_transcriber(config)
-    secondary_transcriber = maybe_local_secondary(config)
+    built = build_transcribers(config)
     prewarm = start_organizer_prewarm(config, organizer)
     try:
-        run_final_asr(
-            config,
-            session,
-            config.input_file,
-            primary_transcriber=primary_transcriber,
-            secondary_transcriber=secondary_transcriber,
-        )
+        run_final_asr(config, session, config.input_file, built=built)
         finalize(config, session, organizer)
     finally:
         if prewarm is not None:
@@ -542,14 +399,6 @@ def run_file_pipeline(config: "Config") -> Session:
         if supervisor is not None:
             supervisor.close()
     return session
-
-
-def maybe_local_secondary(config: "Config") -> "LocalSecondaryTranscriber | None":
-    if not config.secondary_asr_enabled:
-        return None
-    if config.secondary_asr_backend in SUBPROCESS_SECONDARY_BACKENDS:
-        return None
-    return build_local_secondary_transcriber(config)
 
 
 def start_organizer_prewarm(config: "Config", organizer: Organizer) -> threading.Thread | None:
@@ -657,34 +506,4 @@ def run_dry_text_pipeline(config: "Config") -> Session:
     finally:
         if supervisor is not None:
             supervisor.close()
-    return session
-
-
-def run_secondary_only(config: "Config") -> Session:
-    """Run only the secondary backend on a file and print its transcript."""
-    assert config.input_file is not None
-    session = Session(config)
-    try:
-        session.input_duration_seconds = round(probe_duration_seconds(config.input_file), 3)
-    except Exception as exc:
-        session.add_error(f"could not determine audio duration: {exc}")
-    with tempfile.TemporaryDirectory(prefix="speech-note-secondary-only-") as tmp_dir:
-        audio_path = config.input_file
-        try:
-            normalized = Path(tmp_dir) / "normalized.wav"
-            normalize_audio_for_asr(config.input_file, normalized, sample_rate=config.sample_rate)
-            audio_path = normalized
-        except Exception as exc:
-            session.add_error(f"audio normalization failed; using original audio: {exc}")
-        outcome = run_secondary(
-            config, audio_path, duration_seconds=session.input_duration_seconds
-        )
-    session.record_asr_outcome(outcome)
-    if outcome.transcript is not None:
-        print(outcome.transcript.text)
-    elif outcome.skip_reason:
-        print(outcome.skip_reason, file=sys.stderr)
-    else:
-        print(f"secondary ASR failed: {outcome.error}", file=sys.stderr)
-    session.run_failed = outcome.error is not None
     return session

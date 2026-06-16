@@ -30,7 +30,10 @@ import requests
 from .config import (
     CLEANUP_MIN_LENGTH_RATIO,
     CLEANUP_TARGET_LENGTH_RATIO,
+    DEFAULT_GGUF_FILE,
     DEFAULT_GGUF_MODEL,
+    DEFAULT_GGUF_REPO,
+    DEFAULT_GGUF_SIZE_HINT,
     ORGANIZER_CONTEXT_SAFETY,
     ORGANIZER_MAX_REQUEST_TIMEOUT,
     ORGANIZER_MIN_REQUEST_TIMEOUT,
@@ -77,6 +80,43 @@ def default_server_command(
         # KV offload is on by default; --no-organizer-kv-offload restores this.
         command.append("--no-kv-offload")
     return command
+
+
+def ensure_default_cleanup_model(*, auto_yes: bool, interactive: bool | None = None) -> bool:
+    """Install the bundled cleanup GGUF if it's missing. Returns True if present.
+
+    Consent-gated like the ASR models (``--auto-download`` answers yes). Only the
+    default quant has a known source — a user-supplied ``--organizer-gguf`` path is
+    never fetched here. A download failure (offline, wrong repo) is non-fatal: it
+    returns False so the caller falls back to its existing "place a GGUF" notice.
+    """
+    if DEFAULT_GGUF_MODEL.exists():
+        return True
+    from .models import ModelInstallDeclined, require_consent
+
+    try:
+        require_consent(
+            f"cleanup LM '{DEFAULT_GGUF_FILE}' ({DEFAULT_GGUF_REPO})",
+            str(DEFAULT_GGUF_MODEL.parent),
+            size_hint=DEFAULT_GGUF_SIZE_HINT,
+            auto_yes=auto_yes,
+            interactive=interactive,
+        )
+    except ModelInstallDeclined:
+        return False
+    try:
+        from huggingface_hub import hf_hub_download
+
+        DEFAULT_GGUF_MODEL.parent.mkdir(parents=True, exist_ok=True)
+        hf_hub_download(
+            DEFAULT_GGUF_REPO,
+            DEFAULT_GGUF_FILE,
+            local_dir=str(DEFAULT_GGUF_MODEL.parent),
+        )
+    except Exception as exc:  # noqa: BLE001 — any fetch failure should fall back, not crash
+        print(f"note: could not download cleanup model: {exc}", file=sys.stderr)
+        return False
+    return DEFAULT_GGUF_MODEL.exists()
 
 
 def request_timeout_seconds(
@@ -596,15 +636,21 @@ def build_organizer(config: "Config") -> tuple[Organizer, LocalServerSupervisor 
         launch_command = config.organizer_server_command
         if launch_command is None:
             model_path = config.organizer_gguf or DEFAULT_GGUF_MODEL
+            have_server = bool(shutil.which("llama-server"))
+            # Auto-install the bundled default quant on a cache miss (consent-gated,
+            # like the ASR models). A user-supplied --organizer-gguf is never fetched
+            # — only the default has a known source.
+            if have_server and config.organizer_gguf is None and not model_path.exists():
+                ensure_default_cleanup_model(auto_yes=config.auto_download)
             launch_command = default_server_command(
                 context_tokens=config.organizer_context_tokens,
                 gpu_layers=config.organizer_gpu_layers,
                 kv_offload=config.organizer_kv_offload,
                 model_path=model_path,
             )
-            if launch_command is None and shutil.which("llama-server") and not model_path.exists():
-                # Unlike the ASR models, the cleanup GGUF has no pinned download
-                # source, so we can't auto-install it — point the user at the fix.
+            if launch_command is None and have_server and not model_path.exists():
+                # Reached only if auto-install was declined/unavailable or a custom
+                # --organizer-gguf path is missing — point the user at the fix.
                 print(
                     f"note: local cleanup model not found at {model_path}. "
                     "Place a GGUF there (or pass --organizer-gguf / --organizer-server-command), "

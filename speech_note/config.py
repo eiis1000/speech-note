@@ -8,6 +8,7 @@ parse time instead of inferred from values later.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from pathlib import Path
 
@@ -24,9 +25,13 @@ NORMALIZE_TARGET_RMS_DBFS = -20.0
 NORMALIZE_PEAK_CEILING_DBFS = -2.0
 NORMALIZE_MAX_GAIN = 12.0
 
-# --- primary ASR ---
-DEFAULT_ASR_BACKEND = "whisper-cpp"
-DEFAULT_ASR_MODEL = "medium-q8_0"
+# --- ASR ---
+# There is no "primary"/"secondary" ASR. A run transcribes the audio with an
+# ordered *collection* of ASR sources and hands every transcript to the cleanup
+# LM as a peer (in list order). Order is only a soft preference: it decides which
+# transcript is surfaced as the raw output when cleanup is off or fails. Quality
+# information is attached per-model and only when we have something to say (see
+# ASR_MODEL_NOTES) — most sources carry no reliability claim at all.
 LIVE_ASR_MODEL = "Systran/faster-whisper-tiny.en"
 # Bounded but not artificially capped at 8 like the old code was.
 DEFAULT_ASR_CPU_THREADS = max(2, min(16, os.cpu_count() or 2))
@@ -43,49 +48,156 @@ WHISPER_CPP_MODEL_ALIASES = {
     "medium-q8": "medium-q8_0",
 }
 
-DEFAULT_PRIMARY_HINT = "primary ASR pass; usually the most accurate source"
-# Per-primary-model presentation for the cleanup prompt: a friendly display name
-# and a reliability hint shown to the cleanup LM alongside the transcript. Keyed by
-# --asr-model. Models not listed use their resolved filename and the default hint.
+
+@dataclasses.dataclass(frozen=True)
+class BackendSpec:
+    """Static facts about an ASR backend, independent of any one run."""
+
+    default_model: str
+    in_process: bool  # False = runs as an external subprocess CLI (onnx-asr, crispasr)
+    device_kind: str  # "gpu" | "cpu": the device this backend naturally uses by default
+
+
+# The full backend registry. Each is just an ASR source; none is privileged.
+# sherpa-onnx runs the Parakeet-TDT-0.6B-v2 int8 transducer decode loop in C++
+# (~3x faster on CPU than onnx-asr's Python per-segment loop — 48-70x realtime,
+# measured), with punctuation/casing and no length limit, so it is a natural CPU
+# companion to a GPU Whisper source (the two devices don't contend → they overlap).
+ASR_BACKENDS: dict[str, BackendSpec] = {
+    "whisper-cpp": BackendSpec("medium-q8_0", in_process=True, device_kind="gpu"),
+    "faster-whisper": BackendSpec("Systran/faster-whisper-medium.en", in_process=True, device_kind="cpu"),
+    "sherpa": BackendSpec("csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", in_process=True, device_kind="cpu"),
+    "ctc": BackendSpec("nvidia/parakeet-ctc-0.6b", in_process=True, device_kind="cpu"),
+    "onnx": BackendSpec("nemo-parakeet-tdt-0.6b-v2", in_process=False, device_kind="cpu"),
+    "crispasr": BackendSpec("parakeet-tdt-0.6b-v2-q4_k.gguf", in_process=False, device_kind="gpu"),
+    "pocketsphinx": BackendSpec("pocketsphinx-en-us", in_process=True, device_kind="cpu"),
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class AsrSource:
+    """One member of the ASR collection: a backend, a model, and a device.
+
+    ``device`` is the literal value handed to the backend ("auto" resolves to the
+    backend's natural device). ``model`` empty means the backend's default model.
+    """
+
+    backend: str
+    model: str = ""
+    device: str = "auto"
+
+    def resolved(self) -> "AsrSource":
+        spec = ASR_BACKENDS[self.backend]
+        model = self.model or spec.default_model
+        device = self.device if self.device and self.device != "auto" else _default_device(self.backend)
+        return AsrSource(self.backend, model, device)
+
+    @property
+    def device_kind(self) -> str:
+        """'gpu' or 'cpu' — for scheduling: same-device sources can't overlap."""
+        d = self.device.lower()
+        if d == "cpu":
+            return "cpu"
+        if d in {"gpu", "vulkan", "auto"} or d.startswith("cuda") or d.isdigit():
+            return "gpu" if d != "auto" else ASR_BACKENDS[self.backend].device_kind
+        return ASR_BACKENDS[self.backend].device_kind
+
+
+def _default_device(backend: str) -> str:
+    """Backend-native default device string for the backend's natural device kind."""
+    kind = ASR_BACKENDS[backend].device_kind
+    if kind == "cpu":
+        return "cpu"
+    if backend == "whisper-cpp":
+        return "0"  # first GPU index
+    if backend == "crispasr":
+        return "vulkan"
+    return "auto"
+
+
+# The bundled default collection: GPU Whisper + CPU sherpa-onnx Parakeet. They use
+# different devices, so they run concurrently for free. Overridable per run via
+# --asr or a user config file (see parse_asr_sources / load_user_asr_sources).
+DEFAULT_ASR_SOURCES: tuple[AsrSource, ...] = (
+    AsrSource("whisper-cpp", "medium-q8_0", "gpu"),
+    AsrSource("sherpa", "", "cpu"),
+)
+
+
+def parse_asr_source(token: str) -> AsrSource:
+    """Parse one ``backend[:model][@device]`` spec into a resolved AsrSource."""
+    token = token.strip()
+    if not token:
+        raise ValueError("empty ASR source spec")
+    rest, _, device = token.partition("@")
+    backend, _, model = rest.partition(":")
+    backend = backend.strip()
+    if backend not in ASR_BACKENDS:
+        raise ValueError(
+            f"unknown ASR backend {backend!r}; choose from {', '.join(sorted(ASR_BACKENDS))}"
+        )
+    return AsrSource(backend, model.strip(), device.strip() or "auto").resolved()
+
+
+def parse_asr_sources(tokens: list[str]) -> tuple[AsrSource, ...]:
+    """Parse repeatable --asr values (each itself comma-separated) into a collection."""
+    sources: list[AsrSource] = []
+    for raw in tokens:
+        for piece in raw.split(","):
+            piece = piece.strip()
+            if piece:
+                sources.append(parse_asr_source(piece))
+    return tuple(sources)
+
+
+# A user config file listing the default ASR collection, one `backend[:model][@device]`
+# spec per line (blank lines and # comments ignored). Mirrors USER_ENV_FILE: it lets a
+# user change the default collection without editing source. CLI --asr overrides it.
+USER_ASR_FILE = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "speech-note" / "asr"
+
+
+def load_user_asr_sources(path: Path | None = None) -> tuple[AsrSource, ...]:
+    """Read the ASR collection from USER_ASR_FILE; empty tuple if absent/empty."""
+    path = path or USER_ASR_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
+        return ()
+    tokens = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    return parse_asr_sources(tokens)
+
+
+# Per-model presentation for the cleanup prompt: a friendly display name and an
+# optional reliability hint shown to the cleanup LM alongside the transcript.
+# Keyed by model. Models not listed get their plain model name and NO hint — we
+# only annotate a source when we actually have something to say about it.
 ASR_MODEL_NOTES: dict[str, dict[str, str]] = {
     "large-v3-turbo-q5_k": {
         "display": "Whisper Large V3 Turbo Q5_K",
         "hint": (
-            "primary ASR pass (Warning: this model has a tendency to repeat words "
-            "and phrases; if other transcripts do not corroborate a repetition, "
-            "ignore it)"
+            "Warning: this model has a tendency to repeat words and phrases; if "
+            "other transcripts do not corroborate a repetition, ignore it"
         ),
     },
 }
 
 
-def primary_model_presentation(asr_model: str, effective_model: str) -> tuple[str, str]:
-    """(display name, cleanup-prompt reliability hint) for the primary transcript."""
-    note = ASR_MODEL_NOTES.get(asr_model)
+def asr_source_presentation(model: str, effective_model: str | None = None) -> tuple[str, str | None]:
+    """(display name, optional cleanup-prompt hint) for an ASR transcript.
+
+    effective_model is the file that actually ran (e.g. the resolved whisper.cpp
+    ggml name); it is used as the display name when the model has no note.
+    """
+    note = ASR_MODEL_NOTES.get(model)
     if note is not None:
         return note["display"], note["hint"]
-    return effective_model, DEFAULT_PRIMARY_HINT
+    return (effective_model or model), None
 
-# --- secondary ASR ---
-SECONDARY_BACKENDS = ("sherpa", "onnx", "crispasr", "ctc", "pocketsphinx")
-# Backends that run as an external subprocess (their runtimes cannot share the
-# main process: onnx-asr and crispasr are CLIs).
-SUBPROCESS_SECONDARY_BACKENDS = frozenset({"onnx", "crispasr"})
-SECONDARY_DEFAULT_MODELS = {
-    "sherpa": "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
-    "onnx": "nemo-parakeet-tdt-0.6b-v2",
-    "crispasr": "parakeet-tdt-0.6b-v2-q4_k.gguf",
-    "ctc": "nvidia/parakeet-ctc-0.6b",
-    "pocketsphinx": "pocketsphinx-en-us",
-}
-# sherpa-onnx is the default secondary: same Parakeet-TDT-0.6B-v2 int8 model as
-# the onnx backend, but the transducer decode loop runs in C++ (~3x faster on CPU
-# than onnx-asr's Python per-segment loop — 48-70x realtime vs 18x, measured),
-# with punctuation/casing and no length limit (silero-VAD segments stay short, so
-# the FastConformer encoder never sees the long sequence that OOMs a single pass).
-# It runs on the CPU, overlapping the GPU Whisper primary.
-DEFAULT_SECONDARY_ASR_BACKEND = "sherpa"
-DEFAULT_SECONDARY_ASR_DEVICE = "auto"
+
 SECONDARY_OVERLAP_SECONDS = 5.0
 
 # sherpa-onnx VAD: silero, reusing the same ONNX file onnx-asr already caches so
@@ -109,6 +221,13 @@ DEFAULT_ORGANIZER_PROVIDER = "local"
 DEFAULT_LOCAL_API_BASE = "http://127.0.0.1:8011/v1/chat/completions"
 DEFAULT_LOCAL_MODEL_LABEL = "local-gguf"
 DEFAULT_GGUF_MODEL = Path.home() / ".cache/huggingface/gguf/gemma-4-E2B-it-UD-Q4_K_XL.gguf"
+# Hugging Face source for the bundled cleanup quant, so the default model can be
+# auto-installed (consent-gated) like the ASR models instead of being placed by
+# hand. Unsloth's dynamic (UD) GGUF repo; the file name matches DEFAULT_GGUF_MODEL.
+# Only the default quant is fetchable — a user-supplied --organizer-gguf is not.
+DEFAULT_GGUF_REPO = "unsloth/gemma-4-E2B-it-GGUF"
+DEFAULT_GGUF_FILE = DEFAULT_GGUF_MODEL.name
+DEFAULT_GGUF_SIZE_HINT = "2.5 GB"
 DEFAULT_ORGANIZER_CONTEXT_TOKENS = 65_536
 DEFAULT_ORGANIZER_MAX_OUTPUT_TOKENS = 16_384
 

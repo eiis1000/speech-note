@@ -64,11 +64,12 @@ def full_auto_source_stem(config: "Config") -> str:
     ]
     if config.input_archive is not None:
         stem = Path(config.input_archive).stem
-        tags = ["whisper"]
-        if config.secondary_asr_enabled:
-            tags.append(
-                transcript_source_tag(Path(f"recording.{config.secondary_asr_model}.txt"), "secondary")
-            )
+        tags: list[str] = []
+        for source in config.asr_sources:
+            if source.backend in {"whisper-cpp", "faster-whisper"}:
+                tags.append("whisper")
+            else:
+                tags.append(transcript_source_tag(Path(f"recording.{source.model}.txt"), source.backend))
         tags.extend(extra_tags)
         unique_tags = list(dict.fromkeys(tag for tag in tags if tag))
         return "-".join([stem, *unique_tags]) if unique_tags else stem

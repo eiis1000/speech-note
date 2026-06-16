@@ -37,21 +37,20 @@ import webrtcvad  # noqa: E402
 
 from .audio import convert_to_pcm_wav, write_wav
 from .config import LIVE_ASR_MODEL, SAMPLE_WIDTH
+from .asr import build_live_transcriber, build_transcriber, build_transcribers
 from .devices import choose_live_capture_sample_rate, choose_replay_capture_sample_rate
 from .model import Transcript
 from .organizer import build_organizer
 from .pipeline import (
-    build_primary_transcriber,
     finalize,
     load_extra_transcripts,
-    maybe_local_secondary,
     run_final_asr,
     start_organizer_prewarm,
 )
 from .session import Session
 from .terminal import cbreak_stdin, status_timer
 from .textproc import format_elapsed, normalize_spacing
-from .transcribers import PrimaryTranscriber, WhisperCppTranscriber
+from .transcribers import FasterWhisperTranscriber, WhisperCppTranscriber
 
 if TYPE_CHECKING:
     from .cli import Config
@@ -166,7 +165,7 @@ class CaptureRunner:
         self.replay_finished = threading.Event()
         self.live_chunks: list[str] = []
         self.live_transcriber_ready = threading.Event()
-        self.live_transcriber: PrimaryTranscriber | None = None
+        self.live_transcriber: FasterWhisperTranscriber | None = None
         self.recording_started_at: float | None = None
         self._terminal_lock = threading.Lock()
         self._status_width = shutil.get_terminal_size((120, 40)).columns
@@ -214,7 +213,7 @@ class CaptureRunner:
     def _load_live_transcriber(self) -> None:
         started = time.monotonic()
         try:
-            self.live_transcriber = build_primary_transcriber(self.config, live=True)
+            self.live_transcriber = build_live_transcriber(self.config)
         except Exception as exc:
             self.session.add_error(f"live preview ASR failed to initialize: {exc}")
         finally:
@@ -222,12 +221,15 @@ class CaptureRunner:
             self.live_transcriber_ready.set()
 
     def _prewarm_primary(self) -> None:
-        """Warm the final primary model while recording: page-cache the ggml
-        file for whisper.cpp (its subprocess cannot stay resident)."""
-        if self.config.asr_backend != "whisper-cpp":
+        """Warm a final whisper.cpp ASR source while recording: page-cache its ggml
+        file (the whisper.cpp subprocess cannot stay resident)."""
+        whisper_source = next(
+            (s for s in self.config.asr_sources if s.backend == "whisper-cpp"), None
+        )
+        if whisper_source is None:
             return
         try:
-            transcriber = build_primary_transcriber(self.config)
+            transcriber = build_transcriber(self.config, whisper_source)
         except Exception:
             return
         if isinstance(transcriber, WhisperCppTranscriber):
@@ -483,15 +485,9 @@ def run_capture_pipeline(config: "Config") -> Session:
             session.add_error(f"audio input failed: {exc}")
             raise SystemExit(f"audio input failed: {exc}") from None
         if recording_path is not None:
-            with status_timer(f"Loading {config.asr_model}"):
-                primary_transcriber = build_primary_transcriber(config)
-            run_final_asr(
-                config,
-                session,
-                recording_path,
-                primary_transcriber=primary_transcriber,
-                secondary_transcriber=maybe_local_secondary(config),
-            )
+            with status_timer("Loading ASR models"):
+                built = build_transcribers(config)
+            run_final_asr(config, session, recording_path, built=built)
         finalize(config, session, organizer)
     finally:
         if prewarm is not None:
