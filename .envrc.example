@@ -1,0 +1,8 @@
+# direnv config. Copy to `.envrc`, then run `direnv allow`.
+# (Or skip direnv entirely and just run `nix develop`.)
+
+# Only needed for the OpenRouter cleanup provider
+# (`--organizer-provider openrouter`); the local default needs no key.
+# export OPENROUTER_API_KEY='sk-or-...'
+
+use flake

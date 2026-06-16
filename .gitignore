@@ -1,0 +1,32 @@
+# Local environment
+.env
+.env.*
+.envrc
+.envrc.local
+.direnv/
+.codex
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Nix build outputs
+/result
+/result-*
+
+# Runtime outputs
+/raw.latest
+/clean.latest
+/diagnostics.latest.json
+/recording.latest.wav
+/speech_notes.txt
+/logs/
+
+# Test fixtures (user-supplied recordings; see tests/fixtures/README.md)
+/tests/fixtures/*.wav
+
+# Scratch outputs
+/tmp/

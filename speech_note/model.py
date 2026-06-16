@@ -1,0 +1,69 @@
+"""Domain types.
+
+Transcripts carry their provenance everywhere; outcomes are values, not
+string-prefixed error messages.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+
+@dataclasses.dataclass(frozen=True)
+class Transcript:
+    """A transcript with provenance.
+
+    label:   stable role of this source ("primary", "secondary", "live",
+             "extra:<filename>", "user").
+    model:   identifier of whatever produced it (ASR model name, "human", ...).
+    kind:    "asr-final" | "asr-live" | "external" | "user".
+    quality_hint: optional one-line description of known reliability, passed to
+             the cleanup LM so it can weigh sources by what we actually know.
+    """
+
+    label: str
+    model: str
+    kind: str
+    text: str
+    quality_hint: str | None = None
+
+    @property
+    def words(self) -> int:
+        return len(self.text.split())
+
+
+@dataclasses.dataclass
+class AsrOutcome:
+    """Result of one ASR pass: exactly one of transcript / skip / error."""
+
+    name: str
+    transcript: Transcript | None = None
+    skip_reason: str | None = None
+    error: str | None = None
+    seconds: float | None = None
+    realtime_factor: float | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.transcript is not None
+
+
+@dataclasses.dataclass
+class CleanupOutcome:
+    """Result of the cleanup stage."""
+
+    text: str = ""
+    method: str = "off"  # off | heuristic | llama | skipped-too-large | error | empty
+    served_model: str | None = None
+    finish_reason: str | None = None
+    flagged_short: bool = False
+    error: str | None = None
+    warning: str | None = None
+    estimated_prompt_tokens: int | None = None
+    requested_output_tokens: int | None = None
+    request_timeout: float | None = None
+    seconds: float | None = None
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.text) and self.error is None
