@@ -1,6 +1,6 @@
 # speech-text
 
-Local speech-to-text notes: microphone dictation and audio-file transcription.
+A vibe-coded local-first system for high-quality microphone dictation and audio-file transcription.
 
 The pipeline for every run:
 
