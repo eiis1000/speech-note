@@ -71,6 +71,7 @@ class Config:
     organizer_kv_offload: bool
     organizer_gguf: Path | None
     organizer_server_command: tuple[str, ...] | None
+    organizer_prewarm: bool
 
     def with_archive_contents(self, audio_path: Path, transcript_paths: list[Path]) -> "Config":
         derived = dataclasses.replace(
@@ -273,6 +274,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Command to launch a local OpenAI-compatible server (default: bundled llama-server).",
     )
+    # Undocumented: skip the background prewarm so the local cleanup LM is started
+    # only after ASR completes, instead of loading concurrently. On a shared iGPU
+    # (Vulkan whisper + Vulkan llama-server) the LM's slot init can stall while ASR
+    # holds the GPU; sequencing them avoids that contention at the cost of the
+    # prewarm overlap. Left as an escape hatch; default keeps the prewarm on.
+    parser.add_argument(
+        "--organizer-no-prewarm",
+        dest="organizer_prewarm",
+        action="store_false",
+        default=True,
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args(argv)
 
 
@@ -386,6 +399,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
             if args.organizer_server_command is not None
             else None
         ),
+        organizer_prewarm=args.organizer_prewarm,
     )
 
     if config.full_auto and config.output is None and config.input_archive is None:

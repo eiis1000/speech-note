@@ -426,6 +426,11 @@ def run_file_pipeline(config: "Config") -> Session:
 def start_organizer_prewarm(config: "Config", organizer: Organizer) -> threading.Thread | None:
     if config.organizer_mode != "llama" or organizer.supervisor is None:
         return None
+    if not config.organizer_prewarm:
+        # Sequencing escape hatch (--organizer-no-prewarm): don't load the cleanup
+        # LM concurrently with ASR; it starts lazily at the cleanup stage instead,
+        # after ASR has released the (possibly shared) GPU.
+        return None
     print("Loading cleanup LM in background", file=sys.stderr, flush=True)
 
     def prewarm() -> None:

@@ -40,6 +40,7 @@ from speech_note.pipeline import (
     extract_zip_safely,
     review_panels,
     run_dry_text_pipeline,
+    start_organizer_prewarm,
 )
 from speech_note.asr import (
     build_subprocess_command,
@@ -586,6 +587,30 @@ class InteractiveCaptureSetupTests(unittest.TestCase):
             _interactive_capture_setup(args)
         choice.assert_called_once()
         self.assertEqual(args.organizer_provider, "openrouter")
+
+
+class OrganizerPrewarmTests(unittest.TestCase):
+    @staticmethod
+    def _organizer() -> tuple[object, mock.Mock]:
+        supervisor = mock.Mock()
+        return types.SimpleNamespace(supervisor=supervisor), supervisor
+
+    def test_no_prewarm_flag_skips_background_load(self) -> None:
+        config = make_config("--organizer-mode", "llama", "--organizer-no-prewarm")
+        self.assertFalse(config.organizer_prewarm)
+        organizer, supervisor = self._organizer()
+        self.assertIsNone(start_organizer_prewarm(config, organizer))
+        supervisor.ensure_running.assert_not_called()
+
+    def test_default_prewarms_in_background(self) -> None:
+        config = make_config("--organizer-mode", "llama")
+        self.assertTrue(config.organizer_prewarm)
+        organizer, supervisor = self._organizer()
+        with redirect_stderr(io.StringIO()):
+            thread = start_organizer_prewarm(config, organizer)
+            self.assertIsNotNone(thread)
+            thread.join(timeout=5)
+        supervisor.ensure_running.assert_called_once()
 
 
 class OrganizerPromptTests(unittest.TestCase):
