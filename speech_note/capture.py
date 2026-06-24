@@ -213,7 +213,12 @@ class CaptureRunner:
     def _load_live_transcriber(self) -> None:
         started = time.monotonic()
         try:
-            self.live_transcriber = build_live_transcriber(self.config)
+            transcriber = build_live_transcriber(self.config)
+            # Force the (now lazy) load here in the background so the model is
+            # warm before the first segment arrives, and so a load failure is
+            # reported once — not per segment in the transcribe worker.
+            transcriber.ensure_loaded()
+            self.live_transcriber = transcriber
         except Exception as exc:
             self.session.add_error(f"live preview ASR failed to initialize: {exc}")
         finally:

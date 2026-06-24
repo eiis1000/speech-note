@@ -18,7 +18,7 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .asr import build_transcribers, ensure_loaded, run_asr_collection
+from .asr import build_transcribers, ensure_loaded, prepare_sources, run_asr_collection
 from .audio import normalize_audio_for_asr, probe_duration_seconds
 from .config import (
     ARCHIVE_AUDIO_EXTENSIONS,
@@ -40,6 +40,7 @@ from .transcribers import WhisperCppTranscriber
 if TYPE_CHECKING:
     from .asr import Transcriber
     from .cli import Config
+    from .config import AsrSource
 
 
 # --- building blocks ---
@@ -50,17 +51,29 @@ def run_final_asr(
     session: Session,
     final_audio_path: Path,
     *,
-    built: list[tuple[object, "Transcriber | None"]],
+    built: list[tuple["AsrSource", "Transcriber | None"]],
 ) -> None:
-    """Probe, normalize, then run the ASR collection."""
+    """Probe, prepare models, normalize, then run the ASR collection."""
     try:
         session.input_duration_seconds = round(probe_duration_seconds(final_audio_path), 3)
     except Exception as exc:
         session.add_error(f"could not determine audio duration: {exc}")
     duration = session.input_duration_seconds
 
-    # Preload in-process models while we normalize so loading overlaps audio I/O.
-    in_process = [transcriber for _source, transcriber in built if transcriber is not None]
+    # Make every source's model present first, on this thread, before any spinner
+    # starts — so download-consent prompts are visible and serial rather than
+    # buried under a status line or racing across ASR worker threads.
+    prepared = prepare_sources(built)
+
+    # Preload in-process models (whose download already happened above) while we
+    # normalize, so the heavy load overlaps audio I/O. A source that failed to
+    # prepare has no usable transcriber to load.
+    failed_labels = {label for label, _s, _t, prep_error in prepared if prep_error is not None}
+    in_process = [
+        transcriber
+        for label, _source, transcriber, _prep_error in prepared
+        if transcriber is not None and label not in failed_labels
+    ]
     preload_thread: threading.Thread | None = None
     if in_process:
 
@@ -96,7 +109,7 @@ def run_final_asr(
             session.note_timing("normalization_seconds", time.monotonic() - started)
             if preload_thread is not None:
                 preload_thread.join()
-            run_asr_collection(config, session, asr_audio_path, built=built, duration=duration)
+            run_asr_collection(config, session, asr_audio_path, prepared=prepared, duration=duration)
 
     for _source, transcriber in built:
         if isinstance(transcriber, WhisperCppTranscriber):
@@ -202,6 +215,15 @@ def review_panels(config: "Config", session: Session) -> list[tuple[str, str]]:
         live = session.transcript_by_label("live")
         if live is not None:
             panels.append((live.model, live.text))
+        else:
+            # No ASR/live source (e.g. --primary-transcript / --input-text): show the
+            # supplied transcripts so the review isn't just the cleanup with nothing
+            # to compare against.
+            panels.extend(
+                (t.model, t.text)
+                for t in session.transcripts
+                if t.kind in {"external", "user"}
+            )
     cleanup = session.cleanup
     if cleanup is not None and cleanup.text:
         label = "clean"

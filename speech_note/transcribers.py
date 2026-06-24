@@ -59,20 +59,55 @@ class FasterWhisperTranscriber:
         compute_type: str,
         cpu_threads: int,
         download_root: Path | None,
+        auto_download: bool = False,
     ) -> None:
+        self.model_name = model_name
+        self.device = device
+        self.compute_type = compute_type
+        self.cpu_threads = cpu_threads
+        self.download_root = download_root
+        self.auto_download = auto_download
+        self.model: Any = None
+
+    def ensure_loaded(self) -> None:
+        """Load the model, downloading it (consent-gated) on a cache miss.
+
+        Lazy and gated, like the other backends: construction never touches the
+        network, so a source that is built but never run — or one the user
+        declines to download — costs nothing and prompts nothing.
+        """
+        if self.model is not None:
+            return
         from faster_whisper import WhisperModel
 
-        self.model_name = model_name
+        from .models import load_or_install
+
         kwargs: dict[str, Any] = {
-            "device": device,
-            "compute_type": compute_type,
-            "cpu_threads": cpu_threads,
+            "device": self.device,
+            "compute_type": self.compute_type,
+            "cpu_threads": self.cpu_threads,
         }
-        if download_root is not None:
-            kwargs["download_root"] = str(download_root)
-        self.model = WhisperModel(model_name, **kwargs)
+        if self.download_root is not None:
+            kwargs["download_root"] = str(self.download_root)
+
+        def _load(local_only: bool) -> Any:
+            return WhisperModel(self.model_name, local_files_only=local_only, **kwargs)
+
+        self.model = load_or_install(
+            _load,
+            label=f"faster-whisper model '{self.model_name}' (Hugging Face)",
+            dest=str(self.download_root) if self.download_root is not None else "the Hugging Face cache",
+            auto_yes=self.auto_download,
+        )
+
+    def ensure_downloaded(self) -> None:
+        # faster-whisper couples download and load; loading is the only handle we
+        # have on the fetch, so the up-front prep step loads here too.
+        self.ensure_loaded()
 
     def transcribe_file(self, path: Path, language: str) -> str:
+        self.ensure_loaded()
+        assert self.model is not None
         segments, _info = self.model.transcribe(
             str(path),
             language=language,
@@ -135,6 +170,10 @@ class WhisperCppTranscriber:
         if result.returncode != 0 or not self.model_path.exists():
             detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
             raise RuntimeError(f"failed to download whisper.cpp model {model}: {detail}")
+
+    def ensure_downloaded(self) -> None:
+        """Download the ggml model (consent-gated) without running a transcription."""
+        self._ensure_model_installed()
 
     @property
     def effective_model(self) -> str:
@@ -281,6 +320,11 @@ class CTCTranscriber:
         self.load_seconds = round(time.monotonic() - started, 3)
         debug_log(f"ctc pipeline ready model={self.model_name} device={pipeline_device}")
 
+    def ensure_downloaded(self) -> None:
+        # transformers couples download and load via from_pretrained, so the
+        # up-front prep step loads here too.
+        self.ensure_loaded()
+
     @staticmethod
     def _fix_logit_ratio(model: Any, processor: Any) -> None:
         """Set config.inputs_to_logits_ratio when the model port omits it.
@@ -351,6 +395,7 @@ class SherpaTranscriber:
         self.recognizer: Any = None
         self.vad: Any = None
         self.load_seconds: float | None = None
+        self._model_files: tuple[str, str, str, str, str] | None = None
 
     def _provider(self) -> str:
         text = self.device.strip().lower()
@@ -359,6 +404,8 @@ class SherpaTranscriber:
         return "cuda" if text.startswith("cuda") else "cpu"
 
     def _resolve_model_files(self) -> tuple[str, str, str, str, str]:
+        if self._model_files is not None:
+            return self._model_files
         from huggingface_hub import hf_hub_download, snapshot_download
 
         from .models import load_or_install
@@ -393,7 +440,13 @@ class SherpaTranscriber:
         decoder = pick("decoder.int8.onnx", "decoder.onnx")
         joiner = pick("joiner.int8.onnx", "joiner.onnx")
         tokens = pick("tokens.txt")
-        return encoder, decoder, joiner, tokens, vad_path
+        self._model_files = (encoder, decoder, joiner, tokens, vad_path)
+        return self._model_files
+
+    def ensure_downloaded(self) -> None:
+        """Resolve/download the model bundle (consent-gated) without the heavy
+        recognizer construction — that stays lazy so it can overlap normalization."""
+        self._resolve_model_files()
 
     def ensure_loaded(self) -> None:
         if self.recognizer is not None:
@@ -480,6 +533,11 @@ class PocketSphinxTranscriber:
         config.set_string("-dict", str(dictionary))
         config.set_string("-logfn", os.devnull)
         self.decoder = Decoder(config)
+
+    def ensure_downloaded(self) -> None:
+        # The English model ships with pocketsphinx; nothing to download, but the
+        # prep step still resolves it (and surfaces a clear error if it is absent).
+        self.ensure_loaded()
 
     def _resolve_model_paths(self) -> tuple[Path, Path, Path]:
         from pocketsphinx import get_model_path

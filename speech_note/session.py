@@ -156,7 +156,8 @@ class Session:
     def raw_text(self) -> str:
         # The raw/fallback transcript is the first ASR source in collection order
         # (order is a soft preference, not a type), then the live preview, then any
-        # user-supplied text.
+        # user-supplied or externally provided transcript (e.g. --input-text or
+        # --primary-transcript, which have no ASR pass of their own).
         for transcript in self.transcripts:
             if transcript.kind == "asr-final":
                 return transcript.text
@@ -164,7 +165,7 @@ class Session:
         if live is not None:
             return live.text
         for transcript in self.transcripts:
-            if transcript.kind in {"asr-live", "user"}:
+            if transcript.kind in {"asr-live", "user", "external"}:
                 return transcript.text
         return ""
 

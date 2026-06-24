@@ -430,6 +430,10 @@ def _interactive_capture_setup(args: argparse.Namespace) -> None:
     """Terminal-dictation prompts: cleanup provider, then microphone."""
     if (
         args.organizer_mode == "llama"
+        # A connectivity preset (--offline / --online-free / --online-paid) already
+        # fixes the provider in resolve_config, so don't ask — the answer would be
+        # silently overridden by the preset anyway.
+        and getattr(args, "connectivity", None) is None
         and args.organizer_provider == defaults.DEFAULT_ORGANIZER_PROVIDER
         and sys.stdin
         and sys.stdin.isatty()

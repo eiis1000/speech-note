@@ -75,13 +75,19 @@ def offline_env(*, auto_download: bool, cpu_threads: int) -> dict[str, str]:
 def build_live_transcriber(config: "Config") -> FasterWhisperTranscriber:
     """The live-preview model: a small resident faster-whisper, separate from the
     final ASR collection (a per-segment whisper.cpp subprocess would reload the
-    model and re-init the GPU for every utterance)."""
+    model and re-init the GPU for every utterance).
+
+    auto_download is forced on: this tiny model is intrinsic to interactive
+    capture and loads in a background thread mid-recording, where a consent
+    prompt could neither be shown cleanly nor answered. The final ASR sources
+    (including any faster-whisper source) are gated normally."""
     return FasterWhisperTranscriber(
         model_name=LIVE_ASR_MODEL,
         device="cpu",
         compute_type="int8",
         cpu_threads=config.live_asr_cpu_threads,
         download_root=config.download_root,
+        auto_download=True,
     )
 
 
@@ -135,8 +141,10 @@ def build_transcriber(config: "Config", source: AsrSource) -> Transcriber | None
 def build_transcribers(config: "Config") -> list[tuple[AsrSource, Transcriber | None]]:
     """Build a transcriber for every source (None for subprocess backends).
 
-    Construction is cheap and never downloads — the model is fetched when the
-    source runs. So building sources that may not run (or may be skipped) is free.
+    Construction is cheap and never touches the network for any backend: every
+    transcriber loads (and downloads, consent-gated) lazily. The model is fetched
+    by prepare_sources / when the source runs, so building sources that may not
+    run (or may be skipped) is free.
     """
     return [(source, build_transcriber(config, source)) for source in config.asr_sources]
 
@@ -237,15 +245,49 @@ def run_source(
     return outcome
 
 
+# One prepared job: a stable label, the source, its transcriber (None for
+# subprocess backends), and a prep error if its model could not be made present.
+PreparedJob = tuple[str, AsrSource, "Transcriber | None", "str | None"]
+
+
+def prepare_sources(
+    built: list[tuple[AsrSource, Transcriber | None]],
+) -> list[PreparedJob]:
+    """Make every source's model present, up front and on the calling thread.
+
+    This is where model-download consent happens: on the main thread, serially,
+    with no status spinner running and no worker threads contending for stdin —
+    so the "[y/N]" prompt is actually visible and a single answer applies to one
+    model at a time. A backend whose model is already cached prompts nothing; a
+    subprocess backend (transcriber None) is left for its own run to fetch.
+
+    A declined or failed download is captured as a per-source prep error and the
+    source is *not* retried later under a spinner — it simply runs as a failure.
+    Labels (asr1, asr2, …) are assigned here, once, over the full collection.
+    """
+    prepared: list[PreparedJob] = []
+    for index, (source, transcriber) in enumerate(built, start=1):
+        label = f"asr{index}"
+        prep_error: str | None = None
+        ensure = getattr(transcriber, "ensure_downloaded", None)
+        if callable(ensure):
+            try:
+                ensure()
+            except Exception as exc:  # noqa: BLE001 — record and skip, don't abort the run
+                prep_error = str(exc)
+        prepared.append((label, source, transcriber, prep_error))
+    return prepared
+
+
 def run_asr_collection(
     config: "Config",
     session: "Session",
     audio_path: Path,
     *,
-    built: list[tuple[AsrSource, Transcriber | None]],
+    prepared: list[PreparedJob],
     duration: float | None,
 ) -> None:
-    """Run every source and record its outcome, in collection order.
+    """Run every prepared source and record its outcome, in collection order.
 
     Sources are grouped by device kind: each group runs sequentially (same-device
     sources contend), the groups run concurrently (different devices overlap). So a
@@ -253,19 +295,21 @@ def run_asr_collection(
     Outcomes are recorded in the original collection order regardless of which
     finishes first, so list order is preserved for the raw/fallback transcript.
     """
-    jobs = [(f"asr{index}", source, transcriber) for index, (source, transcriber) in enumerate(built, start=1)]
-    if not jobs:
+    if not prepared:
         return
 
-    groups: dict[str, list[tuple[str, AsrSource, Transcriber | None]]] = {}
-    for job in jobs:
+    groups: dict[str, list[PreparedJob]] = {}
+    for job in prepared:
         groups.setdefault(job[1].device_kind, []).append(job)
 
-    def run_group(
-        group: list[tuple[str, AsrSource, Transcriber | None]], *, show_timer: bool
-    ) -> list[tuple[str, AsrOutcome]]:
+    def run_group(group: list[PreparedJob], *, show_timer: bool) -> list[tuple[str, AsrOutcome]]:
         out: list[tuple[str, AsrOutcome]] = []
-        for label, source, transcriber in group:
+        for label, source, transcriber, prep_error in group:
+            if prep_error is not None:
+                # Model could not be made present (declined/failed in prepare_sources);
+                # record the failure without re-attempting — and without re-prompting.
+                out.append((label, AsrOutcome(name=label, error=prep_error)))
+                continue
             if show_timer:
                 with status_timer(f"ASR pass {label}: {short_label(source.model)}"):
                     outcome = run_source(
@@ -282,7 +326,7 @@ def run_asr_collection(
 
     results: dict[str, AsrOutcome] = {}
     if len(groups) > 1:
-        labels = " + ".join(short_label(source.model) for _label, source, _t in jobs)
+        labels = " + ".join(short_label(source.model) for _label, source, _t, _e in prepared)
         with status_timer(f"Running ASR sources in parallel: {labels}"):
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(groups)) as executor:
                 futures = [executor.submit(run_group, group, show_timer=False) for group in groups.values()]
@@ -292,6 +336,6 @@ def run_asr_collection(
     else:
         results.update(run_group(next(iter(groups.values())), show_timer=True))
 
-    for label, _source, _transcriber in jobs:
+    for label, _source, _transcriber, _prep_error in prepared:
         if label in results:
             session.record_asr_outcome(results[label])

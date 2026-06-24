@@ -32,22 +32,27 @@ from speech_note.organizer import (
     ensure_default_cleanup_model,
     request_timeout_seconds,
 )
+from speech_note.cli import _interactive_capture_setup
 from speech_note.pipeline import (
     cleanup_sources,
     discover_archive_inputs,
     extract_subtitle_text,
     extract_zip_safely,
+    review_panels,
     run_dry_text_pipeline,
 )
 from speech_note.asr import (
     build_subprocess_command,
     build_transcriber,
     ctc_chunk_config,
+    prepare_sources,
+    run_asr_collection,
     run_source,
 )
 from speech_note.config import ASR_BACKENDS, parse_asr_source
 from speech_note.session import ArtifactStore, Session
 from speech_note.transcribers import (
+    FasterWhisperTranscriber,
     SherpaTranscriber,
     default_whisper_cpp_model_path,
     whisper_cpp_model_name,
@@ -493,6 +498,94 @@ class AsrBackendTests(unittest.TestCase):
         self.assertFalse(outcome.ok)
         self.assertIn("model exploded", outcome.error)
         self.assertIsNone(outcome.skip_reason)
+
+
+class AsrPrepareTests(unittest.TestCase):
+    """Model download/consent happens up front (prepare_sources), on the main
+    thread — never under a status spinner or in an ASR worker thread."""
+
+    def test_faster_whisper_construction_is_lazy(self) -> None:
+        # A built-but-unrun source must not load or download: construction stays
+        # cheap and offline so prepare_sources is the single, visible fetch point.
+        transcriber = FasterWhisperTranscriber(
+            model_name="definitely/not-a-real-model",
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=1,
+            download_root=None,
+        )
+        self.assertIsNone(transcriber.model)
+
+    def test_prepare_invokes_ensure_downloaded(self) -> None:
+        source = parse_asr_source("sherpa")
+        transcriber = mock.Mock(spec=["ensure_downloaded"])
+        prepared = prepare_sources([(source, transcriber)])
+        transcriber.ensure_downloaded.assert_called_once_with()
+        self.assertEqual(prepared[0][0], "asr1")
+        self.assertIsNone(prepared[0][3])  # no prep error
+
+    def test_failed_prepare_records_error_without_running_transcribe(self) -> None:
+        source = parse_asr_source("sherpa")
+
+        class _Boom:
+            def ensure_downloaded(self) -> None:
+                raise RuntimeError("download declined")
+
+            def transcribe_file(self, *args: object, **kwargs: object) -> str:
+                raise AssertionError("must not transcribe after a failed prepare")
+
+        prepared = prepare_sources([(source, _Boom())])
+        self.assertEqual(prepared[0][3], "download declined")
+        session = Session(make_config())
+        run_asr_collection(
+            make_config(), session, Path("/tmp/none.wav"), prepared=prepared, duration=1.0
+        )
+        self.assertEqual(len(session.asr_outcomes), 1)
+        self.assertFalse(session.asr_outcomes[0].ok)
+        self.assertIn("download declined", session.asr_outcomes[0].error or "")
+        self.assertEqual(session.asr_transcripts(), [])
+
+
+class TranscriptInputViewTests(unittest.TestCase):
+    """A transcript-only input (no ASR/live pass) is still surfaced as the raw
+    transcript and as a review panel, not just fed silently to cleanup."""
+
+    def test_external_transcript_is_the_raw_text(self) -> None:
+        session = Session(make_config())
+        session.add_transcript(
+            Transcript(label="primary", model="draft.txt", kind="external", text="rough draft")
+        )
+        self.assertEqual(session.raw_text(), "rough draft")
+
+    def test_external_transcript_appears_as_review_panel(self) -> None:
+        session = Session(make_config())
+        session.add_transcript(
+            Transcript(label="primary", model="draft.txt", kind="external", text="rough draft")
+        )
+        panels = review_panels(make_config(), session)
+        self.assertIn(("draft.txt", "rough draft"), panels)
+
+
+class InteractiveCaptureSetupTests(unittest.TestCase):
+    def test_connectivity_preset_skips_provider_prompt(self) -> None:
+        # --offline / --online-* already fix the provider, so the interactive
+        # capture flow must not also ask (the answer would be overridden anyway).
+        args = parse_args(["--offline"])
+        with mock.patch("speech_note.cli.select_input_device", return_value=0), \
+                mock.patch("speech_note.cli.read_single_choice") as choice:
+            _interactive_capture_setup(args)
+        choice.assert_not_called()
+
+    def test_no_preset_prompts_for_provider(self) -> None:
+        args = parse_args([])
+        with mock.patch("speech_note.cli.select_input_device", return_value=0), \
+                mock.patch("speech_note.cli.sys.stdin") as stdin, \
+                mock.patch("speech_note.cli.read_single_choice", return_value="2") as choice, \
+                redirect_stdout(io.StringIO()):
+            stdin.isatty.return_value = True
+            _interactive_capture_setup(args)
+        choice.assert_called_once()
+        self.assertEqual(args.organizer_provider, "openrouter")
 
 
 class OrganizerPromptTests(unittest.TestCase):
