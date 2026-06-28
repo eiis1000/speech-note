@@ -633,9 +633,9 @@ class OrganizerPromptTests(unittest.TestCase):
         self.assertIn("primary ASR pass", prompt)
         self.assertIn("Source 2 — secondary (parakeet)", prompt)
         self.assertIn("Source 3 — extra:google.txt (google.txt)", prompt)
-        # Reference length is anchored to the MOST COMPLETE source (union reconstruction),
-        # so the longest of 100/200/150 words drives the length expectation.
-        self.assertIn("The most complete source is 200 words", prompt)
+        # Length is anchored to the MEAN source length (robust to one filler-heavy
+        # source): mean of 100/200/150 words is 150.
+        self.assertIn("On average the sources are 150 words", prompt)
 
     def test_prompt_is_union_recall_not_consensus(self) -> None:
         """Single-source content must be KEPT (sources differ by sensitivity, not
@@ -650,8 +650,8 @@ class OrganizerPromptTests(unittest.TestCase):
         self.assertIn("single source", lowered)
         self.assertIn("sensitivity", lowered)
         self.assertIn("keep that content", lowered)
-        # Anchored to the most complete (longest) source, never the shortest.
-        self.assertIn("most complete source is 160 words", lowered)
+        # Anchored to the mean source length (mean of 80/160 is 120), never the shortest.
+        self.assertIn("on average the sources are 120 words", lowered)
         self.assertNotIn("shortest source", lowered)
         # Two orthogonal jobs: strip disfluencies, keep content.
         self.assertIn("disfluencies", lowered)

@@ -352,12 +352,13 @@ DEFAULT_OPENROUTER_MAX_OUTPUT_TOKENS = 32_768
 ORGANIZER_MIN_REQUEST_TIMEOUT = 45.0
 ORGANIZER_MAX_REQUEST_TIMEOUT = 1_800.0
 ORGANIZER_CONTEXT_SAFETY = 0.92
-# Cleanup length is judged against the MOST COMPLETE source, not the shortest: the
-# cleanup reconstructs the UNION of what every source heard, so the result should land
-# near the longest transcript. When one source (e.g. the Gemini audio-LLM) hears far
-# more than the local ASRs, anchoring to the shortest would license dropping all of that
-# extra real content. These are the warning floor / soft target as fractions of the most
-# complete source; both are review hints, never gates.
+# Cleanup length is judged against the MEAN source length, not the shortest or the
+# longest. Cleanup reconstructs the UNION of what every source heard, so anchoring to
+# the shortest would license dropping the extra real content a more sensitive source
+# (e.g. the Gemini audio-LLM) caught — but anchoring to the longest over-counts when
+# that source is long because it kept every disfluency, demanding a bloated output. The
+# mean is robust to one filler-heavy source. These are the warning floor / soft target
+# as fractions of the mean source length; both are review hints, never gates.
 CLEANUP_MIN_LENGTH_RATIO = 0.6
 CLEANUP_TARGET_LENGTH_RATIO = 0.8
 

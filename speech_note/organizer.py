@@ -402,7 +402,7 @@ SYSTEM_PROMPT = (
     "means the other recognizers failed to hear it — NOT that it is fake. Your job is "
     "to reconstruct the union of what was actually said: keep everything any source "
     "heard, use the other sources to fix wording and spelling, and drop only true "
-    "non-speech (filler, mic checks, recognition garbage, degenerate loops). The person "
+    "non-speech (filler, recognition garbage, degenerate loops). The person "
     "who made the recording will read your output and can spot a wrong line at a glance, "
     "so losing real content is far worse than keeping a slightly uncertain line. "
     "You have two SEPARATE jobs that must not be confused: (1) KEEP all real content, "
@@ -414,16 +414,27 @@ SYSTEM_PROMPT = (
 )
 
 
+def _reference_words(sources: list[Transcript]) -> int:
+    """Mean word count across non-empty sources, used to anchor the length expectation.
+
+    The mean, not the max: a single filler-heavy source (a verbatim ASR that kept every
+    um/uh and false start) inflates the max, which would demand a bloated output and
+    false-flag a correctly-cleaned transcript as too short. The mean is robust to one
+    long, noisy source while still rising when several sources heard a lot.
+    """
+    counts = [s.words for s in sources if s.words > 0]
+    return round(sum(counts) / len(counts)) if counts else 0
+
+
 def build_user_prompt(sources: list[Transcript]) -> str:
     """Build the cleanup prompt with named sources.
 
     Sources are identified by what produced them, with quality hints when we have them.
     The prompt reconstructs the UNION of what every source heard: source disagreement is
     treated as a difference in sensitivity (one recognizer missed something), not as a
-    vote on whether a passage is real, so content carried by a single source is kept. The
-    length expectation is anchored to the MOST COMPLETE source for the same reason.
+    vote on whether a passage is real, so content carried by a single source is kept.
     """
-    reference_length = max((s.words for s in sources if s.words > 0), default=0)
+    reference_length = _reference_words(sources)
     minimum_words = max(1, math.ceil(reference_length * CLEANUP_MIN_LENGTH_RATIO))
     target_words = max(minimum_words, math.ceil(reference_length * CLEANUP_TARGET_LENGTH_RATIO))
     source_blocks = []
@@ -449,11 +460,11 @@ def build_user_prompt(sources: list[Transcript]) -> str:
         "- Align the sources chronologically and reconstruct the full spoken content that best "
         "explains all of them together.\n\n"
         "Length expectation:\n"
-        f"The most complete source is {reference_length} words. Because you are keeping the "
-        f"UNION of what every source heard, the result should be near {target_words} words or "
-        f"longer; well below {minimum_words} words means you dropped real content the most "
-        "complete source had. MUST NOT pad with junk or repeated words to hit a length; "
-        "coverage of real speech is the goal, not raw count.\n\n"
+        f"On average the sources are {reference_length} words. Because you are keeping the "
+        f"UNION of what every source heard, the result should land near {target_words} words "
+        f"or more; well below {minimum_words} words means real content was dropped. MUST NOT "
+        "pad with junk or repeated words to hit a length; coverage of real speech is the "
+        "goal, not raw count.\n\n"
         "Editing contract:\n"
         "- MUST preserve chronological transcript form.\n"
         "- MUST keep all meaningful spoken content, INCLUDING content that only one source "
@@ -461,15 +472,15 @@ def build_user_prompt(sources: list[Transcript]) -> str:
         "- SHOULD aggressively remove disfluencies and verbal tics — um, uh, er, filler 'like', "
         "'you know', 'I mean', false starts, restarts, and repeated stutters — they are not "
         "content and they hurt readability. This is about HOW things are said, not WHAT was "
-        "said: stripping a tic never removes content.\n"
+        "said.\n"
         "- MUST preserve concrete details, examples, caveats, corrections, asides, "
         "transitions, questions, answers, instructions, names, and numbers.\n"
         "- MUST NOT output a summary or outline, paraphrase away spoken content, or replace "
         "a stretch of speech with a shorter description.\n"
         "- MUST NOT invent content that no source supports.\n"
         "- MUST NOT write notes about the transcript or mention the editing process.\n"
-        "- MUST remove long runs of repeated short acknowledgments (okay/yeah/yes), mic checks, "
-        "audibility checks, room logistics, and degenerate repeated loops.\n"
+        "- MUST remove long runs of repeated short acknowledgments (okay/yeah/yes) "
+        "and degenerate repeated loops.\n"
         "- MAY fix punctuation, casing, repeated fragments, and clear mishearings.\n"
         "- If a phrase is repeated, keep the first clear instance unless later repetitions "
         "change the meaning or emphasis.\n"
@@ -597,14 +608,14 @@ class Organizer:
                 f"({requested_output_tokens} tokens); the transcript is incomplete"
             )
             return outcome
-        reference_length = max((s.words for s in sources if s.words > 0), default=0)
+        reference_length = _reference_words(sources)
         minimum_words = max(1, math.ceil(reference_length * CLEANUP_MIN_LENGTH_RATIO))
         cleaned_words = count_words(outcome.text)
         flags: list[str] = []
         if cleaned_words < minimum_words:
             flags.append(
                 f"suspiciously short ({cleaned_words} words < {minimum_words} expected "
-                f"from the most complete source)"
+                f"from the average source length)"
             )
         if _ends_mid_sentence(outcome.text):
             # finish_reason="length" (handled above) is the clean truncation signal, but
