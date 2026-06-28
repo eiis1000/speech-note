@@ -33,6 +33,13 @@ NORMALIZE_MAX_GAIN = 12.0
 # information is attached per-model and only when we have something to say (see
 # ASR_MODEL_NOTES) — most sources carry no reliability claim at all.
 LIVE_ASR_MODEL = "Systran/faster-whisper-tiny.en"
+# The OpenRouter audio-LLM used as a network ASR source (the "openrouter" backend).
+# Gemini 3 Flash accepts a whole long recording as chat input_audio and transcribes
+# it in a single request — verified on a 44-min file — and, given the whole file, it
+# annotates non-speech instead of confabulating it (the failure mode of per-chunk
+# audio-LLM transcription). It is never used unless explicitly selected (--asr
+# openrouter) or defaulted in by --online-paid.
+OPENROUTER_ASR_MODEL = "google/gemini-3-flash-preview"
 # Bounded but not artificially capped at 8 like the old code was.
 DEFAULT_ASR_CPU_THREADS = max(2, min(16, os.cpu_count() or 2))
 WHISPER_CPP_MODEL_DIR = Path.home() / ".cache/whisper.cpp"
@@ -71,6 +78,9 @@ ASR_BACKENDS: dict[str, BackendSpec] = {
     "onnx": BackendSpec("nemo-parakeet-tdt-0.6b-v2", in_process=False, device_kind="cpu"),
     "crispasr": BackendSpec("parakeet-tdt-0.6b-v2-q4_k.gguf", in_process=False, device_kind="gpu"),
     "pocketsphinx": BackendSpec("pocketsphinx-en-us", in_process=True, device_kind="cpu"),
+    # A remote audio-LLM (OpenRouter chat). device_kind "net" is neither GPU nor CPU,
+    # so it forms its own scheduling group and overlaps the local sources for free.
+    "openrouter": BackendSpec(OPENROUTER_ASR_MODEL, in_process=True, device_kind="net"),
 }
 
 
@@ -108,6 +118,8 @@ def _default_device(backend: str) -> str:
     kind = ASR_BACKENDS[backend].device_kind
     if kind == "cpu":
         return "cpu"
+    if kind == "net":
+        return "net"
     if backend == "whisper-cpp":
         return "0"  # first GPU index
     if backend == "crispasr":
@@ -121,6 +133,17 @@ def _default_device(backend: str) -> str:
 DEFAULT_ASR_SOURCES: tuple[AsrSource, ...] = (
     AsrSource("whisper-cpp", "medium-q8_0", "gpu"),
     AsrSource("sherpa", "", "cpu"),
+)
+
+# The default collection under --online-paid: lead with the OpenRouter Gemini
+# full-file source (best on hard/quiet audio in testing — one request, no chunking,
+# and it annotates silence instead of confabulating), then keep the local
+# whisper+sherpa pair as free corroborating peers and a network-outage fallback.
+# "net" + "gpu" + "cpu" are three device groups, so all three overlap. Overridable
+# by --asr or the user ASR config file, like any default collection.
+ONLINE_PAID_ASR_SOURCES: tuple[AsrSource, ...] = (
+    AsrSource("openrouter", OPENROUTER_ASR_MODEL, "net"),
+    *DEFAULT_ASR_SOURCES,
 )
 
 
@@ -255,14 +278,25 @@ OPENROUTER_FREE_MODELS = [
 # sherpa + phone on a hard journal): deepseek-v3.2 recovered the correct reading,
 # stayed near-verbatim, and is the cheapest (~pennies/file); gemini-3-flash-preview
 # also got it right and is fast. It then falls through to the free chain so a paid
-# outage still produces output. ASR is unaffected — no OpenRouter ASR is usable via
-# the chat API (transcription models reject chat audio input) and the audio-LLMs that
-# accept it truncate long audio, so local whisper+sherpa stays in every mode.
+# outage still produces output. ASR: the dedicated OpenRouter transcription models
+# (whisper-large-v3, chirp, gpt-4o-transcribe, …) reject a long single request and
+# must be chunked, but an audio-LLM — Gemini 3 Flash — transcribes a whole 44-min
+# recording in one chat request (verified 2026-06-28). So --online-paid also leads
+# ASR with the "openrouter" Gemini source (see ONLINE_PAID_ASR_SOURCES); the local
+# whisper+sherpa remain as corroborating peers and offline fallback.
 OPENROUTER_PAID_MODELS = [
     "deepseek/deepseek-v3.2",
     "google/gemini-3-flash-preview",
     *OPENROUTER_FREE_MODELS,
 ]
+
+# OpenRouter ASR request shaping (the "openrouter" backend). The whole recording is
+# transcoded to mono mp3 (a 16 kHz wav of a long file is too large to base64 into a
+# JSON body), sent as chat input_audio, and the reply is the transcript.
+OPENROUTER_ASR_MP3_SAMPLE_RATE = 16_000
+DEFAULT_OPENROUTER_ASR_MAX_OUTPUT_TOKENS = 16_384
+# A floor; the per-request timeout scales up with audio duration in build_transcriber.
+OPENROUTER_ASR_MIN_TIMEOUT = 120.0
 # Default for a plain --organizer-provider openrouter run: same as paid (best models,
 # then free fallback).
 OPENROUTER_PREFERRED_MODELS = list(OPENROUTER_PAID_MODELS)

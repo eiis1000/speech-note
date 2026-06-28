@@ -7,6 +7,7 @@ for another's dependencies.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import os
 import shutil
@@ -573,6 +574,102 @@ class PocketSphinxTranscriber:
         return normalize_spacing(hypothesis.hypstr if hypothesis is not None else "")
 
 
+OPENROUTER_ASR_SYSTEM_PROMPT = (
+    "You are a verbatim speech-to-text transcriber. Transcribe the spoken words in the "
+    "audio exactly as said. Output only the transcript text — no preamble, no headings, "
+    "no timestamps, no commentary. Transcribe only words that are actually spoken: if a "
+    "stretch is silence or non-speech background noise, skip it rather than inventing "
+    "words to fill it."
+)
+
+
+def _openrouter_asr_user_text(language: str) -> str:
+    text = "Transcribe this audio recording verbatim."
+    language = (language or "").strip()
+    if language and language.lower() not in {"auto", "und", ""}:
+        text += f" The speech is primarily in language code '{language}'."
+    return text
+
+
+class OpenRouterTranscriber:
+    """Whole-file ASR via an OpenRouter audio-LLM (the chat ``input_audio`` path).
+
+    The dedicated OpenRouter transcription models reject a long single request, but an
+    audio-LLM such as Gemini 3 Flash transcribes an entire long recording in one chat
+    call — and, given the whole file at once, annotates non-speech instead of
+    confabulating it (the failure mode of per-chunk audio-LLM transcription). The whole
+    file is transcoded to mono mp3 (a long 16 kHz wav is too large to base64 into a JSON
+    body), sent as ``input_audio``, and the reply is the transcript. Nothing is
+    downloaded; the only requirement is the API key. Failures are non-fatal — the source
+    simply produces no transcript and its peers (local whisper+sherpa) still run.
+    """
+
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        api_base: str,
+        auth_env: str,
+        timeout: float,
+        mp3_sample_rate: int,
+        max_output_tokens: int,
+    ) -> None:
+        self.model_name = model_name
+        self.api_base = api_base
+        self.auth_env = auth_env
+        self.timeout = timeout
+        self.mp3_sample_rate = mp3_sample_rate
+        self.max_output_tokens = max_output_tokens
+
+    def ensure_downloaded(self) -> None:
+        """No model to fetch; fail early and clearly if the API key is missing."""
+        if not os.environ.get(self.auth_env, "").strip():
+            raise RuntimeError(
+                f"{self.auth_env} is not set; it is required for the 'openrouter' ASR backend"
+            )
+
+    def ensure_loaded(self) -> None:
+        return None
+
+    def _effective_timeout(self, duration_seconds: float | None) -> float:
+        """Floor for short clips; grow the ceiling with audio length (the request
+        itself returns in well under a minute, this only bounds how long we wait)."""
+        if not duration_seconds:
+            return self.timeout
+        return min(900.0, max(self.timeout, 90.0 + duration_seconds * 0.25))
+
+    def transcribe_file(
+        self, path: Path, language: str, *, duration_seconds: float | None = None
+    ) -> str:
+        # Whole file in one request; length is handled by the API, not chunking.
+        from .audio import encode_to_mp3
+        from .organizer import ChatClient
+
+        with tempfile.TemporaryDirectory(prefix="speech-note-or-asr-") as tmp_dir:
+            mp3_path = Path(tmp_dir) / "audio.mp3"
+            encode_to_mp3(path, mp3_path, sample_rate=self.mp3_sample_rate)
+            data = base64.b64encode(mp3_path.read_bytes()).decode("ascii")
+        timeout = self._effective_timeout(duration_seconds)
+        client = ChatClient(
+            api_base=self.api_base,
+            models=[self.model_name],
+            timeout=timeout,
+            auth_env=self.auth_env,
+        )
+        messages: list[Any] = [
+            {"role": "system", "content": OPENROUTER_ASR_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _openrouter_asr_user_text(language)},
+                    {"type": "input_audio", "input_audio": {"data": data, "format": "mp3"}},
+                ],
+            },
+        ]
+        response = client.chat(messages, max_tokens=self.max_output_tokens, timeout=timeout)
+        return normalize_spacing(response.content)
+
+
 # Every transcriber exposes transcribe_file(path, language[, duration_seconds]) -> str.
 AsrTranscriber = (
     FasterWhisperTranscriber
@@ -580,6 +677,7 @@ AsrTranscriber = (
     | SherpaTranscriber
     | CTCTranscriber
     | PocketSphinxTranscriber
+    | OpenRouterTranscriber
 )
 
 

@@ -21,7 +21,12 @@ from typing import TYPE_CHECKING, Any
 from .config import (
     ASR_BACKENDS,
     CTC_CHUNK_LENGTH_SECONDS,
+    DEFAULT_OPENROUTER_API_BASE,
+    DEFAULT_OPENROUTER_ASR_MAX_OUTPUT_TOKENS,
     LIVE_ASR_MODEL,
+    OPENROUTER_API_KEY_ENV,
+    OPENROUTER_ASR_MIN_TIMEOUT,
+    OPENROUTER_ASR_MP3_SAMPLE_RATE,
     SECONDARY_OVERLAP_SECONDS,
     AsrSource,
     asr_source_presentation,
@@ -32,6 +37,7 @@ from .textproc import is_parakeet_model, normalize_spacing, strip_parakeet_times
 from .transcribers import (
     CTCTranscriber,
     FasterWhisperTranscriber,
+    OpenRouterTranscriber,
     PocketSphinxTranscriber,
     SherpaTranscriber,
     WhisperCppTranscriber,
@@ -135,6 +141,15 @@ def build_transcriber(config: "Config", source: AsrSource) -> Transcriber | None
         )
     if backend == "pocketsphinx":
         return PocketSphinxTranscriber(model_name=source.model, sample_rate=config.sample_rate)
+    if backend == "openrouter":
+        return OpenRouterTranscriber(
+            model_name=source.model,
+            api_base=DEFAULT_OPENROUTER_API_BASE,
+            auth_env=OPENROUTER_API_KEY_ENV,
+            timeout=OPENROUTER_ASR_MIN_TIMEOUT,
+            mp3_sample_rate=OPENROUTER_ASR_MP3_SAMPLE_RATE,
+            max_output_tokens=DEFAULT_OPENROUTER_ASR_MAX_OUTPUT_TOKENS,
+        )
     raise ValueError(f"backend {backend!r} has no in-process transcriber")
 
 
