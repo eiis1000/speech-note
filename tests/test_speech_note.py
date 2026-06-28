@@ -26,13 +26,14 @@ from speech_note.cli import Config, parse_args, resolve_config, validate
 from speech_note.model import Transcript
 from speech_note.organizer import (
     ChatClient,
+    ChatResponse,
     Organizer,
     build_user_prompt,
     default_server_command,
     ensure_default_cleanup_model,
     request_timeout_seconds,
 )
-from speech_note.cli import _interactive_capture_setup
+from speech_note.cli import _interactive_capture_setup, fold_unified_input
 from speech_note.pipeline import (
     cleanup_sources,
     discover_archive_inputs,
@@ -54,6 +55,7 @@ from speech_note.config import ASR_BACKENDS, parse_asr_source
 from speech_note.session import ArtifactStore, Session
 from speech_note.transcribers import (
     FasterWhisperTranscriber,
+    OpenRouterTranscriber,
     SherpaTranscriber,
     default_whisper_cpp_model_path,
     whisper_cpp_model_name,
@@ -244,7 +246,7 @@ class NamingTests(unittest.TestCase):
 
     def test_full_auto_stem_for_archive(self) -> None:
         config = make_config(
-            "--input-archive", "/tmp/cosmicwatch.zip",
+            "--input", "/tmp/cosmicwatch.zip",
             "--extra-transcript", "/tmp/cosmicwatch.google.txt",
         )
         self.assertEqual(
@@ -334,7 +336,7 @@ class ConfigResolutionTests(unittest.TestCase):
         self.assertEqual(config.organizer_context_tokens, 65536)
 
     def test_full_auto_redirects_artifacts_and_names_output(self) -> None:
-        config = make_config("--full-auto", "--input-audio", "/recordings/My Lecture.m4a")
+        config = make_config("--full-auto", "--input", "/recordings/My Lecture.m4a")
         self.assertNotEqual(config.artifacts_dir, Path("."))
         self.assertIsNotNone(config.output)
         self.assertEqual(config.output.name, "my-lecture-clean.txt")
@@ -342,13 +344,13 @@ class ConfigResolutionTests(unittest.TestCase):
     def test_full_auto_respects_explicit_output(self) -> None:
         config = make_config(
             "--full-auto",
-            "--input-audio", "/recordings/x.m4a",
+            "--input", "/recordings/x.m4a",
             "--output", "/tmp/chosen.txt",
         )
         self.assertEqual(config.output, Path("/tmp/chosen.txt"))
 
     def test_validate_rejects_multiple_inputs(self) -> None:
-        config = make_config("--input-audio", "/a.wav", "--input-text", "hello")
+        config = make_config("--input", "/a.wav", "--input-text", "hello")
         with self.assertRaises(SystemExit):
             validate(config)
 
@@ -365,7 +367,7 @@ class ConfigResolutionTests(unittest.TestCase):
                 validate(config)
 
     def test_validate_full_auto_requires_input(self) -> None:
-        config = make_config("--full-auto", "--input-audio", "/a.wav")
+        config = make_config("--full-auto", "--input", "/a.wav")
         validate(config)  # ok
         with self.assertRaises(SystemExit):
             validate(make_config("--full-auto"))
@@ -1228,6 +1230,161 @@ class HardwareWarningTests(unittest.TestCase):
              mock.patch.dict(os.environ, {"SPEECH_NOTE_NO_GPU_WARNING": "1"}):
             hardware.warn_on_unsupported_gpu(out=buf)
         self.assertEqual(buf.getvalue(), "")
+
+
+class OpenRouterAsrTests(unittest.TestCase):
+    """The 'openrouter' ASR backend: a whole-file audio-LLM source over the network."""
+
+    def _transcriber(self) -> OpenRouterTranscriber:
+        return OpenRouterTranscriber(
+            model_name="google/gemini-3-flash-preview",
+            api_base="https://openrouter.ai/api/v1/chat/completions",
+            auth_env="OPENROUTER_API_KEY",
+            timeout=120.0,
+            mp3_sample_rate=16_000,
+            max_output_tokens=16_384,
+        )
+
+    def test_registry_entry_is_in_process_network_source(self) -> None:
+        spec = ASR_BACKENDS["openrouter"]
+        self.assertTrue(spec.in_process)
+        self.assertEqual(spec.device_kind, "net")
+
+    def test_source_resolves_to_net_device(self) -> None:
+        source = parse_asr_source("openrouter")
+        self.assertEqual(source.device, "net")
+        self.assertEqual(source.device_kind, "net")  # own scheduling group → overlaps local
+        self.assertEqual(source.model, "google/gemini-3-flash-preview")
+
+    def test_build_transcriber_constructs_openrouter(self) -> None:
+        transcriber = build_transcriber(make_config(), parse_asr_source("openrouter"))
+        assert isinstance(transcriber, OpenRouterTranscriber)
+        self.assertEqual(transcriber.model_name, "google/gemini-3-flash-preview")
+        self.assertEqual(transcriber.mp3_sample_rate, 16_000)
+
+    def test_transcribe_sends_audio_chat_request(self) -> None:
+        captured: dict = {}
+
+        class FakeClient:
+            def __init__(self, **kwargs) -> None:
+                captured["init"] = kwargs
+
+            def chat(self, messages, *, max_tokens, timeout, **_kwargs):
+                captured["messages"] = messages
+                captured["max_tokens"] = max_tokens
+                captured["timeout"] = timeout
+                return ChatResponse(
+                    content="  hello   world  ",
+                    served_model="google/gemini-3-flash-preview",
+                    finish_reason="stop",
+                )
+
+        def fake_encode(source, target, *, sample_rate) -> None:
+            self.assertEqual(sample_rate, 16_000)
+            Path(target).write_bytes(b"FAKEAUDIO")
+
+        with mock.patch("speech_note.organizer.ChatClient", FakeClient), \
+             mock.patch("speech_note.audio.encode_to_mp3", fake_encode):
+            text = self._transcriber().transcribe_file(
+                Path("/tmp/x.wav"), "en", duration_seconds=240.0
+            )
+
+        self.assertEqual(text, "hello world")  # normalize_spacing applied
+        self.assertEqual(captured["init"]["models"], ["google/gemini-3-flash-preview"])
+        messages = captured["messages"]
+        self.assertEqual(messages[0]["role"], "system")
+        audio_parts = [p for p in messages[1]["content"] if p["type"] == "input_audio"]
+        self.assertEqual(len(audio_parts), 1)
+        self.assertEqual(audio_parts[0]["input_audio"]["format"], "mp3")
+        import base64
+
+        self.assertEqual(base64.b64decode(audio_parts[0]["input_audio"]["data"]), b"FAKEAUDIO")
+        # Timeout grows past the floor with duration but stays bounded.
+        self.assertGreaterEqual(captured["timeout"], 120.0)
+        self.assertLessEqual(captured["timeout"], 900.0)
+
+    def test_ensure_downloaded_requires_key(self) -> None:
+        transcriber = self._transcriber()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError):
+                transcriber.ensure_downloaded()
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}, clear=True):
+            transcriber.ensure_downloaded()  # no raise
+
+
+class OnlinePaidAsrTests(unittest.TestCase):
+    def test_online_paid_leads_with_openrouter_keeping_local_peers(self) -> None:
+        config = make_config("--online-paid")
+        backends = [s.backend for s in config.asr_sources]
+        self.assertEqual(backends[0], "openrouter")  # default lead = the paid source
+        self.assertIn("whisper-cpp", backends)  # local peers still corroborate / fall back
+        self.assertIn("sherpa", backends)
+        self.assertEqual(config.organizer_provider, "openrouter")
+
+    def test_other_modes_keep_local_only_default(self) -> None:
+        self.assertEqual(
+            [s.backend for s in make_config().asr_sources], ["whisper-cpp", "sherpa"]
+        )
+        self.assertNotIn(
+            "openrouter", [s.backend for s in make_config("--online-free").asr_sources]
+        )
+
+    def test_explicit_asr_overrides_online_paid_default(self) -> None:
+        config = make_config("--online-paid", "--asr", "sherpa")
+        self.assertEqual([s.backend for s in config.asr_sources], ["sherpa"])
+
+    def test_openrouter_asr_requires_key(self) -> None:
+        config = make_config("--asr", "openrouter", "--input-text", "x")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(SystemExit):
+                validate(config)
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}, clear=True):
+            validate(config)  # no raise
+
+
+class UnifiedInputTests(unittest.TestCase):
+    def test_audio_path_routes_to_input_file(self) -> None:
+        config = make_config("--input", "/tmp/rec.m4a")
+        self.assertEqual(config.input_file, Path("/tmp/rec.m4a"))
+        self.assertIsNone(config.input_archive)
+
+    def test_zip_extension_routes_to_archive(self) -> None:
+        config = make_config("-i", "/tmp/bundle.zip")
+        self.assertEqual(config.input_archive, Path("/tmp/bundle.zip"))
+        self.assertIsNone(config.input_file)
+
+    def test_real_zip_detected_without_zip_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp) / "bundle.dat"
+            with zipfile.ZipFile(bundle, "w") as archive:
+                archive.writestr("note.txt", "hi")
+            config = make_config("--input", str(bundle))
+        self.assertEqual(config.input_archive, bundle)
+        self.assertIsNone(config.input_file)
+
+    def test_fold_clears_dests_when_no_input(self) -> None:
+        args = parse_args([])
+        fold_unified_input(args)
+        self.assertIsNone(args.input_file)
+        self.assertIsNone(args.input_archive)
+
+
+class ShortOptionTests(unittest.TestCase):
+    def test_common_short_flags(self) -> None:
+        args = parse_args(["-f", "-o", "out.txt", "-i", "rec.m4a", "-l", "es", "-a", "sherpa"])
+        self.assertTrue(args.full_auto)
+        self.assertEqual(args.output, Path("out.txt"))
+        self.assertEqual(args.input, Path("rec.m4a"))
+        self.assertEqual(args.language, "es")
+        self.assertEqual(args.asr, ["sherpa"])
+
+    def test_connectivity_short_flags(self) -> None:
+        self.assertEqual(parse_args(["-P"]).connectivity, "online-paid")
+        self.assertEqual(parse_args(["-F"]).connectivity, "online-free")
+        self.assertEqual(parse_args(["-O"]).connectivity, "offline")
+
+    def test_input_text_short_flag(self) -> None:
+        self.assertEqual(parse_args(["-t", "hello"]).dry_run_text, "hello")
 
 
 if __name__ == "__main__":

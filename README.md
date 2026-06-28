@@ -114,14 +114,14 @@ only as a fallback when the final Whisper pass fails.
 ## Audio-file pipeline
 
 ```sh
-speech-note --input-audio /path/to/audio.m4a
+speech-note --input /path/to/audio.m4a
 ```
 
 Unattended runs that should leave only a cleaned transcript in the current
 directory:
 
 ```sh
-speech-note --input-audio /path/to/audio.m4a --full-auto
+speech-note --input /path/to/audio.m4a --full-auto
 ```
 
 `--full-auto` writes an auto-named `<input>-clean.txt` only if cleanup actually
@@ -134,13 +134,13 @@ Add external transcripts (Google Recorder etc.) as extra sources for cleanup —
 passed through:
 
 ```sh
-speech-note --input-audio rec.m4a --extra-transcript rec.google.txt
+speech-note --input rec.m4a --extra-transcript rec.google.txt
 ```
 
 A zip export containing one recording plus transcript files:
 
 ```sh
-speech-note --input-archive /path/to/export.zip
+speech-note --input /path/to/export.zip
 ```
 
 Cleanup-only modes:
@@ -186,9 +186,9 @@ list. A source is `backend[:model][@device]`; the model and device are optional
 and fall back to the backend's defaults:
 
 ```sh
-speech-note --input-audio rec.m4a --asr whisper-cpp:small.en@gpu --asr sherpa
-speech-note --input-audio rec.m4a --asr 'whisper-cpp:medium-q8_0,ctc@cpu'
-speech-note --input-audio rec.m4a --asr sherpa --organizer-mode off   # one source, raw
+speech-note --input rec.m4a --asr whisper-cpp:small.en@gpu --asr sherpa
+speech-note --input rec.m4a --asr 'whisper-cpp:medium-q8_0,ctc@cpu'
+speech-note --input rec.m4a --asr sherpa --organizer-mode off   # one source, raw
 ```
 
 With no `--asr`, the collection comes from the user config file
@@ -299,7 +299,7 @@ older stacks. The model the server *says* it served is what gets recorded.
 
 ```sh
 export OPENROUTER_API_KEY=...   # checked at startup, not mid-run
-speech-note --input-audio long.m4a --organizer-provider openrouter
+speech-note --input long.m4a --organizer-provider openrouter
 ```
 
 The preferred model list in `config.py` is an ordering, not a claim: it is

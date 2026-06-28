@@ -81,7 +81,7 @@ class ArchiveFullStackTests(unittest.TestCase):
 
     def _run(self, tmp: Path, zip_path: Path, *argv: str):
         args = [
-            "--input-archive", str(zip_path),
+            "--input", str(zip_path),
             "--artifacts-dir", str(tmp),
             *argv,
         ]

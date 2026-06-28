@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 from . import config as defaults
@@ -108,19 +109,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--end-silence-ms", type=int, default=1200)
     parser.add_argument("--min-speech-ms", type=int, default=200)
     parser.add_argument("--max-segment-seconds", type=float, default=12.0)
-    parser.add_argument("--input-device", default=None)
+    parser.add_argument("-d", "--input-device", default=None)
     parser.add_argument("--replay-speed", type=float, default=1.0)
     # discovery / one-shot modes
     parser.add_argument("--list-input-devices", action="store_true")
-    parser.add_argument("--select-mic", action="store_true")
+    parser.add_argument("-m", "--select-mic", action="store_true")
     # inputs
-    parser.add_argument("--input-audio", dest="input_file", type=Path, default=None,
-                        help="Audio file to transcribe (m4a/mp3/wav/...).")
     parser.add_argument(
-        "--input-archive",
+        "-i", "--input",
+        dest="input",
         type=Path,
         default=None,
-        help="Zip containing one recording plus transcript file(s).",
+        help=(
+            "Audio file (m4a/mp3/wav/...) OR an archive zip (recording + transcript "
+            "file(s)) to process. The kind is detected from the file, so one flag covers "
+            "both."
+        ),
     )
     parser.add_argument(
         "--replay-input-file",
@@ -129,7 +133,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Feed an audio file through the live capture path as a virtual mic.",
     )
     parser.add_argument(
-        "--input-text",
+        "-t", "--input-text",
         dest="dry_run_text",
         default=None,
         help="Bypass mic and ASR; feed text (chunks split by ||) to the cleanup stage.",
@@ -155,7 +159,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     # outputs
     parser.add_argument(
-        "--output",
+        "-o", "--output",
         type=Path,
         default=None,
         help="Also write the cleaned transcript to this path.",
@@ -167,7 +171,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Directory for raw.latest / clean.latest / diagnostics and the logs/ archive.",
     )
     parser.add_argument(
-        "--full-auto",
+        "-f", "--full-auto",
         action="store_true",
         help=(
             "Non-interactive: write only an auto-named cleaned transcript to the current "
@@ -177,7 +181,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     # ASR collection
     parser.add_argument(
-        "--asr",
+        "-a", "--asr",
         action="append",
         default=None,
         metavar="BACKEND[:MODEL][@DEVICE]",
@@ -204,7 +208,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--strip-asr-timestamps", action=argparse.BooleanOptionalAction, default=True,
         help="Strip Parakeet [hh:mm:ss] timestamps from ASR output (default: on).",
     )
-    parser.add_argument("--language", default="en")
+    parser.add_argument("-l", "--language", default="en")
     parser.add_argument(
         "--auto-download",
         action=argparse.BooleanOptionalAction,
@@ -217,17 +221,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # --organizer-provider / --organizer-model still override. Work with/without --full-auto.
     connectivity = parser.add_mutually_exclusive_group()
     connectivity.add_argument(
-        "--offline", dest="connectivity", action="store_const", const="offline",
+        "-O", "--offline", dest="connectivity", action="store_const", const="offline",
         help="Local cleanup (bundled GGUF) + local ASR; nothing leaves the machine.",
     )
     connectivity.add_argument(
-        "--online-free", dest="connectivity", action="store_const", const="online-free",
+        "-F", "--online-free", dest="connectivity", action="store_const", const="online-free",
         help="OpenRouter cleanup with free models (may log/train on inputs); local ASR.",
     )
     connectivity.add_argument(
-        "--online-paid", dest="connectivity", action="store_const", const="online-paid",
+        "-P", "--online-paid", dest="connectivity", action="store_const", const="online-paid",
         help="OpenRouter cleanup with paid models (deepseek-v3.2 / gemini-3-flash, not "
-             "logged); local ASR (no usable paid ASR beats local). Needs OPENROUTER_API_KEY.",
+             "logged) AND a Gemini full-file ASR source added by default, alongside local "
+             "whisper+sherpa. Needs OPENROUTER_API_KEY.",
     )
     parser.set_defaults(connectivity=None)
     # organizer
@@ -289,8 +294,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def resolve_asr_sources(args: argparse.Namespace) -> tuple[AsrSource, ...]:
-    """The ASR collection: --asr (CLI) > user config file > built-in default."""
+def resolve_asr_sources(
+    args: argparse.Namespace,
+    default_sources: tuple[AsrSource, ...] = defaults.DEFAULT_ASR_SOURCES,
+) -> tuple[AsrSource, ...]:
+    """The ASR collection: --asr (CLI) > user config file > the given default.
+
+    default_sources lets a connectivity preset supply its own default collection
+    (e.g. --online-paid leads with the OpenRouter Gemini source) while an explicit
+    --asr or the user ASR config file still override it.
+    """
     if args.asr:
         try:
             return defaults.parse_asr_sources(args.asr)
@@ -299,10 +312,34 @@ def resolve_asr_sources(args: argparse.Namespace) -> tuple[AsrSource, ...]:
     from_file = defaults.load_user_asr_sources()
     if from_file:
         return from_file
-    return tuple(source.resolved() for source in defaults.DEFAULT_ASR_SOURCES)
+    return tuple(source.resolved() for source in default_sources)
+
+
+def _looks_like_archive(path: Path) -> bool:
+    """A zip → archive pipeline; anything else → audio file. Detect by content when the
+    file exists (handles a misnamed zip), else fall back to the .zip extension."""
+    if path.suffix.lower() == ".zip":
+        return True
+    return path.exists() and zipfile.is_zipfile(path)
+
+
+def fold_unified_input(args: argparse.Namespace) -> None:
+    """Split the unified -i/--input into the internal input_file / input_archive by
+    detected type. These two are an implementation detail of the pipeline dispatch,
+    not CLI flags, so they are derived here rather than parsed."""
+    chosen = getattr(args, "input", None)
+    args.input_file = None
+    args.input_archive = None
+    if chosen is None:
+        return
+    if _looks_like_archive(chosen):
+        args.input_archive = chosen
+    else:
+        args.input_file = chosen
 
 
 def resolve_config(args: argparse.Namespace) -> Config:
+    fold_unified_input(args)
     # Connectivity preset: bundle organizer provider + default model list. An explicit
     # --organizer-provider/--organizer-model still wins (handled below / in the openrouter
     # branch). ASR is untouched — every mode uses local whisper+sherpa.
@@ -312,7 +349,16 @@ def resolve_config(args: argparse.Namespace) -> Config:
     elif connectivity in ("online-free", "online-paid"):
         args.organizer_provider = "openrouter"
 
-    asr_sources = resolve_asr_sources(args)
+    # --online-paid also changes the *default* ASR collection (an audio-LLM can
+    # transcribe a whole long recording in one request, unlike the chunk-only local
+    # backends); an explicit --asr or the user ASR file still wins. Other modes keep
+    # the local whisper+sherpa default.
+    default_asr = (
+        defaults.ONLINE_PAID_ASR_SOURCES
+        if connectivity == "online-paid"
+        else defaults.DEFAULT_ASR_SOURCES
+    )
+    asr_sources = resolve_asr_sources(args, default_asr)
 
     if args.organizer_provider == "openrouter":
         api_base = args.organizer_api_base or defaults.DEFAULT_OPENROUTER_API_BASE
@@ -419,15 +465,15 @@ def validate(config: Config) -> None:
     ]
     if sum(value is not None for value in inputs) > 1:
         raise SystemExit(
-            "--input-audio, --input-archive, --replay-input-file, --input-text and "
-            "--primary-transcript are mutually exclusive"
+            "--input, --replay-input-file, --input-text and --primary-transcript are "
+            "mutually exclusive"
         )
     if config.secondary_transcript is not None and config.primary_transcript is None:
         raise SystemExit("--secondary-transcript requires --primary-transcript")
     if config.full_auto and all(value is None for value in inputs) and config.input_device is None:
         raise SystemExit(
-            "--full-auto needs --input-audio, --input-archive, --replay-input-file, "
-            "--input-text, --primary-transcript, or an explicit --input-device"
+            "--full-auto needs --input, --replay-input-file, --input-text, "
+            "--primary-transcript, or an explicit --input-device"
         )
     if (
         config.organizer_mode == "llama"
@@ -437,6 +483,13 @@ def validate(config: Config) -> None:
         raise SystemExit(
             f"{config.organizer_auth_env} is not set; it is required for "
             f"--organizer-provider {config.organizer_provider}"
+        )
+    if any(source.backend == "openrouter" for source in config.asr_sources) and not os.environ.get(
+        defaults.OPENROUTER_API_KEY_ENV, ""
+    ).strip():
+        raise SystemExit(
+            f"{defaults.OPENROUTER_API_KEY_ENV} is not set; it is required for the "
+            "'openrouter' ASR backend (selected via --asr or --online-paid)"
         )
 
 
@@ -485,7 +538,7 @@ def main(argv: list[str] | None = None) -> int:
 
     capture_mode = all(
         getattr(args, name) is None
-        for name in ("input_file", "input_archive", "replay_input_file", "dry_run_text", "primary_transcript")
+        for name in ("input", "replay_input_file", "dry_run_text", "primary_transcript")
     )
     if capture_mode and args.input_device is None and not args.full_auto:
         _interactive_capture_setup(args)
