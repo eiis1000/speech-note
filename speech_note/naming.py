@@ -76,14 +76,11 @@ def full_auto_source_stem(config: "Config") -> str:
     for path in (config.input_file, config.replay_input_file):
         if path is not None:
             return Path(path).stem
-    if config.primary_transcript is not None:
-        primary_path = Path(config.primary_transcript)
-        stem = transcript_base_stem(primary_path)
-        tags = [transcript_source_tag(primary_path, "primary")]
-        if config.secondary_transcript is not None:
-            tags.append(transcript_source_tag(Path(config.secondary_transcript), "secondary"))
-        tags.extend(extra_tags)
-        unique_tags = list(dict.fromkeys(tag for tag in tags if tag))
+    if config.extra_transcripts:
+        # Transcript-only run: name after the first transcript, tag the rest.
+        first = Path(config.extra_transcripts[0])
+        stem = transcript_base_stem(first)
+        unique_tags = list(dict.fromkeys(tag for tag in extra_tags if tag))
         return "-".join([stem, *unique_tags]) if unique_tags else stem
     return "speech-note"
 

@@ -41,6 +41,7 @@ from speech_note.pipeline import (
     extract_zip_safely,
     review_panels,
     run_dry_text_pipeline,
+    run_transcript_pipeline,
     start_organizer_prewarm,
 )
 from speech_note.asr import (
@@ -235,8 +236,8 @@ class NamingTests(unittest.TestCase):
 
     def test_full_auto_stem_for_transcript_inputs(self) -> None:
         config = make_config(
-            "--primary-transcript", "/tmp/compute-orientation.whisper.txt",
-            "--secondary-transcript", "/tmp/compute-orientation.parakeet.txt",
+            "--extra-transcript", "/tmp/compute-orientation.whisper.txt",
+            "--extra-transcript", "/tmp/compute-orientation.parakeet.txt",
             "--extra-transcript", "/tmp/compute-orientation.google.txt",
         )
         self.assertEqual(
@@ -354,10 +355,12 @@ class ConfigResolutionTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             validate(config)
 
-    def test_validate_secondary_transcript_requires_primary(self) -> None:
-        config = make_config("--secondary-transcript", "/tmp/x.txt")
+    def test_validate_no_asr_with_audio_needs_a_transcript(self) -> None:
+        # --no-asr skips transcription, so an audio file with nothing else is empty.
         with self.assertRaises(SystemExit):
-            validate(config)
+            validate(make_config("--no-asr", "--input", "/a.wav"))
+        # ...but audio + a transcript to clean up is fine.
+        validate(make_config("--no-asr", "--input", "/a.wav", "-x", "/t.txt"))
 
     def test_validate_requires_openrouter_key(self) -> None:
         args = parse_args(["--organizer-provider", "openrouter", "--input-text", "x"])
@@ -1369,6 +1372,47 @@ class UnifiedInputTests(unittest.TestCase):
         self.assertIsNone(args.input_archive)
 
 
+class NoAsrTranscriptTests(unittest.TestCase):
+    """--no-asr replaces the old primary/secondary-transcript flags: all transcripts
+    are equal peers, ASR is just an optional source."""
+
+    def test_no_asr_flag_default_and_set(self) -> None:
+        self.assertFalse(make_config().no_asr)
+        self.assertTrue(make_config("--no-asr", "-x", "/t.txt").no_asr)
+
+    def test_no_primary_secondary_flags_remain(self) -> None:
+        for flag in ("--primary-transcript", "--secondary-transcript"):
+            with self.assertRaises(SystemExit):
+                parse_args([flag, "/tmp/x.txt"])
+
+    def test_transcript_only_pipeline_cleans_extra_transcripts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "rec.whisper.txt"
+            transcript.write_text("um so i think uh this is the plan")
+            config = make_config("-x", str(transcript), tmp_path=Path(tmp))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                session = run_transcript_pipeline(config)
+            self.assertFalse(session.run_failed)
+            self.assertTrue(session.raw_text().strip())
+
+    def test_no_asr_file_run_skips_asr_and_uses_transcript(self) -> None:
+        # --no-asr with an audio file must not build/run any ASR source.
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "rec.whisper.txt"
+            transcript.write_text("the meeting is on tuesday")
+            config = make_config(
+                "--no-asr", "--input", "/nonexistent/rec.m4a", "-x", str(transcript),
+                tmp_path=Path(tmp),
+            )
+            from speech_note import pipeline
+
+            with mock.patch.object(pipeline, "run_final_asr") as ran_asr, \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                session = pipeline.run_file_pipeline(config)
+            ran_asr.assert_not_called()  # ASR skipped despite the audio input
+            self.assertIn("tuesday", session.raw_text())
+
+
 class ShortOptionTests(unittest.TestCase):
     def test_common_short_flags(self) -> None:
         args = parse_args(["-f", "-o", "out.txt", "-i", "rec.m4a", "-l", "es", "-a", "sherpa"])
@@ -1385,6 +1429,10 @@ class ShortOptionTests(unittest.TestCase):
 
     def test_input_text_short_flag(self) -> None:
         self.assertEqual(parse_args(["-t", "hello"]).dry_run_text, "hello")
+
+    def test_extra_transcript_short_flag_repeatable(self) -> None:
+        args = parse_args(["-x", "a.txt", "-x", "b.txt"])
+        self.assertEqual(args.extra_transcript, [Path("a.txt"), Path("b.txt")])
 
 
 if __name__ == "__main__":

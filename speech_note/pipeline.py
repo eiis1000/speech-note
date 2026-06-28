@@ -216,9 +216,9 @@ def review_panels(config: "Config", session: Session) -> list[tuple[str, str]]:
         if live is not None:
             panels.append((live.model, live.text))
         else:
-            # No ASR/live source (e.g. --primary-transcript / --input-text): show the
-            # supplied transcripts so the review isn't just the cleanup with nothing
-            # to compare against.
+            # No ASR/live source (e.g. --no-asr / --extra-transcript / --input-text):
+            # show the supplied transcripts so the review isn't just the cleanup with
+            # nothing to compare against.
             panels.extend(
                 (t.model, t.text)
                 for t in session.transcripts
@@ -343,16 +343,6 @@ def finalize(config: "Config", session: Session, organizer: Organizer) -> None:
 # --- transcript file inputs ---
 
 
-def read_transcript_file(path: Path, *, label: str) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError as exc:
-        raise SystemExit(f"failed to read {label} transcript {path}: {exc}") from exc
-    if not text:
-        raise SystemExit(f"{label} transcript is empty: {path}")
-    return text
-
-
 _SRT_INDEX_RE = re.compile(r"^\d+$")
 _CUE_TIME_RE = re.compile(r"-->")
 
@@ -410,10 +400,12 @@ def run_file_pipeline(config: "Config") -> Session:
     session = Session(config)
     organizer, supervisor = build_organizer(config)
     load_extra_transcripts(config, session)
-    built = build_transcribers(config)
+    # --no-asr: don't transcribe the audio, just clean up the provided transcript(s).
+    built = [] if config.no_asr else build_transcribers(config)
     prewarm = start_organizer_prewarm(config, organizer)
     try:
-        run_final_asr(config, session, config.input_file, built=built)
+        if not config.no_asr:
+            run_final_asr(config, session, config.input_file, built=built)
         finalize(config, session, organizer)
     finally:
         if prewarm is not None:
@@ -484,26 +476,11 @@ def run_archive_pipeline(config: "Config") -> Session:
 
 
 def run_transcript_pipeline(config: "Config") -> Session:
-    assert config.primary_transcript is not None
+    """Transcript-only run: no audio, just clean up the provided --extra-transcript
+    file(s) as equal peers (the cleanup LM reconciles them)."""
+    assert config.extra_transcripts
     session = Session(config)
     organizer, supervisor = build_organizer(config)
-    session.add_transcript(
-        Transcript(
-            label="primary",
-            model=config.primary_transcript.name,
-            kind="external",
-            text=read_transcript_file(config.primary_transcript, label="primary"),
-        )
-    )
-    if config.secondary_transcript is not None:
-        session.add_transcript(
-            Transcript(
-                label="secondary",
-                model=config.secondary_transcript.name,
-                kind="external",
-                text=read_transcript_file(config.secondary_transcript, label="secondary"),
-            )
-        )
     load_extra_transcripts(config, session)
     try:
         finalize(config, session, organizer)

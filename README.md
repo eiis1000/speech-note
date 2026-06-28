@@ -146,8 +146,11 @@ speech-note --input /path/to/export.zip
 Cleanup-only modes:
 
 ```sh
-# existing transcripts, no audio:
-speech-note --primary-transcript rec.whisper.txt --secondary-transcript rec.parakeet.txt
+# existing transcripts, no audio (all transcripts are equal peers):
+speech-note -x rec.whisper.txt -x rec.parakeet.txt
+
+# have the audio but reuse existing transcripts instead of re-running ASR:
+speech-note -i rec.m4a --no-asr -x rec.whisper.txt
 
 # raw text, no files ("||" marks chunk boundaries):
 speech-note --input-text 'um this is bad || and should be cleaned'

@@ -40,9 +40,8 @@ class Config:
     input_archive: Path | None
     replay_input_file: Path | None
     dry_run_text: str | None
-    primary_transcript: Path | None
-    secondary_transcript: Path | None
     extra_transcripts: tuple[Path, ...]
+    no_asr: bool
     # outputs
     output: Path | None
     artifacts_dir: Path
@@ -139,23 +138,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Bypass mic and ASR; feed text (chunks split by ||) to the cleanup stage.",
     )
     parser.add_argument(
-        "--primary-transcript",
-        type=Path,
-        default=None,
-        help="Use this file as the primary transcript and skip ASR.",
+        "--no-asr",
+        dest="no_asr",
+        action="store_true",
+        help=(
+            "Skip transcription and clean up only the transcripts you provide "
+            "(--extra-transcript, or those bundled in an archive). With no audio at all, "
+            "--extra-transcript files are cleaned up directly, so this flag only matters "
+            "when audio IS present and you want to reuse existing transcripts instead of "
+            "re-running ASR. All transcripts are equal peers — there is no primary/secondary."
+        ),
     )
     parser.add_argument(
-        "--secondary-transcript",
-        type=Path,
-        default=None,
-        help="Use this file as the secondary transcript (requires --primary-transcript).",
-    )
-    parser.add_argument(
-        "--extra-transcript",
+        "-x", "--extra-transcript",
         type=Path,
         action="append",
         default=[],
-        help="Additional transcript for the cleanup stage. Repeatable.",
+        help="A transcript file fed to the cleanup stage as an equal peer source. Repeatable.",
     )
     # outputs
     parser.add_argument(
@@ -412,9 +411,8 @@ def resolve_config(args: argparse.Namespace) -> Config:
         input_archive=args.input_archive,
         replay_input_file=args.replay_input_file,
         dry_run_text=args.dry_run_text,
-        primary_transcript=args.primary_transcript,
-        secondary_transcript=args.secondary_transcript,
         extra_transcripts=tuple(args.extra_transcript),
+        no_asr=args.no_asr,
         output=output,
         artifacts_dir=artifacts_dir,
         archive_dir=artifacts_dir / "logs",
@@ -456,24 +454,32 @@ def resolve_config(args: argparse.Namespace) -> Config:
 
 
 def validate(config: Config) -> None:
+    # The single-audio/text inputs are mutually exclusive; --extra-transcript is not —
+    # it supplements ASR, or (with no audio) is the input on its own.
     inputs = [
         config.input_file,
         config.input_archive,
         config.replay_input_file,
         config.dry_run_text,
-        config.primary_transcript,
     ]
     if sum(value is not None for value in inputs) > 1:
         raise SystemExit(
-            "--input, --replay-input-file, --input-text and --primary-transcript are "
-            "mutually exclusive"
+            "--input, --replay-input-file and --input-text are mutually exclusive"
         )
-    if config.secondary_transcript is not None and config.primary_transcript is None:
-        raise SystemExit("--secondary-transcript requires --primary-transcript")
-    if config.full_auto and all(value is None for value in inputs) and config.input_device is None:
+    if (
+        config.no_asr
+        and config.input_file is not None
+        and not config.extra_transcripts
+    ):
+        raise SystemExit(
+            "--no-asr skips transcription, so an audio file alone has nothing to clean "
+            "up; add --extra-transcript or drop --no-asr"
+        )
+    has_input = any(value is not None for value in inputs) or bool(config.extra_transcripts)
+    if config.full_auto and not has_input and config.input_device is None:
         raise SystemExit(
             "--full-auto needs --input, --replay-input-file, --input-text, "
-            "--primary-transcript, or an explicit --input-device"
+            "--extra-transcript, or an explicit --input-device"
         )
     if (
         config.organizer_mode == "llama"
@@ -536,9 +542,9 @@ def main(argv: list[str] | None = None) -> int:
 
     warn_on_unsupported_gpu()
 
-    capture_mode = all(
-        getattr(args, name) is None
-        for name in ("input", "replay_input_file", "dry_run_text", "primary_transcript")
+    capture_mode = (
+        all(getattr(args, name) is None for name in ("input", "replay_input_file", "dry_run_text"))
+        and not args.extra_transcript  # transcript-only run, not a mic capture
     )
     if capture_mode and args.input_device is None and not args.full_auto:
         _interactive_capture_setup(args)
@@ -548,14 +554,15 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import pipeline
 
-    if config.primary_transcript is not None:
-        session = pipeline.run_transcript_pipeline(config)
-    elif config.input_archive is not None:
+    if config.input_archive is not None:
         session = pipeline.run_archive_pipeline(config)
     elif config.input_file is not None:
         session = pipeline.run_file_pipeline(config)
     elif config.dry_run_text is not None:
         session = pipeline.run_dry_text_pipeline(config)
+    elif config.extra_transcripts and config.replay_input_file is None:
+        # No audio source, only provided transcript file(s): clean them up directly.
+        session = pipeline.run_transcript_pipeline(config)
     else:
         from .capture import run_capture_pipeline
 

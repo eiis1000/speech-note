@@ -157,7 +157,7 @@ class Session:
         # The raw/fallback transcript is the first ASR source in collection order
         # (order is a soft preference, not a type), then the live preview, then any
         # user-supplied or externally provided transcript (e.g. --input-text or
-        # --primary-transcript, which have no ASR pass of their own).
+        # --extra-transcript / --no-asr runs, which have no ASR pass of their own).
         for transcript in self.transcripts:
             if transcript.kind == "asr-final":
                 return transcript.text
