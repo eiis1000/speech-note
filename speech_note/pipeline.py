@@ -23,6 +23,7 @@ from .audio import normalize_audio_for_asr, probe_duration_seconds
 from .config import (
     ARCHIVE_AUDIO_EXTENSIONS,
     ARCHIVE_TRANSCRIPT_EXTENSIONS,
+    short_model_name,
 )
 from .model import Transcript
 from .naming import unique_output_path
@@ -163,8 +164,8 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
     else:
         with status_phase(phase_label) as display:
             # The cleanup LM is one task whose identity changes as it falls through
-            # the model list; renaming the task is the live label.
-            organizer.status_label_callback = display.replace_task
+            # the model list; renaming the task (with a short name) is the live label.
+            organizer.status_label_callback = lambda model: display.replace_task(short_model_name(model))
             organizer.status_note_callback = display.note
             try:
                 session.cleanup = organizer.cleanup(sources)

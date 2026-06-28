@@ -57,6 +57,10 @@ class StatusTask:
         return (self.done_at if self.done_at is not None else now) - self.started_at
 
 
+SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+SPINNER_DONE = "✓"
+
+
 def render_status_line(
     phase: str,
     tasks: list[StatusTask],
@@ -64,30 +68,46 @@ def render_status_line(
     phase_started: float,
     now: float,
     width: int,
+    spinner: str,
 ) -> str:
     """Build the one-line status string for a phase and its tasks (pure, testable).
 
-    No tasks -> just ``phase   M:SS``. With tasks -> ``phase  a ✓3s · b 7s   M:SS``,
-    each task showing live elapsed, ✓ when done, ✗ when it errored. Truncated with
-    an ellipsis to the terminal width."""
-    phase_elapsed = format_elapsed(now - phase_started)
-    if not tasks:
-        body = phase
-    else:
+    Layout: ``{spinner} {phase}   t1 · t2 · …<pad>{total}`` — a leading spinner glyph
+    (resolves to ✓ when the phase ends), the phase label, middot-separated tasks each
+    showing live elapsed (✓ done, ✗ errored), and the phase total right-aligned to the
+    terminal edge.
+
+    Degrades on a narrow terminal instead of wrapping: the left anchor (spinner +
+    phase + start of the task list) and the right total are always kept; the middle is
+    elided with … . Never returns more than ``width-1`` columns, so it never triggers a
+    line wrap."""
+    total = format_elapsed(now - phase_started)
+    if tasks:
         parts: list[str] = []
         for task in tasks:
             elapsed = format_elapsed(task.elapsed(now))
-            if task.error:
-                parts.append(f"{task.name} ✗{elapsed}")
-            elif task.done_at is not None:
-                parts.append(f"{task.name} ✓{elapsed}")
-            else:
-                parts.append(f"{task.name} {elapsed}")
-        body = f"{phase}  " + " · ".join(parts)
-    line = f"{body}   {phase_elapsed}"
-    if width > 0 and len(line) > width:
-        line = line[: max(0, width - 1)] + "…"
-    return line
+            mark = "✗" if task.error else ("✓" if task.done_at is not None else "")
+            parts.append(f"{task.name} {mark}{elapsed}")
+        left = f"{spinner} {phase}   " + " · ".join(parts)
+    else:
+        left = f"{spinner} {phase}"
+    return _compose_status(left, total, width)
+
+
+def _compose_status(left: str, total: str, width: int) -> str:
+    """Right-align ``total`` against ``left`` within ``width``, keeping both ends
+    visible when the terminal is too thin (truncate the left's tail, never the total)."""
+    if width <= 0:
+        return f"{left}   {total}"
+    usable = width - 1  # leave the last column empty so terminals don't auto-wrap
+    left_budget = usable - len(total) - 1  # one space minimum before the total
+    if left_budget < 1:
+        # Pathologically narrow: the time is the must-keep; show its tail.
+        return total[-usable:]
+    if len(left) <= left_budget:
+        pad = usable - len(left) - len(total)
+        return left + " " * max(1, pad) + total
+    return left[: left_budget - 1] + "…" + " " + total
 
 
 class StatusDisplay:
@@ -101,14 +121,15 @@ class StatusDisplay:
     tasks may be opened/closed from worker threads (the parallel ASR sources do
     exactly this), so every mutation takes the lock."""
 
-    def __init__(self, *, tick: float = 1.0) -> None:
-        self._tick = tick
+    def __init__(self, *, tick: float = 0.1) -> None:
+        self._tick = tick  # ~10 fps so the spinner animates smoothly
         self._is_tty = False
         self._lock = threading.RLock()
         self._phase: str | None = None
         self._phase_started = 0.0
         self._tasks: dict[str, StatusTask] = {}
         self._last_width = 0
+        self._frame = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -128,7 +149,7 @@ class StatusDisplay:
                 return
             now = time.monotonic()
             if self._is_tty:
-                self._paint(now)  # leave the completed snapshot in scrollback
+                self._paint(now, done=True)  # leave the resolved (✓) snapshot in scrollback
                 sys.stderr.write("\n")
                 self._last_width = 0
             else:
@@ -184,13 +205,15 @@ class StatusDisplay:
         while not self._stop.wait(self._tick):
             with self._lock:
                 if self._phase is not None and self._is_tty:
+                    self._frame += 1  # advance the spinner (time-based, not per-event)
                     self._paint()
 
-    def _paint(self, now: float | None = None) -> None:
+    def _paint(self, now: float | None = None, *, done: bool = False) -> None:
         # Caller holds the lock.
         if self._phase is None:
             return
         now = time.monotonic() if now is None else now
+        spinner = SPINNER_DONE if done else SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]
         width = shutil.get_terminal_size((80, 24)).columns
         line = render_status_line(
             self._phase,
@@ -198,6 +221,7 @@ class StatusDisplay:
             phase_started=self._phase_started,
             now=now,
             width=width,
+            spinner=spinner,
         )
         padding = " " * max(0, self._last_width - len(line))
         self._last_width = len(line)
@@ -208,12 +232,12 @@ class StatusDisplay:
         phase_elapsed = format_elapsed(now - self._phase_started)
         tasks = list(self._tasks.values())
         if not tasks:
-            return f"{self._phase}  {phase_elapsed}"
+            return f"{SPINNER_DONE} {self._phase}  {phase_elapsed}"
         items = [
             f"{t.name} {format_elapsed(t.elapsed(now))}" + (" (failed)" if t.error else "")
             for t in tasks
         ]
-        return f"{self._phase}  " + ", ".join(items) + f"  ({phase_elapsed})"
+        return f"{SPINNER_DONE} {self._phase}  " + ", ".join(items) + f"  ({phase_elapsed})"
 
 
 # One process-wide display owns the stderr status line, so concurrent tasks never

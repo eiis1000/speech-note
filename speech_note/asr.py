@@ -30,9 +30,10 @@ from .config import (
     SECONDARY_OVERLAP_SECONDS,
     AsrSource,
     asr_source_presentation,
+    short_source_name,
 )
 from .model import AsrOutcome, Transcript
-from .terminal import debug_log, short_label, status_phase
+from .terminal import debug_log, status_phase
 from .textproc import is_parakeet_model, normalize_spacing, strip_parakeet_timestamps
 from .transcribers import (
     CTCTranscriber,
@@ -325,7 +326,7 @@ def run_asr_collection(
         def run_group(group: list[PreparedJob]) -> list[tuple[str, AsrOutcome]]:
             out: list[tuple[str, AsrOutcome]] = []
             for label, source, transcriber, prep_error in group:
-                name = short_label(source.model)
+                name = short_source_name(source)
                 if prep_error is not None:
                     # Model could not be made present (declined/failed in prepare_sources);
                     # show it as a failed task and don't re-attempt or re-prompt.

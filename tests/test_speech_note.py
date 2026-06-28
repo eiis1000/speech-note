@@ -1417,29 +1417,42 @@ class NoAsrTranscriptTests(unittest.TestCase):
 class StatusDisplayTests(unittest.TestCase):
     """The single-owner status line: one phase, possibly many concurrent tasks."""
 
-    def test_render_no_tasks_is_phase_plus_elapsed(self) -> None:
+    def test_render_no_tasks_has_spinner_and_right_aligned_total(self) -> None:
         line = render_status_line(
-            "Normalizing audio", [], phase_started=100.0, now=102.0, width=80
+            "Normalizing audio", [], phase_started=100.0, now=102.0, width=40, spinner="⠋"
         )
-        self.assertEqual(line, "Normalizing audio   00:02")
+        self.assertTrue(line.startswith("⠋ Normalizing audio"))
+        self.assertTrue(line.endswith("00:02"))
+        self.assertEqual(len(line), 39)  # width-1, total hugging the right edge
 
     def test_render_concurrent_tasks_mixed_states(self) -> None:
         tasks = [
             StatusTask("whisper", started_at=100.0, done_at=105.0),
-            StatusTask("sherpa", started_at=100.0),
+            StatusTask("parakeet", started_at=100.0),
             StatusTask("gemini", started_at=100.0, done_at=103.0, error=True),
         ]
-        line = render_status_line("ASR", tasks, phase_started=100.0, now=112.0, width=200)
-        # Done -> ✓, still running -> live elapsed, errored -> ✗; trailing phase elapsed.
-        self.assertEqual(
-            line, "ASR  whisper ✓00:05 · sherpa 00:12 · gemini ✗00:03   00:12"
+        line = render_status_line(
+            "ASR", tasks, phase_started=100.0, now=112.0, width=200, spinner="⠹"
         )
+        self.assertIn("whisper ✓00:05", line)  # done -> ✓
+        self.assertIn("parakeet 00:12", line)  # running -> no glyph
+        self.assertIn("gemini ✗00:03", line)  # errored -> ✗
+        self.assertTrue(line.startswith("⠹ ASR"))
+        self.assertTrue(line.endswith("00:12"))
 
-    def test_render_truncates_to_width(self) -> None:
-        tasks = [StatusTask(f"src{i}", started_at=0.0) for i in range(10)]
-        line = render_status_line("ASR", tasks, phase_started=0.0, now=1.0, width=30)
-        self.assertEqual(len(line), 30)
-        self.assertTrue(line.endswith("…"))
+    def test_render_done_uses_resolved_glyph(self) -> None:
+        line = render_status_line("ASR", [], phase_started=0.0, now=5.0, width=40, spinner="✓")
+        self.assertTrue(line.startswith("✓ ASR"))
+
+    def test_render_thin_terminal_keeps_left_and_total_no_wrap(self) -> None:
+        tasks = [StatusTask(f"source{i}", started_at=0.0) for i in range(8)]
+        line = render_status_line(
+            "ASR", tasks, phase_started=0.0, now=1.0, width=30, spinner="⠋"
+        )
+        self.assertLessEqual(len(line), 29)  # never exceeds width-1, so no wrap
+        self.assertTrue(line.startswith("⠋ ASR"))  # leftmost content survives
+        self.assertTrue(line.endswith("00:01"))  # the time survives
+        self.assertIn("…", line)  # the middle is elided
 
     def test_non_tty_prints_one_milestone_line_no_carriage_returns(self) -> None:
         buf = io.StringIO()  # isatty() -> False, so the non-TTY path is exercised

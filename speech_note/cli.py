@@ -17,6 +17,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from . import __version__
 from . import config as defaults
 from .config import AsrSource
 from .devices import coerce_input_device, print_input_devices, select_input_device
@@ -100,6 +101,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="speech-note",
         description="Capture or load audio, transcribe locally, clean the transcript with an LM.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     # capture
     parser.add_argument("--sample-rate", type=int, default=defaults.SAMPLE_RATE)
     parser.add_argument("--frame-ms", type=int, choices=[10, 20, 30], default=defaults.FRAME_MS)
