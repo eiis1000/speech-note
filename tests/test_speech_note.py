@@ -25,6 +25,7 @@ from speech_note.capture import SegmentCollector
 from speech_note.cli import Config, parse_args, resolve_config, validate
 from speech_note.model import Transcript
 from speech_note.organizer import (
+    SYSTEM_PROMPT,
     ChatClient,
     ChatResponse,
     Organizer,
@@ -632,8 +633,36 @@ class OrganizerPromptTests(unittest.TestCase):
         self.assertIn("primary ASR pass", prompt)
         self.assertIn("Source 2 — secondary (parakeet)", prompt)
         self.assertIn("Source 3 — extra:google.txt (google.txt)", prompt)
-        # Reference length comes from the shortest non-empty source.
-        self.assertIn("The shortest source is 100 words", prompt)
+        # Reference length is anchored to the MOST COMPLETE source (union reconstruction),
+        # so the longest of 100/200/150 words drives the length expectation.
+        self.assertIn("The most complete source is 200 words", prompt)
+
+    def test_prompt_is_union_recall_not_consensus(self) -> None:
+        """Single-source content must be KEPT (sources differ by sensitivity, not
+        reliability) — the prompt must not tell the model to drop minority content."""
+        sources = [
+            Transcript("whisper", "whisper", "asr-final", "word " * 80),
+            Transcript("gemini", "gemini", "asr-final", "word " * 160),
+        ]
+        prompt = build_user_prompt(sources)
+        lowered = prompt.lower()
+        # Keeps single-source content rather than treating consensus as truth.
+        self.assertIn("single source", lowered)
+        self.assertIn("sensitivity", lowered)
+        self.assertIn("keep that content", lowered)
+        # Anchored to the most complete (longest) source, never the shortest.
+        self.assertIn("most complete source is 160 words", lowered)
+        self.assertNotIn("shortest source", lowered)
+        # Two orthogonal jobs: strip disfluencies, keep content.
+        self.assertIn("disfluencies", lowered)
+
+    def test_system_prompt_frames_union_reconstruction(self) -> None:
+        lowered = SYSTEM_PROMPT.lower()
+        self.assertIn("sensitivity", lowered)
+        self.assertIn("union", lowered)
+        # The asymmetric cost: dropping real content is worse than keeping uncertain.
+        self.assertIn("losing real content", lowered)
+        self.assertNotIn("conservative transcript repair", lowered)
 
     def test_timeout_scales_with_request_size(self) -> None:
         small = request_timeout_seconds(

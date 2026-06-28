@@ -353,25 +353,35 @@ def _content_to_text(content: object) -> str:
 
 
 SYSTEM_PROMPT = (
-    "You are a conservative transcript repair engine. The output must be a readable "
-    "clean transcript, not notes and not a summary. Treat each input transcript as a "
-    "fallible view of the same speech. Reconstruct the shared chronological speech by "
-    "comparing all sources. Preserve meaningful content and the speaker's intent while "
-    "fixing punctuation, casing, and clear ASR mistakes. Remove non-substantive mic checks, "
-    "bare acknowledgments, duplicate stutters, repeated short confirmations, and obvious "
-    "recognition garbage. When uncertain whether a sentence contains meaning, keep it. "
-    "Return only the final transcript text."
+    "You are a transcript reconstruction engine. You are given several machine "
+    "transcripts of the SAME recording, each from a different speech recognizer. The "
+    "recognizers differ mainly in SENSITIVITY: some hear faint or fast speech that "
+    "others miss entirely. A passage appearing in only one transcript almost always "
+    "means the other recognizers failed to hear it — NOT that it is fake. Your job is "
+    "to reconstruct the union of what was actually said: keep everything any source "
+    "heard, use the other sources to fix wording and spelling, and drop only true "
+    "non-speech (filler, mic checks, recognition garbage, degenerate loops). The person "
+    "who made the recording will read your output and can spot a wrong line at a glance, "
+    "so losing real content is far worse than keeping a slightly uncertain line. "
+    "You have two SEPARATE jobs that must not be confused: (1) KEEP all real content, "
+    "including anything only one source heard — never drop a substantive word, phrase, or "
+    "clause; (2) AGGRESSIVELY strip disfluencies — um, uh, er, filler 'like', 'you know', "
+    "'I mean', false starts, and stutters — so the transcript reads cleanly. Removing a "
+    "disfluency is good; removing real content is bad. Do both at once. Output only the "
+    "final transcript text — no notes, no summary."
 )
 
 
 def build_user_prompt(sources: list[Transcript]) -> str:
     """Build the cleanup prompt with named sources.
 
-    Sources are identified by what produced them, with quality hints when we
-    have them — the model gets everything we know, instead of being told a lie
-    that all sources are equally reliable.
+    Sources are identified by what produced them, with quality hints when we have them.
+    The prompt reconstructs the UNION of what every source heard: source disagreement is
+    treated as a difference in sensitivity (one recognizer missed something), not as a
+    vote on whether a passage is real, so content carried by a single source is kept. The
+    length expectation is anchored to the MOST COMPLETE source for the same reason.
     """
-    reference_length = min((s.words for s in sources if s.words > 0), default=0)
+    reference_length = max((s.words for s in sources if s.words > 0), default=0)
     minimum_words = max(1, math.ceil(reference_length * CLEANUP_MIN_LENGTH_RATIO))
     target_words = max(minimum_words, math.ceil(reference_length * CLEANUP_TARGET_LENGTH_RATIO))
     source_blocks = []
@@ -383,54 +393,54 @@ def build_user_prompt(sources: list[Transcript]) -> str:
         source_blocks.append(f"{header}:\n{source.text}")
     joined_sources = "\n\n".join(source_blocks)
     return (
-        "Reconstruct one readable near-verbatim transcript.\n\n"
+        "Reconstruct one readable near-verbatim transcript that is the UNION of what the "
+        "sources heard, with disfluencies cleaned out.\n\n"
         "Source handling:\n"
         "- Each source below is a fallible transcription of the same recording; its header "
-        "says what produced it and how reliable it is likely to be.\n"
-        "- MUST align the sources chronologically and reconstruct the spoken content that "
-        "best explains all of them.\n"
-        "- SHOULD prefer wording supported by multiple sources or by local context, weighing "
-        "sources by their stated reliability.\n"
-        "- MAY use a minority source if it clearly fixes an ASR error.\n"
-        "- When uncertain, SHOULD keep imperfect source wording rather than dropping or "
-        "inventing content.\n\n"
+        "says what produced it.\n"
+        "- The sources DISAGREE mostly by sensitivity, not reliability. Where one source has "
+        "content the others lack, assume the others simply missed it and KEEP that content.\n"
+        "- Use agreement between sources to decide HOW a word was said (spelling, which "
+        "homophone, a garbled name), never WHETHER a passage exists.\n"
+        "- A passage carried by a single source MUST be kept unless it is clearly recognition "
+        "garbage (random unconnected words, a degenerate repeated loop, an obvious mis-decode).\n"
+        "- Align the sources chronologically and reconstruct the full spoken content that best "
+        "explains all of them together.\n\n"
         "Length expectation:\n"
-        f"The shortest source is {reference_length} words. The repaired transcript should "
-        f"normally be near {target_words} words or longer, and below {minimum_words} words "
-        "almost certainly means content was skipped. "
-        "MUST NOT pad the transcript with junk or repeated words merely to satisfy length. "
-        "Meaningful coverage matters more than raw word count.\n\n"
+        f"The most complete source is {reference_length} words. Because you are keeping the "
+        f"UNION of what every source heard, the result should be near {target_words} words or "
+        f"longer; well below {minimum_words} words means you dropped real content the most "
+        "complete source had. MUST NOT pad with junk or repeated words to hit a length; "
+        "coverage of real speech is the goal, not raw count.\n\n"
         "Editing contract:\n"
         "- MUST preserve chronological transcript form.\n"
-        "- MUST preserve all meaningful spoken content unless it is pure filler, a duplicate "
-        "stutter, setup chatter, repeated acknowledgments, or obvious ASR garbage.\n"
+        "- MUST keep all meaningful spoken content, INCLUDING content that only one source "
+        "heard. Never drop a substantive word, phrase, clause, name, number, or example.\n"
+        "- SHOULD aggressively remove disfluencies and verbal tics — um, uh, er, filler 'like', "
+        "'you know', 'I mean', false starts, restarts, and repeated stutters — they are not "
+        "content and they hurt readability. This is about HOW things are said, not WHAT was "
+        "said: stripping a tic never removes content.\n"
         "- MUST preserve concrete details, examples, caveats, corrections, asides, "
-        "transitions, questions, answers, instructions, and repeated meaningful points.\n"
+        "transitions, questions, answers, instructions, names, and numbers.\n"
         "- MUST NOT output a summary or outline, paraphrase away spoken content, or replace "
         "a stretch of speech with a shorter description.\n"
-        "- MUST NOT add facts not supported by the sources.\n"
+        "- MUST NOT invent content that no source supports.\n"
         "- MUST NOT write notes about the transcript or mention the editing process.\n"
-        "- MUST remove long runs of repeated short acknowledgments such as okay/yeah/yes "
-        "when they do not add new meaning.\n"
-        "- MUST remove or compress mic checks, audibility checks, room logistics, apologies, "
-        "and other setup chatter when they do not affect the substantive content.\n"
-        "- MUST remove hallucinated or degenerate loops, including repeated okay/yeah/yes/no "
-        "strings and repeated partial sentences.\n"
-        "- MAY remove bare filler like um/uh, repeated stutters, and obvious recognition "
-        "garbage.\n"
+        "- MUST remove long runs of repeated short acknowledgments (okay/yeah/yes), mic checks, "
+        "audibility checks, room logistics, and degenerate repeated loops.\n"
         "- MAY fix punctuation, casing, repeated fragments, and clear mishearings.\n"
         "- If a phrase is repeated, keep the first clear instance unless later repetitions "
         "change the meaning or emphasis.\n"
         "- MAY merge adjacent fragments only when they are clearly part of the same spoken "
         "thought.\n"
-        "- MUST output only the final transcript.\n"
         "- SHOULD put a blank line after every 3 to 6 sentences at natural pauses.\n"
         "- MAY add light structure (speaker labels, headings) only if it clarifies the "
         "transcript, and MUST NOT let formatting replace, shorten, reorder, or summarize "
-        "spoken content.\n\n"
+        "spoken content.\n"
+        "- MUST output only the final transcript.\n\n"
         f"{joined_sources}\n\n"
-        "Output the repaired near-verbatim transcript now. Start at the beginning of the "
-        "recording and continue linearly until the end."
+        "Output the reconstructed transcript now: keep all real content, strip the filler. "
+        "Start at the beginning of the recording and continue linearly until the end."
     )
 
 
@@ -545,14 +555,14 @@ class Organizer:
                 f"({requested_output_tokens} tokens); the transcript is incomplete"
             )
             return outcome
-        reference_length = min((s.words for s in sources if s.words > 0), default=0)
+        reference_length = max((s.words for s in sources if s.words > 0), default=0)
         minimum_words = max(1, math.ceil(reference_length * CLEANUP_MIN_LENGTH_RATIO))
         cleaned_words = count_words(outcome.text)
         flags: list[str] = []
         if cleaned_words < minimum_words:
             flags.append(
                 f"suspiciously short ({cleaned_words} words < {minimum_words} expected "
-                f"from the shortest source)"
+                f"from the most complete source)"
             )
         if _ends_mid_sentence(outcome.text):
             # finish_reason="length" (handled above) is the clean truncation signal, but

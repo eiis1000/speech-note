@@ -352,9 +352,14 @@ DEFAULT_OPENROUTER_MAX_OUTPUT_TOKENS = 32_768
 ORGANIZER_MIN_REQUEST_TIMEOUT = 45.0
 ORGANIZER_MAX_REQUEST_TIMEOUT = 1_800.0
 ORGANIZER_CONTEXT_SAFETY = 0.92
-# Minimum acceptable cleanup length as a fraction of the shortest source.
-CLEANUP_MIN_LENGTH_RATIO = 0.7
-CLEANUP_TARGET_LENGTH_RATIO = 0.85
+# Cleanup length is judged against the MOST COMPLETE source, not the shortest: the
+# cleanup reconstructs the UNION of what every source heard, so the result should land
+# near the longest transcript. When one source (e.g. the Gemini audio-LLM) hears far
+# more than the local ASRs, anchoring to the shortest would license dropping all of that
+# extra real content. These are the warning floor / soft target as fractions of the most
+# complete source; both are review hints, never gates.
+CLEANUP_MIN_LENGTH_RATIO = 0.6
+CLEANUP_TARGET_LENGTH_RATIO = 0.8
 
 # --- archive mode ---
 ARCHIVE_AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav", ".ogg", ".opus", ".flac", ".aac", ".webm", ".mp4"}
