@@ -7,6 +7,7 @@ the compute path.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import select
 import shutil
@@ -43,54 +44,211 @@ def debug_log(message: str) -> None:
             pass
 
 
-class StatusTimer:
-    """A single self-updating `label MM:SS` line on stderr."""
+@dataclasses.dataclass
+class StatusTask:
+    """One unit of work within a phase: a name, a start, and (when finished) an end."""
 
-    def __init__(self, label: str) -> None:
-        self._label = label
-        self._stop_event = threading.Event()
-        self._started_at = time.monotonic()
-        self._lock = threading.Lock()
+    name: str
+    started_at: float
+    done_at: float | None = None
+    error: bool = False
+
+    def elapsed(self, now: float) -> float:
+        return (self.done_at if self.done_at is not None else now) - self.started_at
+
+
+def render_status_line(
+    phase: str,
+    tasks: list[StatusTask],
+    *,
+    phase_started: float,
+    now: float,
+    width: int,
+) -> str:
+    """Build the one-line status string for a phase and its tasks (pure, testable).
+
+    No tasks -> just ``phase   M:SS``. With tasks -> ``phase  a ✓3s · b 7s   M:SS``,
+    each task showing live elapsed, ✓ when done, ✗ when it errored. Truncated with
+    an ellipsis to the terminal width."""
+    phase_elapsed = format_elapsed(now - phase_started)
+    if not tasks:
+        body = phase
+    else:
+        parts: list[str] = []
+        for task in tasks:
+            elapsed = format_elapsed(task.elapsed(now))
+            if task.error:
+                parts.append(f"{task.name} ✗{elapsed}")
+            elif task.done_at is not None:
+                parts.append(f"{task.name} ✓{elapsed}")
+            else:
+                parts.append(f"{task.name} {elapsed}")
+        body = f"{phase}  " + " · ".join(parts)
+    line = f"{body}   {phase_elapsed}"
+    if width > 0 and len(line) > width:
+        line = line[: max(0, width - 1)] + "…"
+    return line
+
+
+class StatusDisplay:
+    """Single owner of the stderr status line.
+
+    On a TTY it renders the active phase and its (possibly concurrent) tasks as one
+    self-updating line, repainted ~once a second by one background thread. On a
+    non-TTY (redirected stderr, --full-auto logs) it prints a single milestone line
+    when a phase ends instead — so output never fills with carriage returns. Only
+    one phase is active at a time, but a phase may hold several concurrent tasks, and
+    tasks may be opened/closed from worker threads (the parallel ASR sources do
+    exactly this), so every mutation takes the lock."""
+
+    def __init__(self, *, tick: float = 1.0) -> None:
+        self._tick = tick
+        self._is_tty = False
+        self._lock = threading.RLock()
+        self._phase: str | None = None
+        self._phase_started = 0.0
+        self._tasks: dict[str, StatusTask] = {}
         self._last_width = 0
-        self._print_status()
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
-    def _print_status(self) -> None:
-        text = f"{self._label} {format_elapsed(time.monotonic() - self._started_at)}   "
-        padding = " " * max(0, self._last_width - len(text))
-        self._last_width = len(text)
-        print(f"\r{text}{padding}", end="", file=sys.stderr, flush=True)
-
-    def _worker(self) -> None:
-        while not self._stop_event.wait(1.0):
-            with self._lock:
-                self._print_status()
-
-    def set_label(self, label: str) -> None:
+    def begin_phase(self, label: str) -> None:
         with self._lock:
-            self._label = label
-            self._print_status()
+            self._phase = label
+            self._phase_started = time.monotonic()
+            self._tasks = {}
+            self._is_tty = bool(getattr(sys.stderr, "isatty", lambda: False)())
+            if self._is_tty:
+                self._ensure_thread()
+                self._paint()
+
+    def end_phase(self) -> None:
+        with self._lock:
+            if self._phase is None:
+                return
+            now = time.monotonic()
+            if self._is_tty:
+                self._paint(now)  # leave the completed snapshot in scrollback
+                sys.stderr.write("\n")
+                self._last_width = 0
+            else:
+                sys.stderr.write(self._summary(now) + "\n")
+            sys.stderr.flush()
+            self._phase = None
+            self._tasks = {}
+
+    def start_task(self, name: str) -> None:
+        with self._lock:
+            self._tasks[name] = StatusTask(name=name, started_at=time.monotonic())
+            if self._is_tty:
+                self._paint()
+
+    def finish_task(self, name: str, *, error: bool = False) -> None:
+        with self._lock:
+            task = self._tasks.get(name)
+            if task is None:
+                return
+            task.done_at = time.monotonic()
+            task.error = error
+            if self._is_tty:
+                self._paint()
+
+    def replace_task(self, name: str) -> None:
+        """For a single-task phase (cleanup) whose one task changes identity over
+        time, e.g. as the cleanup LM falls through its model list."""
+        with self._lock:
+            self._tasks = {name: StatusTask(name=name, started_at=time.monotonic())}
+            if self._is_tty:
+                self._paint()
 
     def note(self, message: str) -> None:
-        """Print a permanent line above the status line."""
+        """Print a permanent line above the status line (or just a line, non-TTY)."""
         with self._lock:
-            print("\r" + " " * self._last_width + f"\r{message}", file=sys.stderr, flush=True)
-            self._last_width = 0
-            self._print_status()
+            if self._is_tty:
+                sys.stderr.write("\r" + " " * self._last_width + "\r" + message + "\n")
+                self._last_width = 0
+                self._paint()
+            else:
+                sys.stderr.write(message + "\n")
+            sys.stderr.flush()
 
-    def stop(self) -> None:
-        self._stop_event.set()
-        print(file=sys.stderr, flush=True)
+    def close(self) -> None:
+        self._stop.set()
+
+    def _ensure_thread(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._worker, daemon=True)
+            self._thread.start()
+
+    def _worker(self) -> None:
+        while not self._stop.wait(self._tick):
+            with self._lock:
+                if self._phase is not None and self._is_tty:
+                    self._paint()
+
+    def _paint(self, now: float | None = None) -> None:
+        # Caller holds the lock.
+        if self._phase is None:
+            return
+        now = time.monotonic() if now is None else now
+        width = shutil.get_terminal_size((80, 24)).columns
+        line = render_status_line(
+            self._phase,
+            list(self._tasks.values()),
+            phase_started=self._phase_started,
+            now=now,
+            width=width,
+        )
+        padding = " " * max(0, self._last_width - len(line))
+        self._last_width = len(line)
+        sys.stderr.write("\r" + line + padding)
+        sys.stderr.flush()
+
+    def _summary(self, now: float) -> str:
+        phase_elapsed = format_elapsed(now - self._phase_started)
+        tasks = list(self._tasks.values())
+        if not tasks:
+            return f"{self._phase}  {phase_elapsed}"
+        items = [
+            f"{t.name} {format_elapsed(t.elapsed(now))}" + (" (failed)" if t.error else "")
+            for t in tasks
+        ]
+        return f"{self._phase}  " + ", ".join(items) + f"  ({phase_elapsed})"
+
+
+# One process-wide display owns the stderr status line, so concurrent tasks never
+# collide on it. Call sites use the context managers below rather than touching it.
+_display = StatusDisplay()
+
+
+def status_display() -> StatusDisplay:
+    return _display
 
 
 @contextlib.contextmanager
-def status_timer(label: str) -> Generator[StatusTimer]:
-    timer = StatusTimer(label)
+def status_phase(label: str) -> Generator[StatusDisplay]:
+    """Run a phase: a labelled stretch of work that owns the status line. Tasks
+    opened inside it (status_task) show as concurrent entries on that one line."""
+    _display.begin_phase(label)
     try:
-        yield timer
+        yield _display
     finally:
-        timer.stop()
+        _display.end_phase()
+
+
+@contextlib.contextmanager
+def status_task(name: str) -> Generator[None]:
+    """Mark a task running for the duration of the block; ✓ on success, ✗ on error.
+    Safe to use from worker threads running concurrently within one phase."""
+    _display.start_task(name)
+    error = False
+    try:
+        yield
+    except BaseException:
+        error = True
+        raise
+    finally:
+        _display.finish_task(name, error=error)
 
 
 @contextlib.contextmanager

@@ -5,4 +5,4 @@ model, clean the transcript with a local or remote LM, and archive every run.
 """
 
 # Bumped one patch per commit; surfaced by `speech-note --version`.
-__version__ = "2.1.2"
+__version__ = "2.1.3"

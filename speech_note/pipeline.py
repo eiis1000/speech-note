@@ -33,7 +33,7 @@ from .terminal import (
     print_side_by_side,
     read_single_choice,
     short_label,
-    status_timer,
+    status_phase,
 )
 from .transcribers import WhisperCppTranscriber
 
@@ -92,8 +92,12 @@ def run_final_asr(
 
     asr_audio_path = final_audio_path
     started = time.monotonic()
-    with status_timer("Normalizing audio"):
-        with contextlib.ExitStack() as stack:
+    # The ExitStack keeps the normalized temp wav alive through the ASR run, but the
+    # "Normalizing audio" spinner must close once normalization (and the overlapping
+    # model preload) finish — otherwise it would keep ticking over the whole
+    # transcription and collide with run_asr_collection's own per-source timers.
+    with contextlib.ExitStack() as stack:
+        with status_phase("Normalizing audio"):
             try:
                 normalized_dir = stack.enter_context(
                     tempfile.TemporaryDirectory(prefix="speech-note-final-audio-")
@@ -109,7 +113,7 @@ def run_final_asr(
             session.note_timing("normalization_seconds", time.monotonic() - started)
             if preload_thread is not None:
                 preload_thread.join()
-            run_asr_collection(config, session, asr_audio_path, prepared=prepared, duration=duration)
+        run_asr_collection(config, session, asr_audio_path, prepared=prepared, duration=duration)
 
     for _source, transcriber in built:
         if isinstance(transcriber, WhisperCppTranscriber):
@@ -150,16 +154,18 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
             "free remote endpoints may log or train on inputs",
             file=sys.stderr,
         )
-    timer_label = {
-        "llama": "Starting cleanup LM",
-        "heuristic": "Running heuristic cleanup",
+    phase_label = {
+        "llama": "Cleanup",
+        "heuristic": "Cleanup (heuristic)",
     }.get(organizer.mode)
-    if timer_label is None:
+    if phase_label is None:
         session.cleanup = organizer.cleanup(sources)
     else:
-        with status_timer(timer_label) as timer:
-            organizer.status_label_callback = timer.set_label
-            organizer.status_note_callback = timer.note
+        with status_phase(phase_label) as display:
+            # The cleanup LM is one task whose identity changes as it falls through
+            # the model list; renaming the task is the live label.
+            organizer.status_label_callback = display.replace_task
+            organizer.status_note_callback = display.note
             try:
                 session.cleanup = organizer.cleanup(sources)
             finally:

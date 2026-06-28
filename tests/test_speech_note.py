@@ -53,6 +53,7 @@ from speech_note.asr import (
     run_source,
 )
 from speech_note.config import ASR_BACKENDS, parse_asr_source
+from speech_note.terminal import StatusDisplay, StatusTask, render_status_line
 from speech_note.session import ArtifactStore, Session
 from speech_note.transcribers import (
     FasterWhisperTranscriber,
@@ -1411,6 +1412,51 @@ class NoAsrTranscriptTests(unittest.TestCase):
                 session = pipeline.run_file_pipeline(config)
             ran_asr.assert_not_called()  # ASR skipped despite the audio input
             self.assertIn("tuesday", session.raw_text())
+
+
+class StatusDisplayTests(unittest.TestCase):
+    """The single-owner status line: one phase, possibly many concurrent tasks."""
+
+    def test_render_no_tasks_is_phase_plus_elapsed(self) -> None:
+        line = render_status_line(
+            "Normalizing audio", [], phase_started=100.0, now=102.0, width=80
+        )
+        self.assertEqual(line, "Normalizing audio   00:02")
+
+    def test_render_concurrent_tasks_mixed_states(self) -> None:
+        tasks = [
+            StatusTask("whisper", started_at=100.0, done_at=105.0),
+            StatusTask("sherpa", started_at=100.0),
+            StatusTask("gemini", started_at=100.0, done_at=103.0, error=True),
+        ]
+        line = render_status_line("ASR", tasks, phase_started=100.0, now=112.0, width=200)
+        # Done -> ✓, still running -> live elapsed, errored -> ✗; trailing phase elapsed.
+        self.assertEqual(
+            line, "ASR  whisper ✓00:05 · sherpa 00:12 · gemini ✗00:03   00:12"
+        )
+
+    def test_render_truncates_to_width(self) -> None:
+        tasks = [StatusTask(f"src{i}", started_at=0.0) for i in range(10)]
+        line = render_status_line("ASR", tasks, phase_started=0.0, now=1.0, width=30)
+        self.assertEqual(len(line), 30)
+        self.assertTrue(line.endswith("…"))
+
+    def test_non_tty_prints_one_milestone_line_no_carriage_returns(self) -> None:
+        buf = io.StringIO()  # isatty() -> False, so the non-TTY path is exercised
+        with redirect_stderr(buf):
+            display = StatusDisplay()
+            display.begin_phase("ASR")
+            display.start_task("whisper")
+            display.finish_task("whisper")
+            display.start_task("sherpa")
+            display.finish_task("sherpa", error=True)
+            display.end_phase()
+        out = buf.getvalue()
+        self.assertNotIn("\r", out)  # no spinner spam when stderr isn't a terminal
+        self.assertIn("ASR", out)
+        self.assertIn("whisper", out)
+        self.assertIn("sherpa", out)
+        self.assertIn("(failed)", out)  # the errored task is flagged in the summary
 
 
 class ShortOptionTests(unittest.TestCase):

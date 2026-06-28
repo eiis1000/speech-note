@@ -48,7 +48,7 @@ from .pipeline import (
     start_organizer_prewarm,
 )
 from .session import Session
-from .terminal import cbreak_stdin, status_timer
+from .terminal import cbreak_stdin, status_phase
 from .textproc import format_elapsed, normalize_spacing
 from .transcribers import FasterWhisperTranscriber, WhisperCppTranscriber
 
@@ -490,7 +490,7 @@ def run_capture_pipeline(config: "Config") -> Session:
             session.add_error(f"audio input failed: {exc}")
             raise SystemExit(f"audio input failed: {exc}") from None
         if recording_path is not None:
-            with status_timer("Loading ASR models"):
+            with status_phase("Loading ASR models"):
                 built = build_transcribers(config)
             run_final_asr(config, session, recording_path, built=built)
         finalize(config, session, organizer)

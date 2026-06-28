@@ -510,7 +510,8 @@ class Organizer:
             max_tokens=requested_output_tokens,
             timeout=timeout,
             on_model_attempt=(
-                (lambda model: label_callback(f"Running cleanup LM: {model}"))
+                # Just the model name — the status phase already says "Cleanup".
+                (lambda model: label_callback(model))
                 if label_callback
                 else None
             ),

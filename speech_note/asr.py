@@ -32,7 +32,7 @@ from .config import (
     asr_source_presentation,
 )
 from .model import AsrOutcome, Transcript
-from .terminal import debug_log, short_label, status_timer
+from .terminal import debug_log, short_label, status_phase
 from .textproc import is_parakeet_model, normalize_spacing, strip_parakeet_timestamps
 from .transcribers import (
     CTCTranscriber,
@@ -317,39 +317,40 @@ def run_asr_collection(
     for job in prepared:
         groups.setdefault(job[1].device_kind, []).append(job)
 
-    def run_group(group: list[PreparedJob], *, show_timer: bool) -> list[tuple[str, AsrOutcome]]:
-        out: list[tuple[str, AsrOutcome]] = []
-        for label, source, transcriber, prep_error in group:
-            if prep_error is not None:
-                # Model could not be made present (declined/failed in prepare_sources);
-                # record the failure without re-attempting — and without re-prompting.
-                out.append((label, AsrOutcome(name=label, error=prep_error)))
-                continue
-            if show_timer:
-                with status_timer(f"ASR pass {label}: {short_label(source.model)}"):
-                    outcome = run_source(
-                        config, source, audio_path,
-                        label=label, duration=duration, transcriber=transcriber,
-                    )
-            else:
+    results: dict[str, AsrOutcome] = {}
+    # One "ASR" phase; every source — across both device groups — is a task on the
+    # single status line, showing live elapsed and flipping to ✓/✗ as it finishes.
+    with status_phase("ASR") as display:
+
+        def run_group(group: list[PreparedJob]) -> list[tuple[str, AsrOutcome]]:
+            out: list[tuple[str, AsrOutcome]] = []
+            for label, source, transcriber, prep_error in group:
+                name = short_label(source.model)
+                if prep_error is not None:
+                    # Model could not be made present (declined/failed in prepare_sources);
+                    # show it as a failed task and don't re-attempt or re-prompt.
+                    display.start_task(name)
+                    display.finish_task(name, error=True)
+                    out.append((label, AsrOutcome(name=label, error=prep_error)))
+                    continue
+                display.start_task(name)
                 outcome = run_source(
                     config, source, audio_path,
                     label=label, duration=duration, transcriber=transcriber,
                 )
-            out.append((label, outcome))
-        return out
+                # run_source never raises — derive the task's ✓/✗ from the outcome.
+                display.finish_task(name, error=not outcome.ok)
+                out.append((label, outcome))
+            return out
 
-    results: dict[str, AsrOutcome] = {}
-    if len(groups) > 1:
-        labels = " + ".join(short_label(source.model) for _label, source, _t, _e in prepared)
-        with status_timer(f"Running ASR sources in parallel: {labels}"):
+        if len(groups) > 1:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(groups)) as executor:
-                futures = [executor.submit(run_group, group, show_timer=False) for group in groups.values()]
+                futures = [executor.submit(run_group, group) for group in groups.values()]
                 # Collect in the main thread (worker threads never touch `results`).
                 for future in concurrent.futures.as_completed(futures):
                     results.update(future.result())
-    else:
-        results.update(run_group(next(iter(groups.values())), show_timer=True))
+        else:
+            results.update(run_group(next(iter(groups.values()))))
 
     for label, _source, _transcriber, _prep_error in prepared:
         if label in results:
