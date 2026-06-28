@@ -283,6 +283,25 @@ class ChatClient:
             self.auth_env is not None and response.status_code == 404
         )
 
+    def _advance_or_raise(
+        self,
+        failures: list[str],
+        *,
+        index: int,
+        models: list[str],
+        on_model_failure: Callable[[str, str], None] | None,
+        from_exc: Exception | None = None,
+    ) -> None:
+        """Either advance to the next model (notifying on_model_failure) or, if this
+        was the last model, raise the accumulated failures. Returns normally only when
+        the caller should `continue` to the next model."""
+        if index + 1 >= len(models):
+            if from_exc is not None:
+                raise RuntimeError("; ".join(failures)) from from_exc
+            raise RuntimeError("; ".join(failures))
+        if on_model_failure is not None:
+            on_model_failure(models[index], models[index + 1])
+
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -313,13 +332,36 @@ class ChatClient:
                 if not response.ok:
                     body = " ".join(response.text.split())[:500]
                     failures.append(f"{model}: HTTP {response.status_code} {body}")
-                    if index + 1 < len(models) and self._is_transient(response):
-                        if on_model_failure is not None:
-                            on_model_failure(model, models[index + 1])
-                        continue
-                    raise RuntimeError("; ".join(failures))
-                data = response.json()
-                choice = data["choices"][0]
+                    # A non-transient error (e.g. 400 malformed request) won't be fixed
+                    # by another model; fail fast. Transient errors fall through.
+                    if not self._is_transient(response):
+                        raise RuntimeError("; ".join(failures))
+                    self._advance_or_raise(
+                        failures, index=index, models=models, on_model_failure=on_model_failure
+                    )
+                    continue
+                # A 200 OK can still carry a gateway/provider error and no choices:
+                # OpenRouter surfaces upstream rate limits and outages this way. Treat
+                # an unusable body as a failed attempt and fall through instead of
+                # crashing on data["choices"][0].
+                try:
+                    data = response.json()
+                except ValueError:
+                    snippet = " ".join(response.text.split())[:300]
+                    failures.append(f"{model}: HTTP 200 with non-JSON body: {snippet}")
+                    self._advance_or_raise(
+                        failures, index=index, models=models, on_model_failure=on_model_failure
+                    )
+                    continue
+                choices = data.get("choices")
+                if not choices:
+                    detail = data.get("error", data)
+                    failures.append(f"{model}: HTTP 200 but no choices ({json.dumps(detail)[:300]})")
+                    self._advance_or_raise(
+                        failures, index=index, models=models, on_model_failure=on_model_failure
+                    )
+                    continue
+                choice = choices[0]
                 # Record what the server says it served; for llama-server the
                 # requested name is decorative, the response is authoritative.
                 served = data.get("model") or model
@@ -331,11 +373,11 @@ class ChatClient:
                 )
             except requests.RequestException as exc:
                 failures.append(f"{model}: {exc}")
-                if index + 1 < len(models):
-                    if on_model_failure is not None:
-                        on_model_failure(model, models[index + 1])
-                    continue
-                raise RuntimeError("; ".join(failures)) from exc
+                self._advance_or_raise(
+                    failures, index=index, models=models,
+                    on_model_failure=on_model_failure, from_exc=exc,
+                )
+                continue
         raise RuntimeError("; ".join(failures) or "no organizer models configured")
 
 
@@ -402,7 +444,7 @@ def build_user_prompt(sources: list[Transcript]) -> str:
         "content the others lack, assume the others simply missed it and KEEP that content.\n"
         "- Use agreement between sources to decide HOW a word was said (spelling, which "
         "homophone, a garbled name), never WHETHER a passage exists.\n"
-        "- A passage carried by a single source MUST be kept unless it is clearly recognition "
+        "- A passage carried by a single source SHOULD be kept unless it is clearly recognition "
         "garbage (random unconnected words, a degenerate repeated loop, an obvious mis-decode).\n"
         "- Align the sources chronologically and reconstruct the full spoken content that best "
         "explains all of them together.\n\n"

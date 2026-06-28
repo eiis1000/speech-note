@@ -766,6 +766,58 @@ class OrganizerLlmTests(unittest.TestCase):
         self.assertEqual(calls, ["stale:free", "working:free"])
         self.assertTrue(outcome.ok)
 
+    def test_http_200_error_body_falls_through_to_next_model(self) -> None:
+        # OpenRouter can return HTTP 200 with an {"error": ...} body and no choices
+        # (upstream rate limit / outage). That must fall through, not crash on
+        # data["choices"].
+        organizer = make_llm_organizer("first,second")
+        calls: list[str] = []
+
+        def fake_post(_url, *, data, **_kwargs):
+            model = json.loads(data)["model"]
+            calls.append(model)
+            if model == "first":
+                return fake_response(200, {"error": {"message": "rate-limited upstream", "code": 429}})
+            return fake_response(200, self.chat_payload("clean " * 90, model="second"))
+
+        sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
+        with mock.patch("speech_note.organizer.requests.post", side_effect=fake_post):
+            outcome = organizer.cleanup(sources)
+        self.assertEqual(calls, ["first", "second"])
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.served_model, "second")
+
+    def test_http_200_error_body_on_last_model_is_error_not_crash(self) -> None:
+        organizer = make_llm_organizer("only")
+        response = fake_response(200, {"error": {"message": "upstream down"}})
+        sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
+        with mock.patch("speech_note.organizer.requests.post", return_value=response):
+            outcome = organizer.cleanup(sources)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.method, "error")
+        assert outcome.error is not None
+        self.assertIn("no choices", outcome.error)
+
+    def test_http_200_non_json_body_falls_through(self) -> None:
+        organizer = make_llm_organizer("first,second")
+
+        def fake_post(_url, *, data, **_kwargs):
+            model = json.loads(data)["model"]
+            if model == "first":
+                bad = mock.Mock()
+                bad.ok = True
+                bad.status_code = 200
+                bad.text = "<html>502 Bad Gateway</html>"
+                bad.json.side_effect = ValueError("not json")
+                return bad
+            return fake_response(200, self.chat_payload("clean " * 90, model="second"))
+
+        sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
+        with mock.patch("speech_note.organizer.requests.post", side_effect=fake_post):
+            outcome = organizer.cleanup(sources)
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.served_model, "second")
+
     def test_truncated_output_is_an_error(self) -> None:
         organizer = make_llm_organizer()
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
