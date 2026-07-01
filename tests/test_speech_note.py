@@ -1099,6 +1099,35 @@ class PipelineEndToEndTests(unittest.TestCase):
             self.assertTrue(output.exists())
             self.assertEqual(output.read_text().strip(), session.cleanup.text)
 
+    def test_export_sources_writes_every_fed_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            extra = tmp / "google.txt"
+            extra.write_text("a google transcript that was also fed in")
+            export = tmp / "sources"
+            session = self.run_dry(
+                tmp, "--extra-transcript", str(extra), "--export-sources", str(export)
+            )
+            files = sorted(p.name for p in export.iterdir())
+            # One file per fed source (the dry-run "primary" user text + the extra),
+            # plus the cleaned result.
+            self.assertIn("clean.txt", files)
+            source_files = [n for n in files if n != "clean.txt"]
+            self.assertEqual(len(source_files), 2)
+            self.assertTrue(all(n[:2].isdigit() for n in source_files), files)
+            # The extra source round-trips verbatim (body is the transcript alone).
+            extra_export = next(export.glob("*google*.txt"))
+            self.assertEqual(
+                extra_export.read_text().strip(), "a google transcript that was also fed in"
+            )
+            self.assertEqual((export / "clean.txt").read_text().strip(), session.cleanup.text)
+
+    def test_no_export_sources_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            session = self.run_dry(tmp)
+            self.assertNotIn("exported_sources", session.paths)
+
     def test_extra_transcripts_reach_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)

@@ -27,6 +27,7 @@ from .config import (
 )
 from .model import Transcript
 from .naming import unique_output_path
+from .textproc import sanitize_filename_stem
 from .organizer import Organizer, build_organizer
 from .session import ArtifactStore, Session
 from .terminal import (
@@ -199,9 +200,39 @@ def write_output_file(config: "Config", session: Session) -> None:
     session.paths["output"] = str(config.output)
 
 
+def write_sources_export(config: "Config", session: Session) -> None:
+    """Write every transcript fed to the cleanup LM (plus the cleaned result) as its
+    own file under config.export_sources.
+
+    One file per source keeps each independently reusable as an --extra-transcript, so
+    the body is the transcript text alone; provenance lives in the filename. The set of
+    sources is exactly cleanup_sources(session) — the same list handed to the organizer.
+    """
+    if config.export_sources is None:
+        return
+    sources = cleanup_sources(session)
+    directory = config.export_sources
+    directory.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    for index, source in enumerate(sources, start=1):
+        name = sanitize_filename_stem(short_label(source.model) or source.label)
+        path = directory / f"{index:02d}-{name}.txt"
+        path.write_text(source.text + "\n", encoding="utf-8")
+        written.append(str(path))
+    cleanup = session.cleanup
+    if cleanup is not None and cleanup.text:
+        clean_path = directory / "clean.txt"
+        clean_path.write_text(cleanup.text + "\n", encoding="utf-8")
+        written.append(str(clean_path))
+    if written:
+        session.paths["exported_sources"] = str(directory)
+        session.note_fact("exported_sources", written)
+
+
 def commit_artifacts(config: "Config", session: Session) -> None:
     """Single commit point for all artifacts, including full-auto diagnostics."""
     write_output_file(config, session)
+    write_sources_export(config, session)
     error_diag_path: Path | None = None
     if config.full_auto and session.errors:
         anchor = config.output if config.output is not None else Path.cwd() / "speech-note"
@@ -294,6 +325,8 @@ def report(config: "Config", session: Session) -> None:
         cleanup = session.cleanup
         if cleanup is not None and cleanup.warning:
             print(f"warning: {cleanup.warning}", file=err)
+        if "exported_sources" in session.paths:
+            print(f"exported sources: {session.paths['exported_sources']}", file=err)
         if "error_diagnostics" in session.paths:
             print(f"error diagnostics: {session.paths['error_diagnostics']}", file=err)
         return
@@ -304,6 +337,8 @@ def report(config: "Config", session: Session) -> None:
     )
     if "output" in session.paths:
         print(f"saved output: {session.paths['output']}", file=err)
+    if "exported_sources" in session.paths:
+        print(f"exported sources: {session.paths['exported_sources']}", file=err)
     print(
         f"saved diagnostics: {session.paths.get('latest_diagnostics')} "
         f"and {session.paths.get('archive_diagnostics')}",

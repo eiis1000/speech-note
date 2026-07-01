@@ -45,6 +45,7 @@ class Config:
     no_asr: bool
     # outputs
     output: Path | None
+    export_sources: Path | None
     artifacts_dir: Path
     archive_dir: Path
     full_auto: bool
@@ -164,6 +165,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="Also write the cleaned transcript to this path.",
+    )
+    parser.add_argument(
+        "--export-sources",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Also write every transcript fed to the cleanup LM — each ASR pass and each "
+            "--extra-transcript — as its own file in DIR (NN-<source>.txt), plus the "
+            "cleaned result as clean.txt. Lets you compare what each source heard, or "
+            "reuse a single source later via --extra-transcript. Works in every mode."
+        ),
     )
     parser.add_argument(
         "--artifacts-dir",
@@ -416,6 +429,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         extra_transcripts=tuple(args.extra_transcript),
         no_asr=args.no_asr,
         output=output,
+        export_sources=args.export_sources,
         artifacts_dir=artifacts_dir,
         archive_dir=artifacts_dir / "logs",
         full_auto=args.full_auto,

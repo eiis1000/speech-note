@@ -143,6 +143,16 @@ A zip export containing one recording plus transcript files:
 speech-note --input /path/to/export.zip
 ```
 
+Export every transcript that was fed to the cleanup LM (each ASR pass and each
+`--extra-transcript`), one file per source plus the cleaned `clean.txt`, so you
+can compare what each source heard or reuse a single source later as an
+`--extra-transcript`:
+
+```sh
+speech-note --input rec.m4a --export-sources ./rec-sources/
+# -> rec-sources/01-<source>.txt, 02-<source>.txt, ..., clean.txt
+```
+
 Cleanup-only modes:
 
 ```sh
