@@ -50,6 +50,16 @@ class PromptTooLargeError(RuntimeError):
     pass
 
 
+@dataclasses.dataclass(frozen=True)
+class CleanupRequestPlan:
+    user_prompt: str
+    estimated_prompt_tokens: int
+    largest_source_tokens: int
+    requested_output_tokens: int
+    token_budget: int
+    output_cap_limited: bool
+
+
 def default_server_command(
     *,
     context_tokens: int,
@@ -497,6 +507,32 @@ def build_user_prompt(sources: list[Transcript]) -> str:
     )
 
 
+def cleanup_request_plan(
+    sources: list[Transcript],
+    *,
+    context_tokens: int,
+    max_output_tokens: int,
+) -> CleanupRequestPlan:
+    """Estimate the cleanup request exactly once, including output cap pressure."""
+    sources = _dedupe_sources([source for source in sources if source.text.strip()])
+    user_prompt = build_user_prompt(sources)
+    estimated_prompt_tokens = (
+        estimate_text_tokens(SYSTEM_PROMPT) + estimate_text_tokens(user_prompt) + 32
+    )
+    largest_source_tokens = max(estimate_text_tokens(s.text) for s in sources)
+    uncapped_output_tokens = max(1_024, largest_source_tokens * 2)
+    requested_output_tokens = min(max_output_tokens, uncapped_output_tokens)
+    token_budget = max(256, int(context_tokens * ORGANIZER_CONTEXT_SAFETY))
+    return CleanupRequestPlan(
+        user_prompt=user_prompt,
+        estimated_prompt_tokens=estimated_prompt_tokens,
+        largest_source_tokens=largest_source_tokens,
+        requested_output_tokens=requested_output_tokens,
+        token_budget=token_budget,
+        output_cap_limited=largest_source_tokens * 2 >= max_output_tokens,
+    )
+
+
 class Organizer:
     def __init__(
         self,
@@ -541,36 +577,31 @@ class Organizer:
         assert self.client is not None
         if self.supervisor is not None:
             self.supervisor.ensure_running()
-        user_prompt = build_user_prompt(sources)
-        estimated_prompt_tokens = (
-            estimate_text_tokens(SYSTEM_PROMPT) + estimate_text_tokens(user_prompt) + 32
+        plan = cleanup_request_plan(
+            sources,
+            context_tokens=self.context_tokens,
+            max_output_tokens=self.max_output_tokens,
         )
-        largest_source_tokens = max(estimate_text_tokens(s.text) for s in sources)
-        requested_output_tokens = min(
-            self.max_output_tokens,
-            max(1_024, largest_source_tokens * 2),
-        )
-        token_budget = max(256, int(self.context_tokens * ORGANIZER_CONTEXT_SAFETY))
-        if estimated_prompt_tokens + requested_output_tokens > token_budget:
+        if plan.estimated_prompt_tokens + plan.requested_output_tokens > plan.token_budget:
             raise PromptTooLargeError(
                 "estimated cleanup prompt is too large "
-                f"(~{estimated_prompt_tokens} input + {requested_output_tokens} output tokens "
-                f"> budget {token_budget} of context {self.context_tokens}); "
+                f"(~{plan.estimated_prompt_tokens} input + {plan.requested_output_tokens} "
+                f"output tokens > budget {plan.token_budget} of context {self.context_tokens}); "
                 "raise --organizer-context-tokens or use --organizer-provider openrouter"
             )
         timeout = request_timeout_seconds(
             configured_timeout=self.client.timeout,
-            estimated_prompt_tokens=estimated_prompt_tokens,
-            requested_output_tokens=requested_output_tokens,
+            estimated_prompt_tokens=plan.estimated_prompt_tokens,
+            requested_output_tokens=plan.requested_output_tokens,
         )
         label_callback = self.status_label_callback
         note_callback = self.status_note_callback
         response = self.client.chat(
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": plan.user_prompt},
             ],
-            max_tokens=requested_output_tokens,
+            max_tokens=plan.requested_output_tokens,
             timeout=timeout,
             on_model_attempt=(
                 # Just the model name — the status phase already says "Cleanup".
@@ -593,8 +624,8 @@ class Organizer:
             method="llama",
             served_model=response.served_model,
             finish_reason=response.finish_reason,
-            estimated_prompt_tokens=estimated_prompt_tokens,
-            requested_output_tokens=requested_output_tokens,
+            estimated_prompt_tokens=plan.estimated_prompt_tokens,
+            requested_output_tokens=plan.requested_output_tokens,
             request_timeout=round(timeout, 3),
         )
         if not outcome.text:
@@ -605,7 +636,7 @@ class Organizer:
             outcome.flagged_short = True
             outcome.error = (
                 "cleanup output was truncated at the output token limit "
-                f"({requested_output_tokens} tokens); the transcript is incomplete"
+                f"({plan.requested_output_tokens} tokens); the transcript is incomplete"
             )
             return outcome
         reference_length = _reference_words(sources)

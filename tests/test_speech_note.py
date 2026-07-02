@@ -327,7 +327,7 @@ class ConfigResolutionTests(unittest.TestCase):
         config = make_config("--organizer-provider", "openrouter")
         self.assertIn("openrouter.ai", config.organizer_api_base)
         self.assertEqual(config.organizer_context_tokens, 262144)
-        self.assertEqual(config.organizer_max_output_tokens, 32768)
+        self.assertEqual(config.organizer_max_output_tokens, 65536)
         self.assertEqual(config.organizer_auth_env, "OPENROUTER_API_KEY")
         self.assertTrue(config.organizer_models)
 
@@ -1110,7 +1110,7 @@ class PipelineEndToEndTests(unittest.TestCase):
             )
             files = sorted(p.name for p in export.iterdir())
             # One file per fed source (the dry-run "primary" user text + the extra),
-            # plus the cleaned result.
+            # plus the cleaned result. Heuristic cleanup sends no organizer prompt.
             self.assertIn("clean.txt", files)
             source_files = [n for n in files if n != "clean.txt"]
             self.assertEqual(len(source_files), 2)
@@ -1127,6 +1127,40 @@ class PipelineEndToEndTests(unittest.TestCase):
             tmp = Path(tmp_dir)
             session = self.run_dry(tmp)
             self.assertNotIn("exported_sources", session.paths)
+
+    def test_export_sources_writes_cleanup_prompt_for_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            export = tmp / "sources"
+            config = resolve_config(
+                parse_args(
+                    [
+                        "--input-text", "hello world",
+                        "--organizer-mode", "llama",
+                        "--organizer-api-base", "http://127.0.0.1:9/v1/chat/completions",
+                        "--export-sources", str(export),
+                        "--organizer-server-command",  # empty: no server launch
+                    ]
+                )
+            )
+            posted: dict[str, object] = {}
+
+            def fake_post(_url, *, data, **_kwargs):
+                posted.update(json.loads(data))
+                return fake_response(200, {"choices": [
+                    {"message": {"content": "hello world."}, "finish_reason": "stop"}
+                ]})
+
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                with mock.patch(
+                    "speech_note.organizer.requests.get",
+                    return_value=fake_response(503, {"error": "offline"}),
+                ):
+                    with mock.patch("speech_note.organizer.requests.post", side_effect=fake_post):
+                        run_dry_text_pipeline(config)
+            prompt = (export / "cleanup-prompt.txt").read_text()
+            messages = posted["messages"]
+            self.assertEqual(prompt, f"[system]\n{messages[0]['content']}\n\n[user]\n{messages[1]['content']}\n")
 
     def test_extra_transcripts_reach_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1172,6 +1206,48 @@ class FullAutoTests(unittest.TestCase):
             self.assertTrue(error_diag.exists())
             payload = json.loads(error_diag.read_text())
             self.assertTrue(payload["errors"])
+
+    def test_full_auto_cap_risk_exports_sources_and_skips_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            output = tmp / "note-clean.txt"
+            config = resolve_config(
+                parse_args(
+                    [
+                        "--input-text", "word " * 1200,
+                        "--full-auto",
+                        "--output", str(output),
+                        "--organizer-mode", "llama",
+                        "--organizer-max-output-tokens", "1024",
+                        "--organizer-server-command",  # empty: no server launch
+                    ]
+                )
+            )
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                with mock.patch("speech_note.organizer.requests.post") as post:
+                    session = run_dry_text_pipeline(config)
+            post.assert_not_called()
+            self.assertTrue(session.run_failed)
+            self.assertFalse(output.exists())
+            sources = tmp / "note-sources"
+            self.assertTrue(sources.is_dir())
+            self.assertTrue((sources / "cleanup-prompt.txt").exists())
+            prompt = (sources / "cleanup-prompt.txt").read_text()
+            self.assertIn("[system]", prompt)
+            self.assertIn("[user]", prompt)
+            self.assertIn("Source 1", prompt)
+            source_files = sorted(
+                path.name
+                for path in sources.glob("*.txt")
+                if path.name != "cleanup-prompt.txt"
+            )
+            self.assertEqual(len(source_files), 1)
+            self.assertFalse((sources / "clean.txt").exists())
+            error_diag = tmp / "note-clean-diagnostics.json"
+            payload = json.loads(error_diag.read_text())
+            self.assertEqual(payload["cleanup"]["method"], "skipped-too-large")
+            self.assertIn("output token cap", payload["cleanup"]["error"])
+            self.assertEqual(payload["paths"]["exported_sources"], str(sources))
 
     def test_full_auto_success_writes_only_clean_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

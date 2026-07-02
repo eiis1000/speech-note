@@ -28,7 +28,7 @@ from .config import (
 from .model import Transcript
 from .naming import unique_output_path
 from .textproc import sanitize_filename_stem
-from .organizer import Organizer, build_organizer
+from .organizer import Organizer, SYSTEM_PROMPT, build_organizer, cleanup_request_plan
 from .session import ArtifactStore, Session
 from .terminal import (
     copy_with_wl_copy,
@@ -150,6 +150,27 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
     sources = cleanup_sources(session)
     if not sources:
         return
+    if organizer.mode == "llama":
+        plan = cleanup_request_plan(
+            sources,
+            context_tokens=config.organizer_context_tokens,
+            max_output_tokens=config.organizer_max_output_tokens,
+        )
+        if plan.output_cap_limited:
+            export_dir = config.export_sources or auto_sources_export_dir(config)
+            error = (
+                "cleanup skipped: input is large enough that the estimated cleanup output "
+                f"would hit the configured output token cap ({plan.requested_output_tokens} tokens); "
+                f"exported ASR/source transcripts to {export_dir}"
+            )
+            session.cleanup = organizer_cleanup_skipped(
+                error=error,
+                estimated_prompt_tokens=plan.estimated_prompt_tokens,
+                requested_output_tokens=plan.requested_output_tokens,
+            )
+            session.add_error(f"cleanup: {error}")
+            write_sources_export(config, session, directory=export_dir)
+            return
     if config.organizer_provider != "local" and organizer.mode == "llama":
         print(
             f"note: sending transcripts to {config.organizer_provider} for cleanup; "
@@ -182,6 +203,23 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
         session.add_event("cleanup-warning", message=cleanup.warning)
 
 
+def organizer_cleanup_skipped(
+    *,
+    error: str,
+    estimated_prompt_tokens: int,
+    requested_output_tokens: int,
+) -> "CleanupOutcome":
+    from .model import CleanupOutcome
+
+    return CleanupOutcome(
+        method="skipped-too-large",
+        error=error,
+        flagged_short=True,
+        estimated_prompt_tokens=estimated_prompt_tokens,
+        requested_output_tokens=requested_output_tokens,
+    )
+
+
 # --- finalize: commit + report ---
 
 
@@ -200,7 +238,26 @@ def write_output_file(config: "Config", session: Session) -> None:
     session.paths["output"] = str(config.output)
 
 
-def write_sources_export(config: "Config", session: Session) -> None:
+def unique_directory_path(directory: Path) -> Path:
+    if not directory.exists():
+        return directory
+    for index in range(2, 1000):
+        candidate = directory.with_name(f"{directory.name}-{index}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"could not choose unused directory for {directory}")
+
+
+def auto_sources_export_dir(config: "Config") -> Path:
+    if config.output is not None:
+        stem = config.output.stem
+        if stem.endswith("-clean"):
+            stem = stem[: -len("-clean")]
+        return unique_directory_path(config.output.with_name(f"{stem}-sources"))
+    return unique_directory_path(Path.cwd() / "speech-note-sources")
+
+
+def write_sources_export(config: "Config", session: Session, *, directory: Path | None = None) -> None:
     """Write every transcript fed to the cleanup LM (plus the cleaned result) as its
     own file under config.export_sources.
 
@@ -208,12 +265,27 @@ def write_sources_export(config: "Config", session: Session) -> None:
     the body is the transcript text alone; provenance lives in the filename. The set of
     sources is exactly cleanup_sources(session) — the same list handed to the organizer.
     """
-    if config.export_sources is None:
+    directory = directory or config.export_sources
+    if directory is None:
         return
     sources = cleanup_sources(session)
-    directory = config.export_sources
     directory.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
+    if config.organizer_mode == "llama" and sources:
+        plan = cleanup_request_plan(
+            sources,
+            context_tokens=config.organizer_context_tokens,
+            max_output_tokens=config.organizer_max_output_tokens,
+        )
+        prompt_path = directory / "cleanup-prompt.txt"
+        prompt_path.write_text(
+            "[system]\n"
+            f"{SYSTEM_PROMPT}\n\n"
+            "[user]\n"
+            f"{plan.user_prompt}\n",
+            encoding="utf-8",
+        )
+        written.append(str(prompt_path))
     for index, source in enumerate(sources, start=1):
         name = sanitize_filename_stem(short_label(source.model) or source.label)
         path = directory / f"{index:02d}-{name}.txt"
