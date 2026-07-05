@@ -137,12 +137,7 @@ def cleanup_sources(session: Session) -> list[Transcript]:
         live = session.transcript_by_label("live")
         if live is not None:
             sources.append(live)
-    included = {id(source) for source in sources}
-    sources.extend(
-        t
-        for t in session.transcripts
-        if t.kind in {"external", "user"} and id(t) not in included
-    )
+    sources.extend(t for t in session.transcripts if t.kind in {"external", "user"})
     return sources
 
 
@@ -317,7 +312,7 @@ def commit_artifacts(config: "Config", session: Session) -> None:
         shutil.copyfile(Path(session.paths["latest_diagnostics"]), error_diag_path)
 
 
-def review_panels(config: "Config", session: Session) -> list[tuple[str, str]]:
+def review_panels(session: Session) -> list[tuple[str, str]]:
     panels: list[tuple[str, str]] = []
     asr = session.asr_transcripts()
     if asr:
@@ -432,7 +427,7 @@ def report(config: "Config", session: Session) -> None:
             print(f"- {message}", file=err)
     if not session.produced_output:
         return
-    panels = review_panels(config, session)
+    panels = review_panels(session)
     print_review(panels)
     if panels:
         started = time.monotonic()
@@ -612,7 +607,7 @@ def run_dry_text_pipeline(config: "Config") -> Session:
     if chunks:
         session.add_transcript(
             Transcript(
-                label="primary",
+                label="user",
                 model="dry-run-text",
                 kind="user",
                 text="\n".join(chunks),

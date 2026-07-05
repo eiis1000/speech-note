@@ -352,6 +352,13 @@ def fold_unified_input(args: argparse.Namespace) -> None:
         args.input_file = chosen
 
 
+def _organizer_model_list(explicit: str | None, default: list[str]) -> tuple[str, ...]:
+    """--organizer-model (a name or comma-separated fallback list) over the default."""
+    if explicit:
+        return tuple(part.strip() for part in explicit.split(",") if part.strip())
+    return tuple(default)
+
+
 def resolve_config(args: argparse.Namespace) -> Config:
     fold_unified_input(args)
     # Connectivity preset: bundle organizer provider + default model list. An explicit
@@ -382,11 +389,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
             mode_models = defaults.OPENROUTER_FREE_MODELS
         else:
             mode_models = defaults.OPENROUTER_PREFERRED_MODELS
-        models = (
-            tuple(part.strip() for part in args.organizer_model.split(",") if part.strip())
-            if args.organizer_model
-            else tuple(mode_models)
-        )
+        models = _organizer_model_list(args.organizer_model, mode_models)
         auth_env: str | None = defaults.OPENROUTER_API_KEY_ENV
         context_tokens = args.organizer_context_tokens or defaults.DEFAULT_OPENROUTER_CONTEXT_TOKENS
         max_output_tokens = (
@@ -394,11 +397,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         )
     else:
         api_base = args.organizer_api_base or defaults.DEFAULT_LOCAL_API_BASE
-        models = (
-            tuple(part.strip() for part in args.organizer_model.split(",") if part.strip())
-            if args.organizer_model
-            else (defaults.DEFAULT_LOCAL_MODEL_LABEL,)
-        )
+        models = _organizer_model_list(args.organizer_model, [defaults.DEFAULT_LOCAL_MODEL_LABEL])
         auth_env = None
         context_tokens = args.organizer_context_tokens or defaults.DEFAULT_ORGANIZER_CONTEXT_TOKENS
         max_output_tokens = (

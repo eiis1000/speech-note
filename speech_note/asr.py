@@ -25,9 +25,9 @@ from .config import (
     DEFAULT_OPENROUTER_ASR_MAX_OUTPUT_TOKENS,
     LIVE_ASR_MODEL,
     OPENROUTER_API_KEY_ENV,
+    CTC_STRIDE_SECONDS,
     OPENROUTER_ASR_MIN_TIMEOUT,
     OPENROUTER_ASR_MP3_SAMPLE_RATE,
-    SECONDARY_OVERLAP_SECONDS,
     AsrSource,
     asr_source_presentation,
     short_source_name,
@@ -55,7 +55,7 @@ def ctc_chunk_config() -> tuple[float, float]:
     """(chunk_length_seconds, stride_seconds) for the CTC backend's long-form
     striding: it transcribes any length in overlapping chunk_length windows that
     merge at the logit level, staying under the model's ~400s position cliff."""
-    return CTC_CHUNK_LENGTH_SECONDS, SECONDARY_OVERLAP_SECONDS
+    return CTC_CHUNK_LENGTH_SECONDS, CTC_STRIDE_SECONDS
 
 
 def crispasr_gpu_backend(device: str) -> str:

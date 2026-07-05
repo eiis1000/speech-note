@@ -252,27 +252,13 @@ def status_display() -> StatusDisplay:
 @contextlib.contextmanager
 def status_phase(label: str) -> Generator[StatusDisplay]:
     """Run a phase: a labelled stretch of work that owns the status line. Tasks
-    opened inside it (status_task) show as concurrent entries on that one line."""
+    opened inside it (start_task/finish_task on the yielded display) show as
+    concurrent entries on that one line."""
     _display.begin_phase(label)
     try:
         yield _display
     finally:
         _display.end_phase()
-
-
-@contextlib.contextmanager
-def status_task(name: str) -> Generator[None]:
-    """Mark a task running for the duration of the block; ✓ on success, ✗ on error.
-    Safe to use from worker threads running concurrently within one phase."""
-    _display.start_task(name)
-    error = False
-    try:
-        yield
-    except BaseException:
-        error = True
-        raise
-    finally:
-        _display.finish_task(name, error=error)
 
 
 @contextlib.contextmanager

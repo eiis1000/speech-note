@@ -266,7 +266,9 @@ def asr_source_presentation(model: str, effective_model: str | None = None) -> t
     return (effective_model or model), None
 
 
-SECONDARY_OVERLAP_SECONDS = 5.0
+# Overlap between adjacent CTC long-form windows (each side), merged at the
+# logit level by the HF ASR pipeline.
+CTC_STRIDE_SECONDS = 5.0
 
 # sherpa-onnx VAD: silero, reusing the same ONNX file onnx-asr already caches so
 # there is no second VAD source. Segments are capped well under the ~400s Parakeet
@@ -280,7 +282,7 @@ SHERPA_MAX_SEGMENT_SECONDS = 20.0
 # capping or skipping, the HF ASR pipeline transcribes the whole file in
 # chunk_length_s windows with stride_length_s overlap on each side and merges at
 # the logit level. 240s ≈ 3000 positions, comfortably under the cliff; the
-# stride defaults to SECONDARY_OVERLAP_SECONDS. There is no length limit.
+# stride defaults to CTC_STRIDE_SECONDS. There is no length limit.
 CTC_CHUNK_LENGTH_SECONDS = 240.0
 
 # --- cleanup LM ---

@@ -13,8 +13,8 @@ import dataclasses
 class Transcript:
     """A transcript with provenance.
 
-    label:   stable role of this source ("primary", "secondary", "live",
-             "extra:<filename>", "user").
+    label:   stable identity of this source within the run ("asr1".."asrN" in
+             collection order, "live", "extra:<filename>", "user").
     model:   identifier of whatever produced it (ASR model name, "human", ...).
     kind:    "asr-final" | "asr-live" | "external" | "user".
     quality_hint: optional one-line description of known reliability, passed to

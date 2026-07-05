@@ -571,7 +571,7 @@ class TranscriptInputViewTests(unittest.TestCase):
         session.add_transcript(
             Transcript(label="primary", model="draft.txt", kind="external", text="rough draft")
         )
-        panels = review_panels(make_config(), session)
+        panels = review_panels(session)
         self.assertIn(("draft.txt", "rough draft"), panels)
 
 
@@ -1087,7 +1087,7 @@ class PipelineEndToEndTests(unittest.TestCase):
             self.assertEqual(payload["schema"], 2)
             self.assertEqual(payload["cleanup"]["method"], "heuristic")
             self.assertFalse(payload["audio_levels"]["measured"])
-            self.assertEqual(payload["transcripts"][0]["label"], "primary")
+            self.assertEqual(payload["transcripts"][0]["label"], "user")
             self.assertEqual(payload["transcripts"][0]["kind"], "user")
             self.assertIn("config", payload)
             self.assertEqual(payload["errors"], [])

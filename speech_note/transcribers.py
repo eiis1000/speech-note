@@ -159,7 +159,9 @@ class WhisperCppTranscriber(Transcriber):
     ) -> None:
         self.model_name = model_name
         self.model_path = model_path if model_path is not None else default_whisper_cpp_model_path(model_name)
-        self.binary = resolve_whisper_cpp_binary(binary)
+        # Resolved lazily (first command build): a missing whisper-cli then fails
+        # this one source instead of aborting construction of the whole collection.
+        self._binary_arg = binary
         self.cpu_threads = cpu_threads
         self.device = device
         self.use_gpu = use_gpu
@@ -208,7 +210,7 @@ class WhisperCppTranscriber(Transcriber):
     def _command(self, path: Path, language: str) -> list[str]:
         self._ensure_model_installed()
         command = [
-            str(self.binary),
+            str(resolve_whisper_cpp_binary(self._binary_arg)),
             "--model", str(self.model_path),
             "--file", str(path),
             "--language", language,
