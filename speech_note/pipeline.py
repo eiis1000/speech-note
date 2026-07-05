@@ -71,11 +71,10 @@ def run_final_asr(
     # Preload in-process models (whose download already happened above) while we
     # normalize, so the heavy load overlaps audio I/O. A source that failed to
     # prepare has no usable transcriber to load.
-    failed_labels = {label for label, _s, _t, prep_error in prepared if prep_error is not None}
     in_process = [
-        transcriber
-        for label, _source, transcriber, _prep_error in prepared
-        if transcriber is not None and label not in failed_labels
+        job.transcriber
+        for job in prepared
+        if job.transcriber is not None and job.error is None
     ]
     preload_thread: threading.Thread | None = None
     if in_process:

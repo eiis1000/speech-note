@@ -11,6 +11,7 @@ is built lazily and downloads its model (consent-gated) only when it actually ru
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
 import os
 import subprocess
 import time
@@ -247,14 +248,20 @@ def run_source(
     return outcome
 
 
-# One prepared job: a stable label, the source, its transcriber (None for
-# subprocess backends), and a prep error if its model could not be made present.
-PreparedJob = tuple[str, AsrSource, "Transcriber | None", "str | None"]
+@dataclasses.dataclass(frozen=True)
+class PreparedSource:
+    """One source ready to run: a stable label, its transcriber (None for
+    subprocess backends), and the prep error if its model could not be made present."""
+
+    label: str
+    source: AsrSource
+    transcriber: Transcriber | None
+    error: str | None = None
 
 
 def prepare_sources(
     built: list[tuple[AsrSource, Transcriber | None]],
-) -> list[PreparedJob]:
+) -> list[PreparedSource]:
     """Make every source's model present, up front and on the calling thread.
 
     This is where model-download consent happens: on the main thread, serially,
@@ -267,16 +274,15 @@ def prepare_sources(
     source is *not* retried later under a spinner — it simply runs as a failure.
     Labels (asr1, asr2, …) are assigned here, once, over the full collection.
     """
-    prepared: list[PreparedJob] = []
+    prepared: list[PreparedSource] = []
     for index, (source, transcriber) in enumerate(built, start=1):
-        label = f"asr{index}"
         prep_error: str | None = None
         if transcriber is not None:
             try:
                 transcriber.ensure_downloaded()
             except Exception as exc:  # noqa: BLE001 — record and skip, don't abort the run
                 prep_error = str(exc)
-        prepared.append((label, source, transcriber, prep_error))
+        prepared.append(PreparedSource(f"asr{index}", source, transcriber, prep_error))
     return prepared
 
 
@@ -285,7 +291,7 @@ def run_asr_collection(
     session: "Session",
     audio_path: Path,
     *,
-    prepared: list[PreparedJob],
+    prepared: list[PreparedSource],
     duration: float | None,
 ) -> None:
     """Run every prepared source and record its outcome, in collection order.
@@ -299,34 +305,35 @@ def run_asr_collection(
     if not prepared:
         return
 
-    groups: dict[str, list[PreparedJob]] = {}
+    groups: dict[str, list[PreparedSource]] = {}
     for job in prepared:
-        groups.setdefault(job[1].device_kind, []).append(job)
+        groups.setdefault(job.source.device_kind, []).append(job)
+    display_names = _unique_display_names(prepared)
 
     results: dict[str, AsrOutcome] = {}
     # One "ASR" phase; every source — across both device groups — is a task on the
     # single status line, showing live elapsed and flipping to ✓/✗ as it finishes.
     with status_phase("ASR") as display:
 
-        def run_group(group: list[PreparedJob]) -> list[tuple[str, AsrOutcome]]:
+        def run_group(group: list[PreparedSource]) -> list[tuple[str, AsrOutcome]]:
             out: list[tuple[str, AsrOutcome]] = []
-            for label, source, transcriber, prep_error in group:
-                name = short_source_name(source)
-                if prep_error is not None:
+            for job in group:
+                name = display_names[job.label]
+                if job.error is not None:
                     # Model could not be made present (declined/failed in prepare_sources);
                     # show it as a failed task and don't re-attempt or re-prompt.
                     display.start_task(name)
                     display.finish_task(name, error=True)
-                    out.append((label, AsrOutcome(name=label, error=prep_error)))
+                    out.append((job.label, AsrOutcome(name=job.label, error=job.error)))
                     continue
                 display.start_task(name)
                 outcome = run_source(
-                    config, source, audio_path,
-                    label=label, duration=duration, transcriber=transcriber,
+                    config, job.source, audio_path,
+                    label=job.label, duration=duration, transcriber=job.transcriber,
                 )
                 # run_source never raises — derive the task's ✓/✗ from the outcome.
                 display.finish_task(name, error=not outcome.ok)
-                out.append((label, outcome))
+                out.append((job.label, outcome))
             return out
 
         if len(groups) > 1:
@@ -338,6 +345,18 @@ def run_asr_collection(
         else:
             results.update(run_group(next(iter(groups.values()))))
 
-    for label, _source, _transcriber, _prep_error in prepared:
-        if label in results:
-            session.record_asr_outcome(results[label])
+    for job in prepared:
+        if job.label in results:
+            session.record_asr_outcome(results[job.label])
+
+
+def _unique_display_names(prepared: list[PreparedSource]) -> dict[str, str]:
+    """Status-line name per label; duplicates get a counter ("whisper 2") so two
+    sources of the same backend don't share one task slot on the status line."""
+    names: dict[str, str] = {}
+    seen: dict[str, int] = {}
+    for job in prepared:
+        name = short_source_name(job.source)
+        seen[name] = seen.get(name, 0) + 1
+        names[job.label] = name if seen[name] == 1 else f"{name} {seen[name]}"
+    return names

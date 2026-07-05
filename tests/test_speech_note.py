@@ -60,6 +60,7 @@ from speech_note.transcribers import (
     FasterWhisperTranscriber,
     OpenRouterTranscriber,
     SherpaTranscriber,
+    Transcriber,
     default_whisper_cpp_model_path,
     whisper_cpp_model_name,
 )
@@ -529,13 +530,13 @@ class AsrPrepareTests(unittest.TestCase):
         transcriber = mock.Mock(spec=["ensure_downloaded"])
         prepared = prepare_sources([(source, transcriber)])
         transcriber.ensure_downloaded.assert_called_once_with()
-        self.assertEqual(prepared[0][0], "asr1")
-        self.assertIsNone(prepared[0][3])  # no prep error
+        self.assertEqual(prepared[0].label, "asr1")
+        self.assertIsNone(prepared[0].error)
 
     def test_failed_prepare_records_error_without_running_transcribe(self) -> None:
         source = parse_asr_source("sherpa")
 
-        class _Boom:
+        class _Boom(Transcriber):
             def ensure_downloaded(self) -> None:
                 raise RuntimeError("download declined")
 
@@ -543,7 +544,7 @@ class AsrPrepareTests(unittest.TestCase):
                 raise AssertionError("must not transcribe after a failed prepare")
 
         prepared = prepare_sources([(source, _Boom())])
-        self.assertEqual(prepared[0][3], "download declined")
+        self.assertEqual(prepared[0].error, "download declined")
         session = Session(make_config())
         run_asr_collection(
             make_config(), session, Path("/tmp/none.wav"), prepared=prepared, duration=1.0
