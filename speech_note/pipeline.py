@@ -26,7 +26,7 @@ from .config import (
     short_model_name,
 )
 from .model import Transcript
-from .naming import unique_output_path
+from .naming import unique_directory_path, unique_output_path
 from .textproc import sanitize_filename_stem
 from .organizer import Organizer, SYSTEM_PROMPT, build_organizer, cleanup_request_plan
 from .session import ArtifactStore, Session
@@ -232,16 +232,6 @@ def write_output_file(config: "Config", session: Session) -> None:
     config.output.parent.mkdir(parents=True, exist_ok=True)
     config.output.write_text(cleanup.text + "\n", encoding="utf-8")
     session.paths["output"] = str(config.output)
-
-
-def unique_directory_path(directory: Path) -> Path:
-    if not directory.exists():
-        return directory
-    for index in range(2, 1000):
-        candidate = directory.with_name(f"{directory.name}-{index}")
-        if not candidate.exists():
-            return candidate
-    raise RuntimeError(f"could not choose unused directory for {directory}")
 
 
 def auto_sources_export_dir(config: "Config") -> Path:

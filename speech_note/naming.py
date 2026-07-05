@@ -56,6 +56,16 @@ def unique_output_path(directory: Path, stem: str, suffix: str) -> Path:
     raise RuntimeError(f"could not choose unused output filename for {stem}{suffix}")
 
 
+def unique_directory_path(directory: Path) -> Path:
+    if not directory.exists():
+        return directory
+    for index in range(2, 1000):
+        candidate = directory.with_name(f"{directory.name}-{index}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"could not choose unused directory for {directory}")
+
+
 def full_auto_source_stem(config: "Config") -> str:
     """Stem describing the input and its transcript sources."""
     extra_tags = [

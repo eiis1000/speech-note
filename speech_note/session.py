@@ -158,14 +158,12 @@ class Session:
         # (order is a soft preference, not a type), then the live preview, then any
         # user-supplied or externally provided transcript (e.g. --input-text or
         # --extra-transcript / --no-asr runs, which have no ASR pass of their own).
+        for kind in ("asr-final", "asr-live"):
+            for transcript in self.transcripts:
+                if transcript.kind == kind:
+                    return transcript.text
         for transcript in self.transcripts:
-            if transcript.kind == "asr-final":
-                return transcript.text
-        live = self.transcript_by_label("live")
-        if live is not None:
-            return live.text
-        for transcript in self.transcripts:
-            if transcript.kind in {"asr-live", "user", "external"}:
+            if transcript.kind in {"user", "external"}:
                 return transcript.text
         return ""
 
