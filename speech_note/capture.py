@@ -48,8 +48,8 @@ from .pipeline import (
     start_organizer_prewarm,
 )
 from .session import Session
-from .terminal import cbreak_stdin
-from .textproc import format_elapsed, normalize_spacing
+from .terminal import cbreak_stdin, status_display, status_phase
+from .textproc import normalize_spacing
 from .transcribers import FasterWhisperTranscriber, WhisperCppTranscriber
 
 if TYPE_CHECKING:
@@ -166,32 +166,21 @@ class CaptureRunner:
         self.live_chunks: list[str] = []
         self.live_transcriber_ready = threading.Event()
         self.live_transcriber: FasterWhisperTranscriber | None = None
-        self.recording_started_at: float | None = None
-        self._terminal_lock = threading.Lock()
-        self._status_width = shutil.get_terminal_size((120, 40)).columns
         self._last_warning_at = 0.0
         self._threads: list[threading.Thread] = []
 
     # --- terminal ---
 
-    def _print_status(self, message: str) -> None:
-        padded = message[: self._status_width].ljust(self._status_width)
-        with self._terminal_lock:
-            print(f"\r{padded}", end="", file=sys.stderr, flush=True)
-
-    def _print_event(self, message: str) -> None:
-        with self._terminal_lock:
-            print("\r" + " " * self._status_width + "\r", end="", file=sys.stderr, flush=True)
-            print(message, file=sys.stderr, flush=True)
+    def _note(self, message: str) -> None:
+        """Print a permanent line above the capture status line (thread-safe)."""
+        status_display().note(message)
 
     def _request_stop(self, message: str) -> None:
         if self.stop_requested_at is not None:
             return
         self.stop_requested_at = time.monotonic()
         self.stop_event.set()
-        with self._terminal_lock:
-            print(file=sys.stderr, flush=True)
-        print(message, file=sys.stderr, flush=True)
+        self._note(message)
 
     # --- workers ---
 
@@ -199,16 +188,6 @@ class CaptureRunner:
         thread = threading.Thread(target=target, name=name, daemon=True)
         thread.start()
         self._threads.append(thread)
-
-    def _timer_worker(self) -> None:
-        while not self.stop_event.wait(1.0):
-            if self.recording_started_at is None:
-                continue
-            elapsed = format_elapsed(time.monotonic() - self.recording_started_at)
-            if self.replay_mode:
-                self._print_status(f"Replaying {elapsed}. Press Enter to stop early.")
-            else:
-                self._print_status(f"Listening {elapsed}. Press Enter when done.")
 
     def _load_live_transcriber(self) -> None:
         started = time.monotonic()
@@ -262,7 +241,7 @@ class CaptureRunner:
                 )
                 if text:
                     self.live_chunks.append(text)
-                    self._print_event(text)
+                    self._note(text)
             except Exception as exc:
                 self.session.add_event("live-transcribe-error", message=str(exc))
             finally:
@@ -295,7 +274,7 @@ class CaptureRunner:
             self.session.note_stream_status(status, queue_depth=self.audio_queue.qsize())
             now = time.monotonic()
             if now - self._last_warning_at >= 5.0:
-                self._print_event(f"audio-status: {status}")
+                self._note(f"audio-status: {status}")
                 self._last_warning_at = now
         try:
             self.audio_queue.put_nowait(bytes(indata))
@@ -304,7 +283,7 @@ class CaptureRunner:
             self.session.note_audio_queue_full()
             now = time.monotonic()
             if now - self._last_warning_at >= 5.0:
-                self._print_event("audio queue full; dropping frames")
+                self._note("audio queue full; dropping frames")
                 self._last_warning_at = now
 
     # --- frame handling ---
@@ -334,14 +313,14 @@ class CaptureRunner:
         if char == "\x03":
             raise KeyboardInterrupt
         if char in {"\r", "\n"}:
-            self._request_stop("\nStopping capture. Finishing transcription...")
+            self._request_stop("Stopping capture. Finishing transcription...")
 
     def _consume_until_stopped(self) -> None:
         with cbreak_stdin():
             while True:
                 self._check_stdin_for_stop()
                 if self.replay_mode and self.replay_finished.is_set() and self.stop_requested_at is None:
-                    self._request_stop("\nReplay finished. Finishing transcription...")
+                    self._request_stop("Replay finished. Finishing transcription...")
                 if self.stop_event.is_set() and self.stop_requested_at is None:
                     # Stop came from a signal handler.
                     self.stop_requested_at = time.monotonic()
@@ -387,30 +366,35 @@ class CaptureRunner:
         self._spawn(self._transcribe_worker, "live-transcribe")
         previous_sigint = signal.signal(signal.SIGINT, self._signal_stop)
         previous_sigterm = signal.signal(signal.SIGTERM, self._signal_stop)
-        try:
-            if self.replay_mode:
-                replay_wav = self.temp_dir / "replay-input.wav"
-                convert_to_pcm_wav(config.replay_input_file, replay_wav, sample_rate=self.sample_rate)
-                self._start_capture_threads()
-                self._spawn(lambda: self._replay_feeder(replay_wav), "replay-feeder")
-                self._consume_until_stopped()
-            else:
-                with sd.RawInputStream(
-                    samplerate=self.sample_rate,
-                    blocksize=0,
-                    dtype="int16",
-                    channels=1,
-                    device=config.input_device,
-                    latency="high",
-                    callback=self._stream_callback,
-                ):
+        # One status phase spans capture and the live-transcription drain: the
+        # phase label carries the state, live transcript chunks print above it
+        # as notes, and the right-aligned total is the recording timer.
+        with status_phase("Replaying" if self.replay_mode else "Listening"):
+            try:
+                if self.replay_mode:
+                    assert config.replay_input_file is not None
+                    replay_wav = self.temp_dir / "replay-input.wav"
+                    convert_to_pcm_wav(config.replay_input_file, replay_wav, sample_rate=self.sample_rate)
                     self._start_capture_threads()
+                    self._spawn(lambda: self._replay_feeder(replay_wav), "replay-feeder")
                     self._consume_until_stopped()
-        finally:
-            self.stop_event.set()
-            signal.signal(signal.SIGINT, previous_sigint)
-            signal.signal(signal.SIGTERM, previous_sigterm)
-        return self._drain_and_collect()
+                else:
+                    with sd.RawInputStream(
+                        samplerate=self.sample_rate,
+                        blocksize=0,
+                        dtype="int16",
+                        channels=1,
+                        device=config.input_device,
+                        latency="high",
+                        callback=self._stream_callback,
+                    ):
+                        self._start_capture_threads()
+                        self._consume_until_stopped()
+            finally:
+                self.stop_event.set()
+                signal.signal(signal.SIGINT, previous_sigint)
+                signal.signal(signal.SIGTERM, previous_sigterm)
+            return self._drain_and_collect()
 
     def _signal_stop(self, signum: int, frame: object) -> None:
         del signum, frame
@@ -418,23 +402,15 @@ class CaptureRunner:
 
     def _start_capture_threads(self) -> None:
         config = self.config
-        self.recording_started_at = time.monotonic()
         if self.replay_mode:
-            print(
-                f"Replaying {config.replay_input_file}. Press Enter to stop early.",
-                file=sys.stderr,
-                flush=True,
-            )
+            self._note(f"Replaying {config.replay_input_file}. Press Enter to stop early.")
         else:
-            print("Listening. Press Enter when done. Ctrl-C also stops.", file=sys.stderr, flush=True)
+            self._note("Listening. Press Enter when done. Ctrl-C also stops.")
         if self.sample_rate != config.sample_rate:
-            print(
-                f"Live capture sample rate: {self.sample_rate} Hz (requested {config.sample_rate} Hz).",
-                file=sys.stderr,
-                flush=True,
+            self._note(
+                f"Live capture sample rate: {self.sample_rate} Hz (requested {config.sample_rate} Hz)."
             )
-        print("Raw transcript will print live below.", file=sys.stderr, flush=True)
-        self._spawn(self._timer_worker, "status-timer")
+        self._note("Raw transcript will print live below.")
         self._spawn(self._load_live_transcriber, "live-model-load")
         self._spawn(self._prewarm_primary, "primary-prewarm")
 
