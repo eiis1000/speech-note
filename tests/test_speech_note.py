@@ -1330,25 +1330,25 @@ class AsrSourcePresentationTests(unittest.TestCase):
 
 class ModelConsentTests(unittest.TestCase):
     def test_auto_yes_skips_prompt(self) -> None:
-        from speech_note import models
+        from speech_note import install as models
 
         self.assertTrue(models.consent_to_download("m", "/d", auto_yes=True))
 
     def test_non_interactive_refuses(self) -> None:
-        from speech_note import models
+        from speech_note import install as models
 
         self.assertFalse(
             models.consent_to_download("m", "/d", auto_yes=False, interactive=False)
         )
 
     def test_require_consent_raises_when_declined(self) -> None:
-        from speech_note import models
+        from speech_note import install as models
 
         with self.assertRaises(models.ModelInstallDeclined):
             models.require_consent("m", "/d", auto_yes=False, interactive=False)
 
     def test_load_or_install_uses_cache_without_consent(self) -> None:
-        from speech_note import models
+        from speech_note import install as models
 
         calls: list[bool] = []
         result = models.load_or_install(
@@ -1359,7 +1359,7 @@ class ModelConsentTests(unittest.TestCase):
         self.assertEqual(calls, [True])  # only the offline attempt, no download
 
     def test_load_or_install_downloads_on_miss_with_auto_yes(self) -> None:
-        from speech_note import models
+        from speech_note import install as models
 
         calls: list[bool] = []
 
@@ -1374,7 +1374,7 @@ class ModelConsentTests(unittest.TestCase):
         self.assertEqual(calls, [True, False])  # offline miss, then download
 
     def test_load_or_install_raises_when_declined(self) -> None:
-        from speech_note import models
+        from speech_note import install as models
 
         def loader(local_only: bool) -> str:
             if local_only:

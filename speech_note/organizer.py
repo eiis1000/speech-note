@@ -102,7 +102,7 @@ def ensure_default_cleanup_model(*, auto_yes: bool, interactive: bool | None = N
     """
     if DEFAULT_GGUF_MODEL.exists():
         return True
-    from .models import ModelInstallDeclined, require_consent
+    from .install import ModelInstallDeclined, require_consent
 
     try:
         require_consent(

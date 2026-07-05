@@ -81,7 +81,7 @@ class FasterWhisperTranscriber:
             return
         from faster_whisper import WhisperModel
 
-        from .models import load_or_install
+        from .install import load_or_install
 
         kwargs: dict[str, Any] = {
             "device": self.device,
@@ -150,7 +150,7 @@ class WhisperCppTranscriber:
         if self.model_path != default_whisper_cpp_model_path(self.model_name):
             # An explicit --whisper-cpp-model path we can't source automatically.
             raise RuntimeError(f"whisper.cpp model not found: {self.model_path}")
-        from .models import require_consent
+        from .install import require_consent
 
         require_consent(
             f"Whisper model '{model}' (whisper.cpp ggml)",
@@ -290,7 +290,7 @@ class CTCTranscriber:
         started = time.monotonic()
         from transformers import AutoModelForCTC, AutoProcessor, pipeline
 
-        from .models import load_or_install
+        from .install import load_or_install
 
         def _load(local_only: bool) -> tuple[Any, Any]:
             kwargs: dict[str, Any] = {"local_files_only": local_only}
@@ -409,7 +409,7 @@ class SherpaTranscriber:
             return self._model_files
         from huggingface_hub import hf_hub_download, snapshot_download
 
-        from .models import load_or_install
+        from .install import load_or_install
 
         def _load(local_only: bool) -> tuple[str, str]:
             kwargs: dict[str, Any] = {"local_files_only": local_only}
