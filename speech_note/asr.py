@@ -332,7 +332,8 @@ def run_asr_collection(
                     label=job.label, duration=duration, transcriber=job.transcriber,
                 )
                 # run_source never raises — derive the task's ✓/✗ from the outcome.
-                display.finish_task(name, error=not outcome.ok)
+                # A skip (backend ran fine, heard no speech) is not an error.
+                display.finish_task(name, error=outcome.error is not None)
                 out.append((job.label, outcome))
             return out
 
