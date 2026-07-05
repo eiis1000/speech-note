@@ -11,12 +11,11 @@ is built lazily and downloads its model (consent-gated) only when it actually ru
 from __future__ import annotations
 
 import concurrent.futures
-import inspect
 import os
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from .config import (
     ASR_BACKENDS,
@@ -41,6 +40,7 @@ from .transcribers import (
     OpenRouterTranscriber,
     PocketSphinxTranscriber,
     SherpaTranscriber,
+    Transcriber,
     WhisperCppTranscriber,
     thread_env,
 )
@@ -48,9 +48,6 @@ from .transcribers import (
 if TYPE_CHECKING:
     from .cli import Config
     from .session import Session
-
-# Any concrete transcriber; subprocess backends have no transcriber object (None).
-Transcriber = Any
 
 
 def ctc_chunk_config() -> tuple[float, float]:
@@ -200,20 +197,6 @@ def _run_subprocess_backend(config: "Config", source: AsrSource, audio_path: Pat
     return result.stdout
 
 
-def _transcribe(transcriber: Transcriber, audio_path: Path, language: str, duration: float | None) -> str:
-    """Call transcribe_file, passing duration only to backends that accept it."""
-    if "duration_seconds" in inspect.signature(transcriber.transcribe_file).parameters:
-        return transcriber.transcribe_file(audio_path, language, duration_seconds=duration)
-    return transcriber.transcribe_file(audio_path, language)
-
-
-def ensure_loaded(transcriber: Transcriber | None) -> None:
-    """Preload an in-process transcriber's model if it supports it (no-op otherwise)."""
-    loader = getattr(transcriber, "ensure_loaded", None)
-    if callable(loader):
-        loader()
-
-
 def run_source(
     config: "Config",
     source: AsrSource,
@@ -233,7 +216,10 @@ def run_source(
         else:
             if transcriber is None:
                 transcriber = build_transcriber(config, source)
-            text = _transcribe(transcriber, audio_path, config.language, duration)
+            assert transcriber is not None
+            text = transcriber.transcribe_file(
+                audio_path, config.language, duration_seconds=duration
+            )
             effective = (
                 transcriber.effective_model
                 if isinstance(transcriber, WhisperCppTranscriber)
@@ -285,10 +271,9 @@ def prepare_sources(
     for index, (source, transcriber) in enumerate(built, start=1):
         label = f"asr{index}"
         prep_error: str | None = None
-        ensure = getattr(transcriber, "ensure_downloaded", None)
-        if callable(ensure):
+        if transcriber is not None:
             try:
-                ensure()
+                transcriber.ensure_downloaded()
             except Exception as exc:  # noqa: BLE001 — record and skip, don't abort the run
                 prep_error = str(exc)
         prepared.append((label, source, transcriber, prep_error))

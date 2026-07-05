@@ -1,8 +1,9 @@
 """ASR transcriber implementations.
 
-Each transcriber exposes transcribe_file(path, language) -> str and raises on
-failure. Heavy runtimes are imported lazily so building one backend never pays
-for another's dependencies.
+Every backend subclasses Transcriber: transcribe_file raises on failure, and the
+two prepare hooks default to no-ops so callers never need duck-typing. Heavy
+runtimes are imported lazily so building one backend never pays for another's
+dependencies.
 """
 
 from __future__ import annotations
@@ -51,7 +52,27 @@ def resolve_whisper_cpp_binary(binary: Path | None = None) -> Path:
     return Path(found)
 
 
-class FasterWhisperTranscriber:
+class Transcriber:
+    """One ASR backend.
+
+    ensure_downloaded makes the model present (consent-gated) without loading it;
+    ensure_loaded brings the heavy runtime up. Both default to no-ops so backends
+    with nothing to fetch or keep resident don't have to stub them.
+    """
+
+    def ensure_downloaded(self) -> None:
+        return None
+
+    def ensure_loaded(self) -> None:
+        return None
+
+    def transcribe_file(
+        self, path: Path, language: str, *, duration_seconds: float | None = None
+    ) -> str:
+        raise NotImplementedError
+
+
+class FasterWhisperTranscriber(Transcriber):
     def __init__(
         self,
         *,
@@ -106,7 +127,10 @@ class FasterWhisperTranscriber:
         # have on the fetch, so the up-front prep step loads here too.
         self.ensure_loaded()
 
-    def transcribe_file(self, path: Path, language: str) -> str:
+    def transcribe_file(
+        self, path: Path, language: str, *, duration_seconds: float | None = None
+    ) -> str:
+        del duration_seconds  # faster-whisper handles any length natively
         self.ensure_loaded()
         assert self.model is not None
         segments, _info = self.model.transcribe(
@@ -121,7 +145,7 @@ class FasterWhisperTranscriber:
         return normalize_spacing(" ".join(segment.text.strip() for segment in segments))
 
 
-class WhisperCppTranscriber:
+class WhisperCppTranscriber(Transcriber):
     def __init__(
         self,
         *,
@@ -199,7 +223,10 @@ class WhisperCppTranscriber:
             command.append("--no-gpu")
         return command
 
-    def transcribe_file(self, path: Path, language: str) -> str:
+    def transcribe_file(
+        self, path: Path, language: str, *, duration_seconds: float | None = None
+    ) -> str:
+        del duration_seconds  # whisper.cpp handles any length natively
         result = subprocess.run(
             self._command(path, language),
             check=False,
@@ -230,7 +257,7 @@ class WhisperCppTranscriber:
             pass
 
 
-class CTCTranscriber:
+class CTCTranscriber(Transcriber):
     """Parakeet CTC (and similar) via transformers, in-process.
 
     Long audio is handled by the HF ASR pipeline's native long-form transcription
@@ -362,7 +389,7 @@ class CTCTranscriber:
         return normalize_spacing(str(text))
 
 
-class SherpaTranscriber:
+class SherpaTranscriber(Transcriber):
     """Parakeet TDT via sherpa-onnx, in-process on the CPU.
 
     Same Parakeet-TDT-0.6B-v2 int8 model as the onnx backend, but sherpa-onnx runs
@@ -516,7 +543,7 @@ class SherpaTranscriber:
         return normalize_spacing(" ".join(texts))
 
 
-class PocketSphinxTranscriber:
+class PocketSphinxTranscriber(Transcriber):
     def __init__(self, *, model_name: str, sample_rate: int) -> None:
         self.model_name = model_name
         self.sample_rate = sample_rate
@@ -591,7 +618,7 @@ def _openrouter_asr_user_text(language: str) -> str:
     return text
 
 
-class OpenRouterTranscriber:
+class OpenRouterTranscriber(Transcriber):
     """Whole-file ASR via an OpenRouter audio-LLM (the chat ``input_audio`` path).
 
     The dedicated OpenRouter transcription models reject a long single request, but an
@@ -627,9 +654,6 @@ class OpenRouterTranscriber:
             raise RuntimeError(
                 f"{self.auth_env} is not set; it is required for the 'openrouter' ASR backend"
             )
-
-    def ensure_loaded(self) -> None:
-        return None
 
     def _effective_timeout(self, duration_seconds: float | None) -> float:
         """Floor for short clips; grow the ceiling with audio length (the request
@@ -668,17 +692,6 @@ class OpenRouterTranscriber:
         ]
         response = client.chat(messages, max_tokens=self.max_output_tokens, timeout=timeout)
         return normalize_spacing(response.content)
-
-
-# Every transcriber exposes transcribe_file(path, language[, duration_seconds]) -> str.
-AsrTranscriber = (
-    FasterWhisperTranscriber
-    | WhisperCppTranscriber
-    | SherpaTranscriber
-    | CTCTranscriber
-    | PocketSphinxTranscriber
-    | OpenRouterTranscriber
-)
 
 
 def thread_env(cpu_threads: int) -> dict[str, str]:

@@ -18,7 +18,7 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .asr import build_transcribers, ensure_loaded, prepare_sources, run_asr_collection
+from .asr import build_transcribers, prepare_sources, run_asr_collection
 from .audio import normalize_audio_for_asr, probe_duration_seconds
 from .config import (
     ARCHIVE_AUDIO_EXTENSIONS,
@@ -40,9 +40,10 @@ from .terminal import (
 from .transcribers import WhisperCppTranscriber
 
 if TYPE_CHECKING:
-    from .asr import Transcriber
     from .cli import Config
     from .config import AsrSource
+    from .model import CleanupOutcome
+    from .transcribers import Transcriber
 
 
 # --- building blocks ---
@@ -83,7 +84,7 @@ def run_final_asr(
             started = time.monotonic()
             try:
                 for transcriber in in_process:
-                    ensure_loaded(transcriber)
+                    transcriber.ensure_loaded()
             except Exception:
                 pass  # a load failure surfaces (with its real error) when the source runs
             finally:
