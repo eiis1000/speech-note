@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -58,6 +59,10 @@ class CleanupRequestPlan:
     requested_output_tokens: int
     token_budget: int
     output_cap_limited: bool
+    # Length expectation, shared by the prompt and the post-hoc shortness check so
+    # the two can never drift apart.
+    reference_words: int
+    minimum_words: int
 
 
 def default_server_command(
@@ -148,7 +153,7 @@ def request_timeout_seconds(
 class LocalServerSupervisor:
     """Launches and supervises a local llama-server when one isn't running."""
 
-    def __init__(self, *, launch_command: list[str] | None, healthcheck_url: str) -> None:
+    def __init__(self, *, launch_command: Sequence[str] | None, healthcheck_url: str) -> None:
         self.launch_command = launch_command
         self.healthcheck_url = healthcheck_url
         self.process: subprocess.Popen[str] | None = None
@@ -233,7 +238,7 @@ class ChatClient:
         self,
         *,
         api_base: str,
-        models: list[str],
+        models: Sequence[str],
         timeout: float,
         auth_env: str | None = None,
     ) -> None:
@@ -519,10 +524,11 @@ def cleanup_request_plan(
     estimated_prompt_tokens = (
         estimate_text_tokens(SYSTEM_PROMPT) + estimate_text_tokens(user_prompt) + 32
     )
-    largest_source_tokens = max(estimate_text_tokens(s.text) for s in sources)
+    largest_source_tokens = max((estimate_text_tokens(s.text) for s in sources), default=0)
     uncapped_output_tokens = max(1_024, largest_source_tokens * 2)
     requested_output_tokens = min(max_output_tokens, uncapped_output_tokens)
     token_budget = max(256, int(context_tokens * ORGANIZER_CONTEXT_SAFETY))
+    reference_words = _reference_words(sources)
     return CleanupRequestPlan(
         user_prompt=user_prompt,
         estimated_prompt_tokens=estimated_prompt_tokens,
@@ -530,6 +536,8 @@ def cleanup_request_plan(
         requested_output_tokens=requested_output_tokens,
         token_budget=token_budget,
         output_cap_limited=largest_source_tokens * 2 >= max_output_tokens,
+        reference_words=reference_words,
+        minimum_words=max(1, math.ceil(reference_words * CLEANUP_MIN_LENGTH_RATIO)),
     )
 
 
@@ -556,15 +564,21 @@ class Organizer:
         if self.supervisor is not None:
             self.supervisor.close()
 
-    def cleanup(self, sources: list[Transcript]) -> CleanupOutcome:
+    def cleanup(
+        self, sources: list[Transcript], plan: CleanupRequestPlan | None = None
+    ) -> CleanupOutcome:
+        """Clean the sources; ``plan`` (if the caller already computed one for the
+        same sources) avoids rebuilding the prompt over the full transcript text."""
         sources = [s for s in sources if s.text.strip()]
         sources = _dedupe_sources(sources)
         started = time.monotonic()
-        outcome = self._cleanup_inner(sources)
+        outcome = self._cleanup_inner(sources, plan)
         outcome.seconds = round(time.monotonic() - started, 3)
         return outcome
 
-    def _cleanup_inner(self, sources: list[Transcript]) -> CleanupOutcome:
+    def _cleanup_inner(
+        self, sources: list[Transcript], plan: CleanupRequestPlan | None
+    ) -> CleanupOutcome:
         if not sources:
             return CleanupOutcome(method="empty")
         if self.mode == "off":
@@ -572,21 +586,24 @@ class Organizer:
         if self.mode == "heuristic":
             return CleanupOutcome(text=heuristic_cleanup(sources[0].text), method="heuristic")
         try:
-            return self._cleanup_with_llm(sources)
+            return self._cleanup_with_llm(sources, plan)
         except PromptTooLargeError as exc:
             return CleanupOutcome(method="skipped-too-large", error=str(exc))
         except Exception as exc:
             return CleanupOutcome(method="error", error=f"cleanup request failed: {exc}")
 
-    def _cleanup_with_llm(self, sources: list[Transcript]) -> CleanupOutcome:
+    def _cleanup_with_llm(
+        self, sources: list[Transcript], plan: CleanupRequestPlan | None
+    ) -> CleanupOutcome:
         assert self.client is not None
         if self.supervisor is not None:
             self.supervisor.ensure_running()
-        plan = cleanup_request_plan(
-            sources,
-            context_tokens=self.context_tokens,
-            max_output_tokens=self.max_output_tokens,
-        )
+        if plan is None:
+            plan = cleanup_request_plan(
+                sources,
+                context_tokens=self.context_tokens,
+                max_output_tokens=self.max_output_tokens,
+            )
         if plan.estimated_prompt_tokens + plan.requested_output_tokens > plan.token_budget:
             raise PromptTooLargeError(
                 "estimated cleanup prompt is too large "
@@ -644,13 +661,11 @@ class Organizer:
                 f"({plan.requested_output_tokens} tokens); the transcript is incomplete"
             )
             return outcome
-        reference_length = _reference_words(sources)
-        minimum_words = max(1, math.ceil(reference_length * CLEANUP_MIN_LENGTH_RATIO))
         cleaned_words = count_words(outcome.text)
         flags: list[str] = []
-        if cleaned_words < minimum_words:
+        if cleaned_words < plan.minimum_words:
             flags.append(
-                f"suspiciously short ({cleaned_words} words < {minimum_words} expected "
+                f"suspiciously short ({cleaned_words} words < {plan.minimum_words} expected "
                 f"from the average source length)"
             )
         if _ends_mid_sentence(outcome.text):

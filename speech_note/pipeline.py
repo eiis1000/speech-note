@@ -150,6 +150,7 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
     sources = cleanup_sources(session)
     if not sources:
         return
+    plan = None
     if organizer.mode == "llama":
         plan = cleanup_request_plan(
             sources,
@@ -182,7 +183,7 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
         "heuristic": "Cleanup (heuristic)",
     }.get(organizer.mode)
     if phase_label is None:
-        session.cleanup = organizer.cleanup(sources)
+        session.cleanup = organizer.cleanup(sources, plan)
     else:
         with status_phase(phase_label) as display:
             # The cleanup LM is one task whose identity changes as it falls through
@@ -190,7 +191,7 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
             organizer.status_label_callback = lambda model: display.replace_task(short_model_name(model))
             organizer.status_note_callback = display.note
             try:
-                session.cleanup = organizer.cleanup(sources)
+                session.cleanup = organizer.cleanup(sources, plan)
             finally:
                 organizer.status_label_callback = None
                 organizer.status_note_callback = None
