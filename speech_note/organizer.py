@@ -551,6 +551,11 @@ class Organizer:
         self.status_label_callback: Callable[[str], None] | None = None
         self.status_note_callback: Callable[[str], None] | None = None
 
+    def close(self) -> None:
+        """Stop the supervised local server, if this organizer owns one."""
+        if self.supervisor is not None:
+            self.supervisor.close()
+
     def cleanup(self, sources: list[Transcript]) -> CleanupOutcome:
         sources = [s for s in sources if s.text.strip()]
         sources = _dedupe_sources(sources)
@@ -707,18 +712,18 @@ def _dedupe_sources(sources: list[Transcript]) -> list[Transcript]:
     return unique
 
 
-def build_organizer(config: "Config") -> tuple[Organizer, LocalServerSupervisor | None]:
-    """Wire up the organizer stack for the resolved config."""
+def build_organizer(config: "Config") -> Organizer:
+    """Wire up the organizer stack for the resolved config.
+
+    The returned Organizer owns its supervisor (if any); callers release the
+    local server with organizer.close()."""
     if config.organizer_mode != "llama":
-        return (
-            Organizer(
-                mode=config.organizer_mode,
-                client=None,
-                supervisor=None,
-                context_tokens=config.organizer_context_tokens,
-                max_output_tokens=config.organizer_max_output_tokens,
-            ),
-            None,
+        return Organizer(
+            mode=config.organizer_mode,
+            client=None,
+            supervisor=None,
+            context_tokens=config.organizer_context_tokens,
+            max_output_tokens=config.organizer_max_output_tokens,
         )
     client = ChatClient(
         api_base=config.organizer_api_base,
@@ -757,11 +762,10 @@ def build_organizer(config: "Config") -> tuple[Organizer, LocalServerSupervisor 
             launch_command=launch_command,
             healthcheck_url=client.models_url(),
         )
-    organizer = Organizer(
+    return Organizer(
         mode=config.organizer_mode,
         client=client,
         supervisor=supervisor,
         context_tokens=config.organizer_context_tokens,
         max_output_tokens=config.organizer_max_output_tokens,
     )
-    return organizer, supervisor

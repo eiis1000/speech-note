@@ -512,7 +512,7 @@ def load_extra_transcripts(config: "Config", session: Session) -> None:
 def run_file_pipeline(config: "Config") -> Session:
     assert config.input_file is not None
     session = Session(config)
-    organizer, supervisor = build_organizer(config)
+    organizer = build_organizer(config)
     load_extra_transcripts(config, session)
     # --no-asr: don't transcribe the audio, just clean up the provided transcript(s).
     built = [] if config.no_asr else build_transcribers(config)
@@ -524,13 +524,13 @@ def run_file_pipeline(config: "Config") -> Session:
     finally:
         if prewarm is not None:
             prewarm.join(timeout=0.1)
-        if supervisor is not None:
-            supervisor.close()
+        organizer.close()
     return session
 
 
 def start_organizer_prewarm(config: "Config", organizer: Organizer) -> threading.Thread | None:
-    if config.organizer_mode != "llama" or organizer.supervisor is None:
+    supervisor = organizer.supervisor
+    if config.organizer_mode != "llama" or supervisor is None:
         return None
     if not config.organizer_prewarm:
         # Sequencing escape hatch (--organizer-no-prewarm): don't load the cleanup
@@ -541,7 +541,7 @@ def start_organizer_prewarm(config: "Config", organizer: Organizer) -> threading
 
     def prewarm() -> None:
         with contextlib.suppress(Exception):
-            organizer.supervisor.ensure_running()
+            supervisor.ensure_running()
 
     thread = threading.Thread(target=prewarm, daemon=True)
     thread.start()
@@ -594,20 +594,19 @@ def run_transcript_pipeline(config: "Config") -> Session:
     file(s) as equal peers (the cleanup LM reconciles them)."""
     assert config.extra_transcripts
     session = Session(config)
-    organizer, supervisor = build_organizer(config)
+    organizer = build_organizer(config)
     load_extra_transcripts(config, session)
     try:
         finalize(config, session, organizer)
     finally:
-        if supervisor is not None:
-            supervisor.close()
+        organizer.close()
     return session
 
 
 def run_dry_text_pipeline(config: "Config") -> Session:
     assert config.dry_run_text is not None
     session = Session(config)
-    organizer, supervisor = build_organizer(config)
+    organizer = build_organizer(config)
     chunks = [chunk.strip() for chunk in config.dry_run_text.split("||") if chunk.strip()]
     if chunks:
         session.add_transcript(
@@ -622,6 +621,5 @@ def run_dry_text_pipeline(config: "Config") -> Session:
     try:
         finalize(config, session, organizer)
     finally:
-        if supervisor is not None:
-            supervisor.close()
+        organizer.close()
     return session

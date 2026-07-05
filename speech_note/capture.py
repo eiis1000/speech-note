@@ -48,7 +48,7 @@ from .pipeline import (
     start_organizer_prewarm,
 )
 from .session import Session
-from .terminal import cbreak_stdin, status_phase
+from .terminal import cbreak_stdin
 from .textproc import format_elapsed, normalize_spacing
 from .transcribers import FasterWhisperTranscriber, WhisperCppTranscriber
 
@@ -479,7 +479,7 @@ class CaptureRunner:
 
 def run_capture_pipeline(config: "Config") -> Session:
     session = Session(config)
-    organizer, supervisor = build_organizer(config)
+    organizer = build_organizer(config)
     load_extra_transcripts(config, session)
     runner = CaptureRunner(config, session)
     prewarm = start_organizer_prewarm(config, organizer)
@@ -490,14 +490,14 @@ def run_capture_pipeline(config: "Config") -> Session:
             session.add_error(f"audio input failed: {exc}")
             raise SystemExit(f"audio input failed: {exc}") from None
         if recording_path is not None:
-            with status_phase("Loading ASR models"):
-                built = build_transcribers(config)
+            # Construction is lazy and cheap; the heavy model load happens inside
+            # run_final_asr (prepare + preload), under its own status phases.
+            built = build_transcribers(config)
             run_final_asr(config, session, recording_path, built=built)
         finalize(config, session, organizer)
     finally:
         if prewarm is not None:
             prewarm.join(timeout=0.1)
-        if supervisor is not None:
-            supervisor.close()
+        organizer.close()
         runner.cleanup()
     return session
