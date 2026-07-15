@@ -19,6 +19,7 @@ import wave
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 from speech_note import audio, naming, textproc
@@ -110,6 +111,7 @@ class AudioTests(unittest.TestCase):
         stats = audio.pcm_stats(pcm)
         self.assertEqual(stats.peak_abs, 2000)
         self.assertAlmostEqual(stats.rms_abs, 1581.14, places=1)
+        assert stats.peak_dbfs is not None
         self.assertLess(stats.peak_dbfs, 0)
 
     def test_pcm_stats_empty(self) -> None:
@@ -345,7 +347,7 @@ class ConfigResolutionTests(unittest.TestCase):
     def test_full_auto_redirects_artifacts_and_names_output(self) -> None:
         config = make_config("--full-auto", "--input", "/recordings/My Lecture.m4a")
         self.assertNotEqual(config.artifacts_dir, Path("."))
-        self.assertIsNotNone(config.output)
+        assert config.output is not None
         self.assertEqual(config.output.name, "my-lecture-clean.txt")
 
     def test_full_auto_respects_explicit_output(self) -> None:
@@ -528,6 +530,7 @@ class AsrBackendTests(unittest.TestCase):
                 label="asr1", duration=2.0, transcriber=None,
             )
         self.assertTrue(outcome.ok)
+        assert outcome.transcript is not None
         self.assertEqual(outcome.transcript.text, "hello world")
         self.assertEqual(outcome.transcript.label, "asr1")
         self.assertEqual(outcome.transcript.model, "nemo-parakeet-tdt-0.6b-v2")
@@ -543,6 +546,7 @@ class AsrBackendTests(unittest.TestCase):
                 config, source, Path("/tmp/a.wav"),
                 label="asr1", duration=1.0, transcriber=None,
             )
+        assert outcome.transcript is not None
         self.assertEqual(outcome.transcript.text, "[ 0.0, 1.0]: hello")
 
     def test_run_source_failure_is_an_error_outcome(self) -> None:
@@ -554,6 +558,7 @@ class AsrBackendTests(unittest.TestCase):
                 label="asr1", duration=1.0, transcriber=None,
             )
         self.assertFalse(outcome.ok)
+        assert outcome.error is not None
         self.assertIn("model exploded", outcome.error)
         self.assertIsNone(outcome.skip_reason)
 
@@ -648,9 +653,10 @@ class InteractiveCaptureSetupTests(unittest.TestCase):
 
 class OrganizerPrewarmTests(unittest.TestCase):
     @staticmethod
-    def _organizer() -> tuple[object, mock.Mock]:
+    def _organizer() -> tuple[Organizer, mock.Mock]:
         supervisor = mock.Mock()
-        return types.SimpleNamespace(supervisor=supervisor), supervisor
+        fake = cast(Organizer, types.SimpleNamespace(supervisor=supervisor))
+        return fake, supervisor
 
     def test_no_prewarm_flag_skips_background_load(self) -> None:
         config = make_config("--organizer-mode", "llama", "--organizer-no-prewarm")
@@ -665,7 +671,7 @@ class OrganizerPrewarmTests(unittest.TestCase):
         organizer, supervisor = self._organizer()
         with redirect_stderr(io.StringIO()):
             thread = start_organizer_prewarm(config, organizer)
-            self.assertIsNotNone(thread)
+            assert thread is not None
             thread.join(timeout=5)
         supervisor.ensure_running.assert_called_once()
 
@@ -875,6 +881,7 @@ class OrganizerLlmTests(unittest.TestCase):
         with mock.patch("speech_note.organizer.requests.post", return_value=response):
             outcome = organizer.cleanup(sources)
         self.assertTrue(outcome.flagged_short)
+        assert outcome.error is not None
         self.assertIn("truncated", outcome.error)
 
     def test_short_output_is_flagged_but_kept(self) -> None:
@@ -886,6 +893,7 @@ class OrganizerLlmTests(unittest.TestCase):
         self.assertEqual(outcome.text, "too short")
         self.assertTrue(outcome.flagged_short)
         self.assertIsNone(outcome.error)
+        assert outcome.warning is not None
         self.assertIn("short", outcome.warning)
 
     def test_mid_sentence_output_is_flagged_but_kept(self) -> None:
@@ -900,6 +908,7 @@ class OrganizerLlmTests(unittest.TestCase):
         self.assertEqual(outcome.text, cut_off.strip())  # output preserved, not deleted
         self.assertTrue(outcome.flagged_short)
         self.assertIsNone(outcome.error)  # a flag, never an error/deletion
+        assert outcome.warning is not None
         self.assertIn("mid-sentence", outcome.warning)
 
     def test_complete_output_is_not_flagged_mid_sentence(self) -> None:
@@ -983,9 +992,11 @@ class ServerCommandTests(unittest.TestCase):
                 with mock.patch("speech_note.organizer.shutil.which", return_value="/bin/llama-server"):
                     # KV offload is on by default (fixed upstream; ~1.5x faster).
                     command = default_server_command(context_tokens=4096)
+                    assert command is not None
                     self.assertNotIn("--no-kv-offload", command)
                     # The workaround for older stacks is still reachable.
                     command = default_server_command(context_tokens=4096, kv_offload=False)
+                    assert command is not None
                     self.assertIn("--no-kv-offload", command)
 
     def test_default_server_command_missing_model(self) -> None:
@@ -1001,7 +1012,7 @@ class ServerCommandTests(unittest.TestCase):
             with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", Path("/nonexistent.gguf")):
                 with mock.patch("speech_note.organizer.shutil.which", return_value="/bin/llama-server"):
                     command = default_server_command(context_tokens=4096, model_path=stronger)
-                    self.assertIsNotNone(command)
+                    assert command is not None
                     self.assertIn(str(stronger), command)
 
     def test_cli_organizer_gguf_flag(self) -> None:
@@ -1147,6 +1158,7 @@ class PipelineEndToEndTests(unittest.TestCase):
             output = tmp / "out" / "note.txt"
             session = self.run_dry(tmp, "--output", str(output))
             self.assertTrue(output.exists())
+            assert session.cleanup is not None
             self.assertEqual(output.read_text().strip(), session.cleanup.text)
 
     def test_export_sources_writes_every_fed_transcript(self) -> None:
@@ -1170,6 +1182,7 @@ class PipelineEndToEndTests(unittest.TestCase):
             self.assertEqual(
                 extra_export.read_text().strip(), "a google transcript that was also fed in"
             )
+            assert session.cleanup is not None
             self.assertEqual((export / "clean.txt").read_text().strip(), session.cleanup.text)
 
     def test_no_export_sources_writes_nothing(self) -> None:
@@ -1209,7 +1222,7 @@ class PipelineEndToEndTests(unittest.TestCase):
                     with mock.patch("speech_note.organizer.requests.post", side_effect=fake_post):
                         run_dry_text_pipeline(config)
             prompt = (export / "cleanup-prompt.txt").read_text()
-            messages = posted["messages"]
+            messages = cast("list[dict[str, str]]", posted["messages"])
             self.assertEqual(prompt, f"[system]\n{messages[0]['content']}\n\n[user]\n{messages[1]['content']}\n")
 
     def test_extra_transcripts_reach_cleanup(self) -> None:
@@ -1333,7 +1346,9 @@ class SessionTests(unittest.TestCase):
     def test_quiet_audio_warning(self) -> None:
         session = Session(make_config(tmp_path=Path(".")))
         session.observe_audio_frame(struct.pack("<hh", 100, -100))
-        self.assertIn("very quiet", session.audio_level_warning())
+        warning = session.audio_level_warning()
+        assert warning is not None
+        self.assertIn("very quiet", warning)
 
     def test_artifact_store_writes_recording(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -113,6 +113,7 @@ class ArchiveFullStackTests(unittest.TestCase):
             self.assertFalse(session.run_failed)
             self._assert_both_asr_sources_ran(session)
             # "off" => clean output is the primary transcript verbatim.
+            assert session.cleanup is not None
             self.assertEqual(session.cleanup.text, session.asr_transcripts()[0].text)
             self.assertIn("transcription", (tmp / "clean.latest").read_text().lower())
             self.assertEqual(json.loads((tmp / "diagnostics.latest.json").read_text())["schema"], 2)
@@ -125,6 +126,7 @@ class ArchiveFullStackTests(unittest.TestCase):
             session = self._run(tmp, zip_path, "--organizer-mode", "heuristic")
             self.assertFalse(session.run_failed)
             self._assert_both_asr_sources_ran(session)
+            assert session.cleanup is not None
             self.assertEqual(session.cleanup.method, "heuristic")
             self.assertTrue(session.cleanup.text.strip())
 
@@ -150,6 +152,7 @@ class ArchiveFullStackTests(unittest.TestCase):
             self.assertFalse(session.run_failed)
             self._assert_both_asr_sources_ran(session)
             cleanup = session.cleanup
+            assert cleanup is not None
             self.assertEqual(cleanup.method, "llama")
             self.assertIsNone(cleanup.error)
             self.assertTrue(cleanup.served_model)
@@ -247,6 +250,7 @@ class SecondarySherpaFullStackTests(unittest.TestCase):
             )
             # ~50s source -> ~54 words; looped 9x is ~480. Whole-clip coverage, not
             # just the first segment.
+            assert outcome.transcript is not None
             words = len(outcome.transcript.text.split())
             self.assertGreaterEqual(words, 400, msg=f"under-covered: only {words} words for {duration:.0f}s")
 
@@ -309,6 +313,7 @@ class SecondaryCtcLongFormFullStackTests(unittest.TestCase):
             # just the first window. The source ~50s clip transcribes to ~54
             # words; looped 9x that is ~480. Without the inputs_to_logits_ratio
             # fix the pipeline keeps only the first window (~250 words).
+            assert outcome.transcript is not None
             words = len(outcome.transcript.text.split())
             self.assertGreaterEqual(words, 400, msg=f"under-covered: only {words} words for {duration:.0f}s")
 

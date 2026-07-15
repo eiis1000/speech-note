@@ -6,4 +6,4 @@ remote LM, and archive every run.
 """
 
 # Bumped one patch per commit; surfaced by `speech-note --version`.
-__version__ = "2.1.18"
+__version__ = "2.1.19"
