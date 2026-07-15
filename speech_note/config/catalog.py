@@ -1,9 +1,10 @@
-"""Static defaults and model tables.
+"""Static defaults, model tables, and the ASR source type.
 
 Everything here is a default, not a runtime decision: runtime resolution
 (per-backend model defaults, provider overrides, full-auto rerouting) lives in
 cli.resolve_config so that provenance — did the user set this? — is tracked at
-parse time instead of inferred from values later.
+parse time instead of inferred from values later. Parsing of user-supplied specs
+lives in config.parsing; status-line display names live in config.display.
 """
 
 from __future__ import annotations
@@ -11,6 +12,25 @@ from __future__ import annotations
 import dataclasses
 import os
 from pathlib import Path
+
+__all__ = [
+    "SAMPLE_RATE", "FRAME_MS", "CHANNELS", "SAMPLE_WIDTH", "VAD_SUPPORTED_SAMPLE_RATES",
+    "QUIET_AUDIO_PEAK_DBFS", "NORMALIZE_TARGET_RMS_DBFS", "NORMALIZE_PEAK_CEILING_DBFS",
+    "NORMALIZE_MAX_GAIN", "LIVE_ASR_MODEL", "OPENROUTER_ASR_MODEL", "DEFAULT_ASR_CPU_THREADS",
+    "WHISPER_CPP_MODEL_DIR", "WHISPER_CPP_MODEL_ALIASES", "BackendSpec", "ASR_BACKENDS",
+    "AsrSource", "DEFAULT_ASR_SOURCES", "ONLINE_PAID_ASR_SOURCES", "CTC_STRIDE_SECONDS",
+    "SHERPA_VAD_REPO", "SHERPA_VAD_FILE", "SHERPA_MAX_SEGMENT_SECONDS", "CTC_CHUNK_LENGTH_SECONDS",
+    "DEFAULT_ORGANIZER_MODE", "DEFAULT_ORGANIZER_PROVIDER", "DEFAULT_LOCAL_API_BASE",
+    "DEFAULT_LOCAL_MODEL_LABEL", "DEFAULT_GGUF_MODEL", "DEFAULT_GGUF_REPO", "DEFAULT_GGUF_FILE",
+    "DEFAULT_GGUF_SIZE_HINT", "DEFAULT_ORGANIZER_CONTEXT_TOKENS", "DEFAULT_ORGANIZER_MAX_OUTPUT_TOKENS",
+    "DEFAULT_OPENROUTER_API_BASE", "OPENROUTER_FREE_MODELS", "OPENROUTER_PAID_MODELS",
+    "OPENROUTER_ASR_MP3_SAMPLE_RATE", "DEFAULT_OPENROUTER_ASR_MAX_OUTPUT_TOKENS",
+    "OPENROUTER_ASR_MIN_TIMEOUT", "OPENROUTER_PREFERRED_MODELS", "OPENROUTER_API_KEY_ENV",
+    "DEFAULT_OPENROUTER_CONTEXT_TOKENS", "DEFAULT_OPENROUTER_MAX_OUTPUT_TOKENS",
+    "ORGANIZER_MIN_REQUEST_TIMEOUT", "ORGANIZER_MAX_REQUEST_TIMEOUT", "ORGANIZER_CONTEXT_SAFETY",
+    "CLEANUP_MIN_LENGTH_RATIO", "CLEANUP_TARGET_LENGTH_RATIO",
+    "ARCHIVE_AUDIO_EXTENSIONS", "ARCHIVE_TRANSCRIPT_EXTENSIONS",
+]
 
 # --- audio ---
 SAMPLE_RATE = 16_000
@@ -31,7 +51,7 @@ NORMALIZE_MAX_GAIN = 12.0
 # LM as a peer (in list order). Order is only a soft preference: it decides which
 # transcript is surfaced as the raw output when cleanup is off or fails. Quality
 # information is attached per-model and only when we have something to say (see
-# ASR_MODEL_NOTES) — most sources carry no reliability claim at all.
+# config.display.ASR_MODEL_NOTES) — most sources carry no reliability claim at all.
 LIVE_ASR_MODEL = "Systran/faster-whisper-tiny.en"
 # The OpenRouter audio-LLM used as a network ASR source (the "openrouter" backend).
 # Gemini 3 Flash accepts a whole long recording as chat input_audio and transcribes
@@ -129,7 +149,7 @@ def _default_device(backend: str) -> str:
 
 # The bundled default collection: GPU Whisper + CPU sherpa-onnx Parakeet. They use
 # different devices, so they run concurrently for free. Overridable per run via
-# --asr or a user config file (see parse_asr_sources / load_user_asr_sources).
+# --asr or a user config file (see config.parsing).
 DEFAULT_ASR_SOURCES: tuple[AsrSource, ...] = (
     AsrSource("whisper-cpp", "medium-q8_0", "gpu"),
     AsrSource("sherpa", "", "cpu"),
@@ -145,126 +165,6 @@ ONLINE_PAID_ASR_SOURCES: tuple[AsrSource, ...] = (
     AsrSource("openrouter", OPENROUTER_ASR_MODEL, "net"),
     *DEFAULT_ASR_SOURCES,
 )
-
-
-def parse_asr_source(token: str) -> AsrSource:
-    """Parse one ``backend[:model][@device]`` spec into a resolved AsrSource."""
-    token = token.strip()
-    if not token:
-        raise ValueError("empty ASR source spec")
-    rest, _, device = token.partition("@")
-    backend, _, model = rest.partition(":")
-    backend = backend.strip()
-    if backend not in ASR_BACKENDS:
-        raise ValueError(
-            f"unknown ASR backend {backend!r}; choose from {', '.join(sorted(ASR_BACKENDS))}"
-        )
-    return AsrSource(backend, model.strip(), device.strip() or "auto").resolved()
-
-
-def parse_asr_sources(tokens: list[str]) -> tuple[AsrSource, ...]:
-    """Parse repeatable --asr values (each itself comma-separated) into a collection."""
-    sources: list[AsrSource] = []
-    for raw in tokens:
-        for piece in raw.split(","):
-            piece = piece.strip()
-            if piece:
-                sources.append(parse_asr_source(piece))
-    return tuple(sources)
-
-
-# A user config file listing the default ASR collection, one `backend[:model][@device]`
-# spec per line (blank lines and # comments ignored). Mirrors USER_ENV_FILE: it lets a
-# user change the default collection without editing source. CLI --asr overrides it.
-USER_ASR_FILE = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "speech-note" / "asr"
-
-
-def load_user_asr_sources(path: Path | None = None) -> tuple[AsrSource, ...]:
-    """Read the ASR collection from USER_ASR_FILE; empty tuple if absent/empty."""
-    path = path or USER_ASR_FILE
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, NotADirectoryError, PermissionError):
-        return ()
-    tokens = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
-    return parse_asr_sources(tokens)
-
-
-# Per-model presentation for the cleanup prompt: a friendly display name and an
-# optional reliability hint shown to the cleanup LM alongside the transcript.
-# Keyed by model. Models not listed get their plain model name and NO hint — we
-# only annotate a source when we actually have something to say about it.
-ASR_MODEL_NOTES: dict[str, dict[str, str]] = {
-    "large-v3-turbo-q5_k": {
-        "display": "Whisper Large V3 Turbo Q5_K",
-        "hint": (
-            "Warning: this model has a tendency to repeat words and phrases; if "
-            "other transcripts do not corroborate a repetition, ignore it"
-        ),
-    },
-}
-
-
-# Short, hand-picked names for the live status line. Auto-deriving them is useless
-# ("csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8" tells you nothing at a
-# glance and blows out the line width), so these are curated. ASR sources are named
-# by backend; the cleanup LM is named by model id. Unknowns fall back to the leaf.
-ASR_BACKEND_SHORT_NAMES: dict[str, str] = {
-    "whisper-cpp": "whisper",
-    "faster-whisper": "faster-whisper",
-    "sherpa": "parakeet",
-    "ctc": "parakeet-ctc",
-    "onnx": "parakeet-onnx",
-    "crispasr": "crispasr",
-    "pocketsphinx": "sphinx",
-    # "openrouter" is named by its model (see MODEL_SHORT_NAMES).
-}
-
-MODEL_SHORT_NAMES: dict[str, str] = {
-    "google/gemini-3-flash-preview": "gemini",
-    "google/gemini-3.1-flash-lite": "gemini-lite",
-    "deepseek/deepseek-v3.2": "deepseek",
-    "openai/gpt-oss-120b:free": "gpt-oss",
-    "nvidia/nemotron-3-super-120b-a12b:free": "nemotron-super",
-    "qwen/qwen3-next-80b-a3b-instruct:free": "qwen3-next",
-    "meta-llama/llama-3.3-70b-instruct:free": "llama-3.3",
-    "google/gemma-4-31b-it:free": "gemma-4",
-    "nousresearch/hermes-3-llama-3.1-405b:free": "hermes-3",
-    "nvidia/nemotron-3-ultra-550b-a55b:free": "nemotron-ultra",
-    "local-gguf": "local",  # DEFAULT_LOCAL_MODEL_LABEL
-}
-
-
-def short_model_name(model: str) -> str:
-    """A short status-line name for a cleanup-LM model id."""
-    if model in MODEL_SHORT_NAMES:
-        return MODEL_SHORT_NAMES[model]
-    return model.split("/")[-1].split(":")[0]
-
-
-def short_source_name(source: "AsrSource") -> str:
-    """A short status-line name for an ASR source: by backend, or by model for the
-    network audio-LLM backend."""
-    if source.backend == "openrouter":
-        return short_model_name(source.model)
-    return ASR_BACKEND_SHORT_NAMES.get(source.backend, source.backend)
-
-
-def asr_source_presentation(model: str, effective_model: str | None = None) -> tuple[str, str | None]:
-    """(display name, optional cleanup-prompt hint) for an ASR transcript.
-
-    effective_model is the file that actually ran (e.g. the resolved whisper.cpp
-    ggml name); it is used as the display name when the model has no note.
-    """
-    note = ASR_MODEL_NOTES.get(model)
-    if note is not None:
-        return note["display"], note["hint"]
-    return (effective_model or model), None
-
 
 # Overlap between adjacent CTC long-form windows (each side), merged at the
 # logit level by the HF ASR pipeline.
@@ -367,31 +267,3 @@ CLEANUP_TARGET_LENGTH_RATIO = 0.8
 # --- archive mode ---
 ARCHIVE_AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav", ".ogg", ".opus", ".flac", ".aac", ".webm", ".mp4"}
 ARCHIVE_TRANSCRIPT_EXTENSIONS = {".txt", ".srt", ".vtt", ".json"}
-
-
-# A KEY=VALUE file (e.g. OPENROUTER_API_KEY=...) read at startup so secrets travel
-# with speech-note regardless of the working directory or shell — kept out of the
-# Nix store / git, unlike a direnv .envrc which only loads inside the repo tree.
-USER_ENV_FILE = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "speech-note" / "env"
-
-
-def load_user_env(path: Path | None = None) -> None:
-    """Populate os.environ from USER_ENV_FILE without overriding the live shell.
-
-    setdefault, not assignment: an explicitly exported variable always wins, so this
-    is a fallback for shells that don't have the key, never an override.
-    """
-    path = path or USER_ENV_FILE
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, NotADirectoryError, PermissionError):
-        return
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip("'\"")
-        if key:
-            os.environ.setdefault(key, value)
