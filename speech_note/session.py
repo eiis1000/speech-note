@@ -240,7 +240,8 @@ class ArtifactStore:
         config = session.config
         cleanup = session.cleanup
         return {
-            "schema": 2,
+            # schema 3: config.organizer is now a nested object (was flat organizer_*).
+            "schema": 3,
             "version": __version__,
             "started_at": session.started_at.isoformat(),
             "duration_seconds": round(session.elapsed(), 3),

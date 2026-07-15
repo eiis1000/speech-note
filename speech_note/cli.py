@@ -25,6 +25,25 @@ from .terminal import read_single_choice
 
 
 @dataclasses.dataclass(frozen=True)
+class OrganizerConfig:
+    """Everything about the cleanup LM, grouped out of the flat Config."""
+
+    mode: str
+    provider: str
+    api_base: str
+    models: tuple[str, ...]
+    auth_env: str | None
+    timeout: float
+    context_tokens: int
+    max_output_tokens: int
+    gpu_layers: str
+    kv_offload: bool
+    gguf: Path | None
+    server_command: tuple[str, ...] | None
+    prewarm: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     # capture
     sample_rate: int
@@ -66,20 +85,8 @@ class Config:
     language: str
     auto_download: bool
     download_root: Path | None
-    # organizer
-    organizer_mode: str
-    organizer_provider: str
-    organizer_api_base: str
-    organizer_models: tuple[str, ...]
-    organizer_auth_env: str | None
-    organizer_timeout: float
-    organizer_context_tokens: int
-    organizer_max_output_tokens: int
-    organizer_gpu_layers: str
-    organizer_kv_offload: bool
-    organizer_gguf: Path | None
-    organizer_server_command: tuple[str, ...] | None
-    organizer_prewarm: bool
+    # organizer (cleanup LM) — grouped; see OrganizerConfig
+    organizer: OrganizerConfig
 
     def with_archive_contents(self, audio_path: Path, transcript_paths: list[Path]) -> "Config":
         derived = dataclasses.replace(
@@ -457,23 +464,25 @@ def resolve_config(args: argparse.Namespace) -> Config:
         language=args.language,
         auto_download=args.auto_download,
         download_root=args.download_root,
-        organizer_mode=args.organizer_mode,
-        organizer_provider=args.organizer_provider,
-        organizer_api_base=api_base,
-        organizer_models=models,
-        organizer_auth_env=auth_env,
-        organizer_timeout=args.organizer_timeout,
-        organizer_context_tokens=context_tokens,
-        organizer_max_output_tokens=max_output_tokens,
-        organizer_gpu_layers=args.organizer_gpu_layers,
-        organizer_kv_offload=args.organizer_kv_offload,
-        organizer_gguf=args.organizer_gguf,
-        organizer_server_command=(
-            tuple(args.organizer_server_command)
-            if args.organizer_server_command is not None
-            else None
+        organizer=OrganizerConfig(
+            mode=args.organizer_mode,
+            provider=args.organizer_provider,
+            api_base=api_base,
+            models=models,
+            auth_env=auth_env,
+            timeout=args.organizer_timeout,
+            context_tokens=context_tokens,
+            max_output_tokens=max_output_tokens,
+            gpu_layers=args.organizer_gpu_layers,
+            kv_offload=args.organizer_kv_offload,
+            gguf=args.organizer_gguf,
+            server_command=(
+                tuple(args.organizer_server_command)
+                if args.organizer_server_command is not None
+                else None
+            ),
+            prewarm=args.organizer_prewarm,
         ),
-        organizer_prewarm=args.organizer_prewarm,
     )
 
     if (
@@ -525,13 +534,13 @@ def validate(config: Config) -> None:
             "--extra-transcript, or an explicit --input-device"
         )
     if (
-        config.organizer_mode == "llama"
-        and config.organizer_auth_env is not None
-        and not os.environ.get(config.organizer_auth_env, "").strip()
+        config.organizer.mode == "llama"
+        and config.organizer.auth_env is not None
+        and not os.environ.get(config.organizer.auth_env, "").strip()
     ):
         raise SystemExit(
-            f"{config.organizer_auth_env} is not set; it is required for "
-            f"--organizer-provider {config.organizer_provider}"
+            f"{config.organizer.auth_env} is not set; it is required for "
+            f"--organizer-provider {config.organizer.provider}"
         )
     if any(source.backend == "openrouter" for source in config.asr_sources) and not os.environ.get(
         defaults.OPENROUTER_API_KEY_ENV, ""

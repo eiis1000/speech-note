@@ -732,35 +732,35 @@ def build_organizer(config: "Config") -> Organizer:
 
     The returned Organizer owns its supervisor (if any); callers release the
     local server with organizer.close()."""
-    if config.organizer_mode != "llama":
+    if config.organizer.mode != "llama":
         return Organizer(
-            mode=config.organizer_mode,
+            mode=config.organizer.mode,
             client=None,
             supervisor=None,
-            context_tokens=config.organizer_context_tokens,
-            max_output_tokens=config.organizer_max_output_tokens,
+            context_tokens=config.organizer.context_tokens,
+            max_output_tokens=config.organizer.max_output_tokens,
         )
     client = ChatClient(
-        api_base=config.organizer_api_base,
-        models=config.organizer_models,
-        timeout=config.organizer_timeout,
-        auth_env=config.organizer_auth_env,
+        api_base=config.organizer.api_base,
+        models=config.organizer.models,
+        timeout=config.organizer.timeout,
+        auth_env=config.organizer.auth_env,
     )
     supervisor: LocalServerSupervisor | None = None
-    if config.organizer_provider == "local":
-        launch_command = config.organizer_server_command
+    if config.organizer.provider == "local":
+        launch_command = config.organizer.server_command
         if launch_command is None:
-            model_path = config.organizer_gguf or DEFAULT_GGUF_MODEL
+            model_path = config.organizer.gguf or DEFAULT_GGUF_MODEL
             have_server = bool(shutil.which("llama-server"))
             # Auto-install the bundled default quant on a cache miss (consent-gated,
             # like the ASR models). A user-supplied --organizer-gguf is never fetched
             # — only the default has a known source.
-            if have_server and config.organizer_gguf is None and not model_path.exists():
+            if have_server and config.organizer.gguf is None and not model_path.exists():
                 ensure_default_cleanup_model(auto_yes=config.auto_download)
             launch_command = default_server_command(
-                context_tokens=config.organizer_context_tokens,
-                gpu_layers=config.organizer_gpu_layers,
-                kv_offload=config.organizer_kv_offload,
+                context_tokens=config.organizer.context_tokens,
+                gpu_layers=config.organizer.gpu_layers,
+                kv_offload=config.organizer.kv_offload,
                 model_path=model_path,
             )
             if launch_command is None and have_server and not model_path.exists():
@@ -778,9 +778,9 @@ def build_organizer(config: "Config") -> Organizer:
             healthcheck_url=client.models_url(),
         )
     return Organizer(
-        mode=config.organizer_mode,
+        mode=config.organizer.mode,
         client=client,
         supervisor=supervisor,
-        context_tokens=config.organizer_context_tokens,
-        max_output_tokens=config.organizer_max_output_tokens,
+        context_tokens=config.organizer.context_tokens,
+        max_output_tokens=config.organizer.max_output_tokens,
     )

@@ -288,29 +288,29 @@ class ConfigResolutionTests(unittest.TestCase):
 
     def test_offline_flag_forces_local_provider(self) -> None:
         config = make_config("--offline", "--organizer-mode", "llama")
-        self.assertEqual(config.organizer_provider, "local")
+        self.assertEqual(config.organizer.provider, "local")
 
     def test_online_free_flag_uses_free_chain(self) -> None:
         from speech_note import config as cfg
         config = make_config("--online-free")
-        self.assertEqual(config.organizer_provider, "openrouter")
-        self.assertEqual(config.organizer_models, tuple(cfg.OPENROUTER_FREE_MODELS))
-        self.assertGreaterEqual(len(config.organizer_models), 5)  # deep fallback chain
-        self.assertTrue(all(m.endswith(":free") for m in config.organizer_models))
+        self.assertEqual(config.organizer.provider, "openrouter")
+        self.assertEqual(config.organizer.models, tuple(cfg.OPENROUTER_FREE_MODELS))
+        self.assertGreaterEqual(len(config.organizer.models), 5)  # deep fallback chain
+        self.assertTrue(all(m.endswith(":free") for m in config.organizer.models))
 
     def test_online_paid_flag_leads_paid_then_falls_back_to_free(self) -> None:
         from speech_note import config as cfg
         config = make_config("--online-paid")
-        self.assertEqual(config.organizer_provider, "openrouter")
-        self.assertEqual(config.organizer_models[0], "deepseek/deepseek-v3.2")
+        self.assertEqual(config.organizer.provider, "openrouter")
+        self.assertEqual(config.organizer.models[0], "deepseek/deepseek-v3.2")
         # paid leads, but the free chain is appended as a fallback for paid outages
-        self.assertTrue(any(m.endswith(":free") for m in config.organizer_models))
+        self.assertTrue(any(m.endswith(":free") for m in config.organizer.models))
         for free in cfg.OPENROUTER_FREE_MODELS:
-            self.assertIn(free, config.organizer_models)
+            self.assertIn(free, config.organizer.models)
 
     def test_explicit_model_overrides_connectivity_mode(self) -> None:
         config = make_config("--online-paid", "--organizer-model", "custom/model")
-        self.assertEqual(config.organizer_models, ("custom/model",))
+        self.assertEqual(config.organizer.models, ("custom/model",))
 
     def test_connectivity_modes_are_mutually_exclusive(self) -> None:
         with self.assertRaises(SystemExit):
@@ -331,18 +331,18 @@ class ConfigResolutionTests(unittest.TestCase):
 
     def test_openrouter_defaults(self) -> None:
         config = make_config("--organizer-provider", "openrouter")
-        self.assertIn("openrouter.ai", config.organizer_api_base)
-        self.assertEqual(config.organizer_context_tokens, 262144)
-        self.assertEqual(config.organizer_max_output_tokens, 65536)
-        self.assertEqual(config.organizer_auth_env, "OPENROUTER_API_KEY")
-        self.assertTrue(config.organizer_models)
+        self.assertIn("openrouter.ai", config.organizer.api_base)
+        self.assertEqual(config.organizer.context_tokens, 262144)
+        self.assertEqual(config.organizer.max_output_tokens, 65536)
+        self.assertEqual(config.organizer.auth_env, "OPENROUTER_API_KEY")
+        self.assertTrue(config.organizer.models)
 
     def test_explicit_context_tokens_survive_provider_defaults(self) -> None:
         config = make_config(
             "--organizer-provider", "openrouter",
             "--organizer-context-tokens", "65536",
         )
-        self.assertEqual(config.organizer_context_tokens, 65536)
+        self.assertEqual(config.organizer.context_tokens, 65536)
 
     def test_full_auto_redirects_artifacts_and_names_output(self) -> None:
         config = make_config("--full-auto", "--input", "/recordings/My Lecture.m4a")
@@ -660,14 +660,14 @@ class OrganizerPrewarmTests(unittest.TestCase):
 
     def test_no_prewarm_flag_skips_background_load(self) -> None:
         config = make_config("--organizer-mode", "llama", "--organizer-no-prewarm")
-        self.assertFalse(config.organizer_prewarm)
+        self.assertFalse(config.organizer.prewarm)
         organizer, supervisor = self._organizer()
         self.assertIsNone(start_organizer_prewarm(config, organizer))
         supervisor.ensure_running.assert_not_called()
 
     def test_default_prewarms_in_background(self) -> None:
         config = make_config("--organizer-mode", "llama")
-        self.assertTrue(config.organizer_prewarm)
+        self.assertTrue(config.organizer.prewarm)
         organizer, supervisor = self._organizer()
         with redirect_stderr(io.StringIO()):
             thread = start_organizer_prewarm(config, organizer)
@@ -1017,8 +1017,8 @@ class ServerCommandTests(unittest.TestCase):
 
     def test_cli_organizer_gguf_flag(self) -> None:
         config = make_config("--organizer-gguf", "/models/big.gguf")
-        self.assertEqual(config.organizer_gguf, Path("/models/big.gguf"))
-        self.assertIsNone(make_config().organizer_gguf)
+        self.assertEqual(config.organizer.gguf, Path("/models/big.gguf"))
+        self.assertIsNone(make_config().organizer.gguf)
 
     def test_ensure_default_cleanup_model_already_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1144,7 +1144,7 @@ class PipelineEndToEndTests(unittest.TestCase):
             tmp = Path(tmp_dir)
             self.run_dry(tmp)
             payload = json.loads((tmp / "diagnostics.latest.json").read_text())
-            self.assertEqual(payload["schema"], 2)
+            self.assertEqual(payload["schema"], 3)
             self.assertEqual(payload["cleanup"]["method"], "heuristic")
             self.assertFalse(payload["audio_levels"]["measured"])
             self.assertEqual(payload["transcripts"][0]["label"], "user")
@@ -1574,7 +1574,7 @@ class OnlinePaidAsrTests(unittest.TestCase):
         self.assertEqual(backends[0], "openrouter")  # default lead = the paid source
         self.assertIn("whisper-cpp", backends)  # local peers still corroborate / fall back
         self.assertIn("sherpa", backends)
-        self.assertEqual(config.organizer_provider, "openrouter")
+        self.assertEqual(config.organizer.provider, "openrouter")
 
     def test_other_modes_keep_local_only_default(self) -> None:
         self.assertEqual(

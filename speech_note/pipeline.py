@@ -150,8 +150,8 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
     if organizer.mode == "llama":
         plan = cleanup_request_plan(
             sources,
-            context_tokens=config.organizer_context_tokens,
-            max_output_tokens=config.organizer_max_output_tokens,
+            context_tokens=config.organizer.context_tokens,
+            max_output_tokens=config.organizer.max_output_tokens,
         )
         if plan.output_cap_limited:
             export_dir = config.export_sources or auto_sources_export_dir(config)
@@ -168,9 +168,9 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
             session.add_error(f"cleanup: {error}")
             write_sources_export(config, session, directory=export_dir)
             return
-    if config.organizer_provider != "local" and organizer.mode == "llama":
+    if config.organizer.provider != "local" and organizer.mode == "llama":
         print(
-            f"note: sending transcripts to {config.organizer_provider} for cleanup; "
+            f"note: sending transcripts to {config.organizer.provider} for cleanup; "
             "free remote endpoints may log or train on inputs",
             file=sys.stderr,
         )
@@ -258,11 +258,11 @@ def write_sources_export(config: "Config", session: Session, *, directory: Path 
     sources = cleanup_sources(session)
     directory.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
-    if config.organizer_mode == "llama" and sources:
+    if config.organizer.mode == "llama" and sources:
         plan = cleanup_request_plan(
             sources,
-            context_tokens=config.organizer_context_tokens,
-            max_output_tokens=config.organizer_max_output_tokens,
+            context_tokens=config.organizer.context_tokens,
+            max_output_tokens=config.organizer.max_output_tokens,
         )
         prompt_path = directory / "cleanup-prompt.txt"
         prompt_path.write_text(
@@ -436,7 +436,7 @@ def finalize(config: "Config", session: Session, organizer: Organizer) -> None:
     cleanup = session.cleanup
     session.run_failed = not session.produced_output or (
         config.full_auto
-        and config.organizer_mode == "llama"
+        and config.organizer.mode == "llama"
         and (cleanup is None or not cleanup.text or bool(cleanup.error))
     )
 
@@ -517,9 +517,9 @@ def run_file_pipeline(config: "Config") -> Session:
 
 def start_organizer_prewarm(config: "Config", organizer: Organizer) -> threading.Thread | None:
     supervisor = organizer.supervisor
-    if config.organizer_mode != "llama" or supervisor is None:
+    if config.organizer.mode != "llama" or supervisor is None:
         return None
-    if not config.organizer_prewarm:
+    if not config.organizer.prewarm:
         # Sequencing escape hatch (--organizer-no-prewarm): don't load the cleanup
         # LM concurrently with ASR; it starts lazily at the cleanup stage instead,
         # after ASR has released the (possibly shared) GPU.
