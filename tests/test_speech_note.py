@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import struct
 import tempfile
 import types
@@ -36,8 +37,10 @@ from speech_note.organizer import (
 )
 from speech_note.cli import _interactive_capture_setup, fold_unified_input
 from speech_note.pipeline import (
+    _batch_item_config,
     cleanup_sources,
     discover_archive_inputs,
+    discover_directory_inputs,
     extract_subtitle_text,
     extract_zip_safely,
     review_panels,
@@ -377,6 +380,52 @@ class ConfigResolutionTests(unittest.TestCase):
         validate(config)  # ok
         with self.assertRaises(SystemExit):
             validate(make_config("--full-auto"))
+
+
+class DirectoryBatchTests(unittest.TestCase):
+    """Undocumented batch mode: -i on a directory processes each audio/zip inside."""
+
+    def _dir(self) -> Path:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "a.wav").write_bytes(b"")
+        (tmp / "b.zip").write_bytes(b"")
+        (tmp / "sub").mkdir()
+        (tmp / "sub" / "nested.wav").write_bytes(b"")  # subdir ignored
+        # Decoys of the kind a batch writes back and must never re-ingest:
+        (tmp / "previous-clean.txt").write_text("out")
+        (tmp / "previous-diagnostics.json").write_text("{}")
+        return tmp
+
+    def test_discovery_takes_only_top_level_audio_and_zip(self) -> None:
+        names = [p.name for p in discover_directory_inputs(self._dir())]
+        self.assertEqual(names, ["a.wav", "b.zip"])  # no .txt/.json, no subdir
+
+    def test_directory_input_requires_full_auto(self) -> None:
+        tmp = self._dir()
+        with self.assertRaises(SystemExit):
+            validate(make_config("--input", str(tmp)))
+        validate(make_config("--full-auto", "--input", str(tmp)))  # ok
+
+    def test_batch_item_config_routes_and_names_into_dir(self) -> None:
+        tmp = self._dir()
+        base = make_config("--full-auto", "--input", str(tmp))
+        self.assertIsNotNone(base.input_dir)
+        self.assertIsNone(base.output)  # batch config itself isn't auto-named
+
+        zip_item = _batch_item_config(base, tmp / "b.zip")
+        self.assertEqual(zip_item.input_archive, tmp / "b.zip")
+        self.assertIsNone(zip_item.input_file)
+        self.assertIsNone(zip_item.input_dir)
+        self.assertIsNone(zip_item.output)  # archive self-names post-extraction
+        self.assertEqual(zip_item.full_auto_output_dir, tmp)
+
+        wav_item = _batch_item_config(base, tmp / "a.wav")
+        self.assertEqual(wav_item.input_file, tmp / "a.wav")
+        self.assertIsNone(wav_item.input_archive)
+        assert wav_item.output is not None
+        self.assertEqual(wav_item.output.parent, tmp)  # named into the directory
+        self.assertEqual(wav_item.output.name, "a-clean.txt")
 
 
 class AsrSourceTests(unittest.TestCase):

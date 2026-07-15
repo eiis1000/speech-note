@@ -8,6 +8,7 @@ computes.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import re
 import shutil
 import sys
@@ -26,7 +27,7 @@ from .config import (
     short_model_name,
 )
 from .model import Transcript
-from .naming import unique_directory_path, unique_output_path
+from .naming import full_auto_output_path, unique_directory_path, unique_output_path
 from .textproc import sanitize_filename_stem
 from .organizer import Organizer, SYSTEM_PROMPT, build_organizer, cleanup_request_plan
 from .session import ArtifactStore, Session
@@ -573,6 +574,81 @@ def run_archive_pipeline(config: "Config") -> Session:
         # Derive a per-run config rather than mutating the one we were given.
         run_config = config.with_archive_contents(audio_path, transcript_paths)
         return run_file_pipeline(run_config)
+
+
+# --- directory batch (undocumented) ---
+
+
+def discover_directory_inputs(directory: Path) -> list[Path]:
+    """Top-level audio files and archive zips in `directory`, sorted, as a one-time
+    snapshot taken before any processing.
+
+    Only audio and .zip files are eligible. The artifacts a batch writes back into
+    the directory — clean .txt transcripts and .json diagnostics — are neither, so
+    they can never be re-ingested as inputs, even on a second run over the same
+    directory. Subdirectories are ignored (top level only)."""
+    eligible = ARCHIVE_AUDIO_EXTENSIONS | {".zip"}
+    return sorted(
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() in eligible
+    )
+
+
+def _batch_item_config(config: "Config", entry: Path) -> "Config":
+    """A per-file config for one directory entry: process just `entry`, and write
+    its auto-named output into the batch directory instead of the cwd."""
+    directory = config.input_dir
+    assert directory is not None
+    item = dataclasses.replace(
+        config,
+        input_dir=None,
+        input_file=None,
+        input_archive=None,
+        output=None,
+        full_auto_output_dir=directory,
+    )
+    if entry.suffix.lower() == ".zip":
+        # Archives self-name post-extraction (with_archive_contents), honouring
+        # full_auto_output_dir; leave output unset.
+        return dataclasses.replace(item, input_archive=entry)
+    # Files are named by resolve_config normally, which this derived config skips,
+    # so name it here into the batch directory.
+    item = dataclasses.replace(item, input_file=entry)
+    return dataclasses.replace(item, output=full_auto_output_path(item, directory))
+
+
+def run_directory_pipeline(config: "Config") -> Session:
+    """Batch mode: process every top-level audio/zip in config.input_dir as its own
+    independent full-auto run, writing each clean transcript into that directory. One
+    file's failure is reported and skipped, never aborting the rest."""
+    assert config.input_dir is not None
+    directory = config.input_dir
+    entries = discover_directory_inputs(directory)
+    if not entries:
+        raise SystemExit(f"no audio or archive files to process in {directory}")
+    print(f"batch: {len(entries)} file(s) in {directory}", file=sys.stderr)
+    failures = 0
+    for index, entry in enumerate(entries, start=1):
+        print(f"\n[{index}/{len(entries)}] {entry.name}", file=sys.stderr)
+        item = _batch_item_config(config, entry)
+        try:
+            if item.input_archive is not None:
+                session = run_archive_pipeline(item)
+            else:
+                session = run_file_pipeline(item)
+            failed = session.run_failed
+        except SystemExit as exc:
+            print(f"skipped {entry.name}: {exc}", file=sys.stderr)
+            failed = True
+        except Exception as exc:  # noqa: BLE001 — one file's crash must not stop the batch
+            print(f"failed {entry.name}: {exc}", file=sys.stderr)
+            failed = True
+        failures += failed
+    print(f"\nbatch done: {len(entries) - failures} ok, {failures} failed", file=sys.stderr)
+    batch = Session(config)
+    batch.run_failed = failures > 0
+    return batch
 
 
 def run_transcript_pipeline(config: "Config") -> Session:

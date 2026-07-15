@@ -39,6 +39,9 @@ class Config:
     # inputs
     input_file: Path | None
     input_archive: Path | None
+    # Undocumented batch mode: a directory whose top-level audio/zip files are each
+    # processed as an independent full-auto run (see run_directory_pipeline).
+    input_dir: Path | None
     replay_input_file: Path | None
     dry_run_text: str | None
     extra_transcripts: tuple[Path, ...]
@@ -49,6 +52,9 @@ class Config:
     artifacts_dir: Path
     archive_dir: Path
     full_auto: bool
+    # Directory the auto-named full-auto output is written into (default: cwd). Set
+    # per item by the batch pipeline so outputs land in the input directory.
+    full_auto_output_dir: Path | None
     # ASR: an ordered collection of sources, all fed to the cleanup LM as peers.
     asr_sources: tuple[AsrSource, ...]
     asr_compute_type: str  # faster-whisper compute type (applies to faster-whisper sources)
@@ -92,7 +98,10 @@ class Config:
                 self, extra_transcripts=self.extra_transcripts + tuple(transcript_paths)
             )
             derived = dataclasses.replace(
-                derived, output=full_auto_output_path(naming_config, Path.cwd())
+                derived,
+                output=full_auto_output_path(
+                    naming_config, self.full_auto_output_dir or Path.cwd()
+                ),
             )
         return derived
 
@@ -338,15 +347,19 @@ def _looks_like_archive(path: Path) -> bool:
 
 
 def fold_unified_input(args: argparse.Namespace) -> None:
-    """Split the unified -i/--input into the internal input_file / input_archive by
-    detected type. These two are an implementation detail of the pipeline dispatch,
-    not CLI flags, so they are derived here rather than parsed."""
+    """Split the unified -i/--input into the internal input_file / input_archive /
+    input_dir by detected type. These are an implementation detail of the pipeline
+    dispatch, not CLI flags, so they are derived here rather than parsed. A directory
+    is the undocumented batch mode (each file inside processed independently)."""
     chosen = getattr(args, "input", None)
     args.input_file = None
     args.input_archive = None
+    args.input_dir = None
     if chosen is None:
         return
-    if _looks_like_archive(chosen):
+    if chosen.is_dir():
+        args.input_dir = chosen
+    elif _looks_like_archive(chosen):
         args.input_archive = chosen
     else:
         args.input_file = chosen
@@ -423,6 +436,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         replay_speed=args.replay_speed,
         input_file=args.input_file,
         input_archive=args.input_archive,
+        input_dir=args.input_dir,
         replay_input_file=args.replay_input_file,
         dry_run_text=args.dry_run_text,
         extra_transcripts=tuple(args.extra_transcript),
@@ -432,6 +446,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         artifacts_dir=artifacts_dir,
         archive_dir=artifacts_dir / "logs",
         full_auto=args.full_auto,
+        full_auto_output_dir=None,
         asr_sources=asr_sources,
         asr_compute_type=args.asr_compute_type,
         asr_cpu_threads=args.asr_cpu_threads,
@@ -461,7 +476,12 @@ def resolve_config(args: argparse.Namespace) -> Config:
         organizer_prewarm=args.organizer_prewarm,
     )
 
-    if config.full_auto and config.output is None and config.input_archive is None:
+    if (
+        config.full_auto
+        and config.output is None
+        and config.input_archive is None
+        and config.input_dir is None  # batch names each item into the directory itself
+    ):
         from .naming import full_auto_output_path
 
         config = dataclasses.replace(config, output=full_auto_output_path(config, Path.cwd()))
@@ -474,12 +494,20 @@ def validate(config: Config) -> None:
     inputs = [
         config.input_file,
         config.input_archive,
+        config.input_dir,
         config.replay_input_file,
         config.dry_run_text,
     ]
     if sum(value is not None for value in inputs) > 1:
         raise SystemExit(
             "--input, --replay-input-file and --input-text are mutually exclusive"
+        )
+    if config.input_dir is not None and not config.full_auto:
+        # Batch mode runs each file non-interactively; without --full-auto every
+        # file would stop for a per-file copy prompt and clobber the same
+        # raw.latest/clean.latest artifacts in turn.
+        raise SystemExit(
+            "a directory input batch-processes each file and requires --full-auto (-f)"
         )
     if (
         config.no_asr
@@ -569,7 +597,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import pipeline
 
-    if config.input_archive is not None:
+    if config.input_dir is not None:
+        session = pipeline.run_directory_pipeline(config)
+    elif config.input_archive is not None:
         session = pipeline.run_archive_pipeline(config)
     elif config.input_file is not None:
         session = pipeline.run_file_pipeline(config)
