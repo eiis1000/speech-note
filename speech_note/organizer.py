@@ -37,6 +37,7 @@ from .config import (
     DEFAULT_GGUF_SIZE_HINT,
     ORGANIZER_CONTEXT_SAFETY,
     ORGANIZER_MAX_REQUEST_TIMEOUT,
+    ORGANIZER_MIN_OUTPUT_TOKENS,
     ORGANIZER_MIN_REQUEST_TIMEOUT,
 )
 from .model import CleanupOutcome, Transcript
@@ -241,11 +242,13 @@ class ChatClient:
         models: Sequence[str],
         timeout: float,
         auth_env: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         self.api_base = api_base
         self.configured_models = [m for m in models if m]
         self.timeout = timeout
         self.auth_env = auth_env
+        self.reasoning_effort = reasoning_effort
         self.last_served_model: str | None = None
         self._catalog_checked = False
         self._available_models: list[str] | None = None
@@ -337,6 +340,8 @@ class ChatClient:
                 "temperature": 0.0,
                 "max_tokens": max_tokens,
             }
+            if self.reasoning_effort is not None:
+                payload["reasoning"] = {"effort": self.reasoning_effort}
             try:
                 response = requests.post(
                     self.api_base,
@@ -525,7 +530,7 @@ def cleanup_request_plan(
         estimate_text_tokens(SYSTEM_PROMPT) + estimate_text_tokens(user_prompt) + 32
     )
     largest_source_tokens = max((estimate_text_tokens(s.text) for s in sources), default=0)
-    uncapped_output_tokens = max(1_024, largest_source_tokens * 2)
+    uncapped_output_tokens = max(ORGANIZER_MIN_OUTPUT_TOKENS, largest_source_tokens * 2)
     requested_output_tokens = min(max_output_tokens, uncapped_output_tokens)
     token_budget = max(256, int(context_tokens * ORGANIZER_CONTEXT_SAFETY))
     reference_words = _reference_words(sources)
@@ -535,7 +540,7 @@ def cleanup_request_plan(
         largest_source_tokens=largest_source_tokens,
         requested_output_tokens=requested_output_tokens,
         token_budget=token_budget,
-        output_cap_limited=largest_source_tokens * 2 >= max_output_tokens,
+        output_cap_limited=uncapped_output_tokens >= max_output_tokens,
         reference_words=reference_words,
         minimum_words=max(1, math.ceil(reference_words * CLEANUP_MIN_LENGTH_RATIO)),
     )
@@ -745,6 +750,7 @@ def build_organizer(config: "Config") -> Organizer:
         models=config.organizer.models,
         timeout=config.organizer.timeout,
         auth_env=config.organizer.auth_env,
+        reasoning_effort="none" if config.organizer.provider == "openrouter" else None,
     )
     supervisor: LocalServerSupervisor | None = None
     if config.organizer.provider == "local":

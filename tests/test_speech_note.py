@@ -32,6 +32,7 @@ from speech_note.organizer import (
     ChatResponse,
     Organizer,
     build_user_prompt,
+    cleanup_request_plan,
     default_server_command,
     ensure_default_cleanup_model,
     request_timeout_seconds,
@@ -677,6 +678,30 @@ class OrganizerPrewarmTests(unittest.TestCase):
 
 
 class OrganizerPromptTests(unittest.TestCase):
+    def test_cleanup_plan_reserves_room_for_hidden_reasoning(self) -> None:
+        sources = [
+            Transcript("external", "archive.txt", "external", "word " * 510),
+            Transcript("whisper", "medium", "asr-final", "word " * 420),
+            Transcript("parakeet", "parakeet", "asr-final", "word " * 460),
+        ]
+        plan = cleanup_request_plan(
+            sources,
+            context_tokens=262_144,
+            max_output_tokens=65_536,
+        )
+        self.assertEqual(plan.requested_output_tokens, 4_096)
+        self.assertFalse(plan.output_cap_limited)
+
+    def test_cleanup_plan_treats_insufficient_reasoning_reserve_as_cap_risk(self) -> None:
+        sources = [Transcript("external", "archive.txt", "external", "word " * 140)]
+        plan = cleanup_request_plan(
+            sources,
+            context_tokens=262_144,
+            max_output_tokens=2_048,
+        )
+        self.assertEqual(plan.requested_output_tokens, 2_048)
+        self.assertTrue(plan.output_cap_limited)
+
     def test_prompt_names_sources_and_models(self) -> None:
         sources = [
             Transcript("primary", "ggml-medium-q8_0.bin", "asr-final", "one " * 100,
@@ -953,6 +978,25 @@ class OrganizerLlmTests(unittest.TestCase):
 
 
 class ChatClientCatalogTests(unittest.TestCase):
+    def test_reasoning_effort_is_sent_when_configured(self) -> None:
+        client = ChatClient(
+            api_base="https://openrouter.ai/api/v1/chat/completions",
+            models=["model"],
+            timeout=0.01,
+            reasoning_effort="none",
+        )
+        response = fake_response(
+            200,
+            {
+                "model": "model",
+                "choices": [{"message": {"content": "clean"}, "finish_reason": "stop"}],
+            },
+        )
+        with mock.patch("speech_note.organizer.requests.post", return_value=response) as post:
+            client.chat([{"role": "user", "content": "transcript"}], max_tokens=4096, timeout=1)
+        payload = json.loads(post.call_args.kwargs["data"])
+        self.assertEqual(payload["reasoning"], {"effort": "none"})
+
     def test_stale_models_filtered_against_catalog(self) -> None:
         client = ChatClient(
             api_base="https://openrouter.ai/api/v1/chat/completions",
