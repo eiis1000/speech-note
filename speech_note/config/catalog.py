@@ -253,15 +253,26 @@ DEFAULT_ASR_SOURCES: tuple[AsrSource, ...] = (
     AsrSource("sherpa", "", "cpu"),
 )
 
-# The default collection under --online-paid: lead with the OpenRouter Gemini
-# full-file source (best on hard/quiet audio in testing — one request, no chunking,
-# and it annotates silence instead of confabulating), then keep the local
-# whisper+sherpa pair as free corroborating peers and a network-outage fallback.
-# "net" + "gpu" + "cpu" are three device groups, so all three overlap. Overridable
-# by --asr or the user ASR config file, like any default collection.
+# The default collection under --online-paid: run Whisper and Parakeet as *hosted*
+# models instead of locally. Both are network sources, so they overlap each other and
+# finish in about the time of one (a 65-minute recording came back in ~16 s for ~$0.04,
+# against minutes on the local iGPU), and the hosted checkpoints are larger than what
+# fits locally — large-v3-turbo rather than medium-q8_0, Parakeet v3 rather than v2.
+#
+# The audio-LLM rides along as a third peer. It is the most dangerous source in the set
+# (see OPENROUTER_ASR_MODEL: fluent fabrication on unintelligible audio, degenerate
+# repetition on long files) and it is listed LAST so it is never the raw/fallback
+# transcript. It is still worth having, for two reasons: it is the most sensitive source
+# on faint speech, and — now that the annotation pass exists — a passage it invents
+# disagrees with both dedicated recognizers, which is exactly the signal that gets the
+# passage flagged rather than silently believed.
+#
+# Overridable by --asr or the user ASR config file, like any default collection. Use
+# --offline (or list local backends in --asr) to keep everything on the machine.
 ONLINE_PAID_ASR_SOURCES: tuple[AsrSource, ...] = (
+    AsrSource("openrouter-stt", OPENROUTER_STT_MODEL, "net"),
+    AsrSource("openrouter-stt", OPENROUTER_STT_SECOND_MODEL, "net"),
     AsrSource("openrouter", OPENROUTER_ASR_MODEL, "net"),
-    *DEFAULT_ASR_SOURCES,
 )
 
 # Overlap between adjacent CTC long-form windows (each side), merged at the

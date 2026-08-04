@@ -246,9 +246,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Allow model loaders to download missing files (default: local caches only).",
     )
     parser.add_argument("--download-root", type=Path, default=None)
-    # connectivity presets: bundle organizer provider + model list. ASR stays local
-    # in every mode (no usable OpenRouter ASR beats local whisper+sherpa). Explicit
-    # --organizer-provider / --organizer-model still override. Work with/without --full-auto.
+    # connectivity presets: bundle organizer provider + model list. --online-paid also
+    # swaps the default ASR collection to hosted Whisper + Parakeet; --offline and
+    # --online-free keep ASR local. Explicit --organizer-provider / --organizer-model
+    # still override. Work with/without --full-auto.
     connectivity = parser.add_mutually_exclusive_group()
     connectivity.add_argument(
         "-O", "--offline", dest="connectivity", action="store_const", const="offline",
@@ -261,8 +262,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     connectivity.add_argument(
         "-P", "--online-paid", dest="connectivity", action="store_const", const="online-paid",
         help="OpenRouter cleanup with paid models (deepseek-v3.2 / gemini-3-flash, not "
-             "logged) AND a Gemini full-file ASR source added by default, alongside local "
-             "whisper+sherpa. Needs OPENROUTER_API_KEY.",
+             "logged), AND run ASR remotely: hosted Whisper + Parakeet (larger checkpoints "
+             "than fit locally, and a long recording transcribes in seconds) plus a Gemini "
+             "audio-LLM peer. Needs OPENROUTER_API_KEY.",
     )
     parser.set_defaults(connectivity=None)
     # organizer
@@ -383,17 +385,18 @@ def resolve_config(args: argparse.Namespace) -> Config:
     fold_unified_input(args)
     # Connectivity preset: bundle organizer provider + default model list. An explicit
     # --organizer-provider/--organizer-model still wins (handled below / in the openrouter
-    # branch). ASR is untouched — every mode uses local whisper+sherpa.
+    # branch). --offline and --online-free keep the local whisper+sherpa ASR default;
+    # --online-paid moves ASR to the hosted equivalents (see below).
     connectivity = getattr(args, "connectivity", None)
     if connectivity == "offline":
         args.organizer_provider = "local"
     elif connectivity in ("online-free", "online-paid"):
         args.organizer_provider = "openrouter"
 
-    # --online-paid also changes the *default* ASR collection (an audio-LLM can
-    # transcribe a whole long recording in one request, unlike the chunk-only local
-    # backends); an explicit --asr or the user ASR file still wins. Other modes keep
-    # the local whisper+sherpa default.
+    # --online-paid also changes the *default* ASR collection: Whisper and Parakeet run
+    # as hosted models rather than on this machine (bigger checkpoints, and a long
+    # recording comes back in seconds). An explicit --asr or the user ASR file still
+    # wins. Other modes keep the local whisper+sherpa default.
     default_asr = (
         defaults.ONLINE_PAID_ASR_SOURCES
         if connectivity == "online-paid"
@@ -542,12 +545,18 @@ def validate(config: Config) -> None:
             f"{config.organizer.auth_env} is not set; it is required for "
             f"--organizer-provider {config.organizer.provider}"
         )
-    if any(source.backend == "openrouter" for source in config.asr_sources) and not os.environ.get(
-        defaults.OPENROUTER_API_KEY_ENV, ""
-    ).strip():
+    network_backends = sorted(
+        {
+            source.backend
+            for source in config.asr_sources
+            if source.backend in {"openrouter", "openrouter-stt"}
+        }
+    )
+    if network_backends and not os.environ.get(defaults.OPENROUTER_API_KEY_ENV, "").strip():
         raise SystemExit(
             f"{defaults.OPENROUTER_API_KEY_ENV} is not set; it is required for the "
-            "'openrouter' ASR backend (selected via --asr or --online-paid)"
+            f"{', '.join(repr(name) for name in network_backends)} ASR backend(s) "
+            "(selected via --asr or --online-paid)"
         )
 
 

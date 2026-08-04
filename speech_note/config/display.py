@@ -48,8 +48,13 @@ ASR_BACKEND_SHORT_NAMES: dict[str, str] = {
 }
 
 MODEL_SHORT_NAMES: dict[str, str] = {
+    # hosted ASR (the openrouter-stt backend)
+    "openai/whisper-large-v3-turbo": "whisper-turbo",
+    "nvidia/parakeet-tdt-0.6b-v3": "parakeet-v3",
+    "openai/gpt-4o-mini-transcribe": "gpt4o-transcribe-mini",
+    "openai/gpt-4o-transcribe": "gpt4o-transcribe",
+    "qwen/qwen3-asr-flash-2026-02-10": "qwen3-asr",
     "google/gemini-3-flash-preview": "gemini",
-    "google/gemini-3.1-flash-lite": "gemini-lite",
     "deepseek/deepseek-v3.2": "deepseek",
     "openai/gpt-oss-120b:free": "gpt-oss",
     "nvidia/nemotron-3-super-120b-a12b:free": "nemotron-super",
@@ -70,9 +75,13 @@ def short_model_name(model: str) -> str:
 
 
 def short_source_name(source: "AsrSource") -> str:
-    """A short status-line name for an ASR source: by backend, or by model for the
-    network audio-LLM backend."""
-    if source.backend == "openrouter":
+    """A short status-line name for an ASR source.
+
+    Local backends are named by backend (one model each, in practice). The network
+    backends are named by *model*, because the interesting distinction there is which
+    hosted recognizer ran, not that it was hosted.
+    """
+    if source.backend in {"openrouter", "openrouter-stt"}:
         return short_model_name(source.model)
     return ASR_BACKEND_SHORT_NAMES.get(source.backend, source.backend)
 

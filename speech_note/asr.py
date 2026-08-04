@@ -21,13 +21,16 @@ from typing import TYPE_CHECKING
 from .config import (
     ASR_BACKENDS,
     CTC_CHUNK_LENGTH_SECONDS,
+    CTC_STRIDE_SECONDS,
     DEFAULT_OPENROUTER_API_BASE,
     DEFAULT_OPENROUTER_ASR_MAX_OUTPUT_TOKENS,
     LIVE_ASR_MODEL,
     OPENROUTER_API_KEY_ENV,
-    CTC_STRIDE_SECONDS,
     OPENROUTER_ASR_MIN_TIMEOUT,
     OPENROUTER_ASR_MP3_SAMPLE_RATE,
+    OPENROUTER_STT_API_BASE,
+    OPENROUTER_STT_MP3_SAMPLE_RATE,
+    OPENROUTER_STT_RESPONSE_FORMAT,
     AsrSource,
     asr_source_presentation,
     short_source_name,
@@ -38,6 +41,7 @@ from .textproc import is_parakeet_model, normalize_spacing, strip_parakeet_times
 from .transcribers import (
     CTCTranscriber,
     FasterWhisperTranscriber,
+    OpenRouterSttTranscriber,
     OpenRouterTranscriber,
     PocketSphinxTranscriber,
     SherpaTranscriber,
@@ -148,6 +152,15 @@ def build_transcriber(config: "Config", source: AsrSource) -> Transcriber | None
             timeout=OPENROUTER_ASR_MIN_TIMEOUT,
             mp3_sample_rate=OPENROUTER_ASR_MP3_SAMPLE_RATE,
             max_output_tokens=DEFAULT_OPENROUTER_ASR_MAX_OUTPUT_TOKENS,
+        )
+    if backend == "openrouter-stt":
+        return OpenRouterSttTranscriber(
+            model_name=source.model,
+            api_base=OPENROUTER_STT_API_BASE,
+            auth_env=OPENROUTER_API_KEY_ENV,
+            timeout=OPENROUTER_ASR_MIN_TIMEOUT,
+            mp3_sample_rate=OPENROUTER_STT_MP3_SAMPLE_RATE,
+            response_format=OPENROUTER_STT_RESPONSE_FORMAT,
         )
     raise ValueError(f"backend {backend!r} has no in-process transcriber")
 
@@ -305,9 +318,7 @@ def run_asr_collection(
     if not prepared:
         return
 
-    groups: dict[str, list[PreparedSource]] = {}
-    for job in prepared:
-        groups.setdefault(job.source.device_kind, []).append(job)
+    groups = _scheduling_groups(prepared)
     display_names = _unique_display_names(prepared)
 
     results: dict[str, AsrOutcome] = {}
@@ -349,6 +360,24 @@ def run_asr_collection(
     for job in prepared:
         if job.label in results:
             session.record_asr_outcome(results[job.label])
+
+
+def _scheduling_groups(prepared: list[PreparedSource]) -> dict[str, list[PreparedSource]]:
+    """Sources bucketed into groups that must run sequentially.
+
+    Local sources are grouped by device kind, because two backends on the same GPU (or
+    the same CPU) contend and running them at once is slower than running them in turn.
+
+    Network sources hold no local device, so that reasoning does not apply: each gets its
+    own group and they all overlap. Two hosted ASR calls otherwise serialize for no
+    reason — the ~16 s for a 65-minute file would become ~32 s for two models.
+    """
+    groups: dict[str, list[PreparedSource]] = {}
+    for index, job in enumerate(prepared):
+        kind = job.source.device_kind
+        key = f"net:{index}" if kind == "net" else kind
+        groups.setdefault(key, []).append(job)
+    return groups
 
 
 def _unique_display_names(prepared: list[PreparedSource]) -> dict[str, str]:

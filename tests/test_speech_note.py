@@ -1718,14 +1718,118 @@ class OpenRouterAsrTests(unittest.TestCase):
             transcriber.ensure_downloaded()  # no raise
 
 
+class OpenRouterSttTranscriberTests(unittest.TestCase):
+    """The dedicated hosted-ASR backend (/audio/transcriptions)."""
+
+    def _transcriber(self):
+        from speech_note import config as cfg
+        from speech_note.transcribers import OpenRouterSttTranscriber
+
+        return OpenRouterSttTranscriber(
+            model_name=cfg.OPENROUTER_STT_MODEL,
+            api_base=cfg.OPENROUTER_STT_API_BASE,
+            auth_env="OPENROUTER_API_KEY",
+            timeout=120.0,
+            mp3_sample_rate=16_000,
+            response_format=cfg.OPENROUTER_STT_RESPONSE_FORMAT,
+        )
+
+    def _run(self, transcriber, response, *, duration=240.0) -> tuple[str, dict]:
+        captured: dict = {}
+
+        def fake_post(url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            # requests streams the handle, so read it before the file closes.
+            captured["body"] = kwargs["files"]["file"][1].read()
+            return response
+
+        def fake_encode(source, target, *, sample_rate) -> None:
+            Path(target).write_bytes(b"FAKEAUDIO")
+
+        with mock.patch("requests.post", fake_post), \
+             mock.patch("speech_note.audio.encode_to_mp3", fake_encode), \
+             mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}, clear=True):
+            text = transcriber.transcribe_file(Path("/tmp/x.wav"), "en", duration_seconds=duration)
+        return text, captured
+
+    def test_uploads_multipart_not_base64(self) -> None:
+        """A 65-minute recording is ~23 MB as base64 JSON, which the gateway 502s on."""
+        response = mock.Mock(ok=True, status_code=200)
+        response.json.return_value = {"text": "  hello   world  "}
+        text, captured = self._run(self._transcriber(), response)
+        self.assertEqual(text, "hello world")
+        self.assertIn("audio/transcriptions", captured["url"])
+        self.assertEqual(captured["body"], b"FAKEAUDIO")  # raw bytes, not base64
+        self.assertIsNone(captured.get("json"))
+        self.assertEqual(captured["data"]["response_format"], "json")
+        self.assertEqual(captured["data"]["language"], "en")
+        self.assertGreaterEqual(captured["timeout"], 120.0)
+
+    def test_http_error_raises_so_the_source_fails_not_the_run(self) -> None:
+        response = mock.Mock(ok=False, status_code=402, text='{"error":"insufficient balance"}')
+        with self.assertRaises(RuntimeError) as caught:
+            self._run(self._transcriber(), response)
+        self.assertIn("402", str(caught.exception))
+
+    def test_ok_response_without_transcript_is_an_error_not_silence(self) -> None:
+        """Returning "" here would be reported as 'no speech detected', which is wrong."""
+        response = mock.Mock(ok=True, status_code=200)
+        response.json.return_value = {"error": {"message": "upstream failed"}}
+        with self.assertRaises(RuntimeError) as caught:
+            self._run(self._transcriber(), response)
+        self.assertIn("no transcript", str(caught.exception))
+
+    def test_ensure_downloaded_requires_key(self) -> None:
+        transcriber = self._transcriber()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError):
+                transcriber.ensure_downloaded()
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}, clear=True):
+            transcriber.ensure_downloaded()  # no raise
+
+
 class OnlinePaidAsrTests(unittest.TestCase):
-    def test_online_paid_leads_with_openrouter_keeping_local_peers(self) -> None:
+    def test_online_paid_runs_whisper_and_parakeet_as_hosted_models(self) -> None:
+        """--online-paid moves ASR off this machine, to dedicated hosted recognizers.
+
+        Not to the audio-LLM: that fabricates on unintelligible audio and degenerates
+        into a repeated word on long files (see config.catalog.OPENROUTER_ASR_MODEL).
+        """
+        from speech_note import config as cfg
+
         config = make_config("--online-paid")
         backends = [s.backend for s in config.asr_sources]
-        self.assertEqual(backends[0], "openrouter")  # default lead = the paid source
-        self.assertIn("whisper-cpp", backends)  # local peers still corroborate / fall back
-        self.assertIn("sherpa", backends)
+        self.assertEqual(backends, ["openrouter-stt", "openrouter-stt", "openrouter"])
+        models = [s.model for s in config.asr_sources]
+        self.assertEqual(
+            models,
+            [cfg.OPENROUTER_STT_MODEL, cfg.OPENROUTER_STT_SECOND_MODEL, cfg.OPENROUTER_ASR_MODEL],
+        )
+        # The audio-LLM is last, so it is never the raw/fallback transcript — list order
+        # is the soft preference for that.
+        self.assertEqual(backends[-1], "openrouter")
         self.assertEqual(config.organizer.provider, "openrouter")
+
+    def test_hosted_asr_sources_each_get_their_own_scheduling_group(self) -> None:
+        """Network sources hold no local device, so they must overlap rather than queue."""
+        from speech_note import config as cfg
+        from speech_note.asr import PreparedSource, _scheduling_groups
+
+        prepared = [
+            PreparedSource(f"asr{index}", source.resolved(), None)
+            for index, source in enumerate(cfg.ONLINE_PAID_ASR_SOURCES, start=1)
+        ]
+        groups = _scheduling_groups(prepared)
+        self.assertEqual(len(groups), 3, "hosted calls should not serialize")
+        # Local sources still share one group per device kind.
+        local = [
+            PreparedSource(f"asr{index}", source.resolved(), None)
+            for index, source in enumerate(
+                (cfg.AsrSource("sherpa", "", "cpu"), cfg.AsrSource("ctc", "", "cpu")), start=1
+            )
+        ]
+        self.assertEqual(len(_scheduling_groups(local)), 1)
 
     def test_other_modes_keep_local_only_default(self) -> None:
         self.assertEqual(
@@ -1740,12 +1844,13 @@ class OnlinePaidAsrTests(unittest.TestCase):
         self.assertEqual([s.backend for s in config.asr_sources], ["sherpa"])
 
     def test_openrouter_asr_requires_key(self) -> None:
-        config = make_config("--asr", "openrouter", "--input-text", "x")
-        with mock.patch.dict(os.environ, {}, clear=True):
-            with self.assertRaises(SystemExit):
-                validate(config)
-        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}, clear=True):
-            validate(config)  # no raise
+        for backend in ("openrouter", "openrouter-stt"):
+            config = make_config("--asr", backend, "--input-text", "x")
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with self.assertRaises(SystemExit):
+                    validate(config)
+            with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}, clear=True):
+                validate(config)  # no raise
 
 
 class UnifiedInputTests(unittest.TestCase):

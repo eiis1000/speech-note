@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -694,6 +695,102 @@ class OpenRouterTranscriber(Transcriber):
         ]
         response = client.chat(messages, max_tokens=self.max_output_tokens, timeout=timeout)
         return normalize_spacing(response.content)
+
+
+class OpenRouterSttTranscriber(Transcriber):
+    """Whole-file ASR via OpenRouter's dedicated /audio/transcriptions endpoint.
+
+    Unlike the audio-LLM path (OpenRouterTranscriber) this talks to a real speech
+    recognizer, which matters for more than accuracy: on unintelligible audio a
+    dedicated model emits garbled text, whereas an audio-LLM emits fluent invented
+    prose that nothing downstream can distinguish from real speech. See the measurement
+    notes on OPENROUTER_STT_MODEL.
+
+    The recording is transcoded to mono mp3 and uploaded as multipart form-data — not
+    base64 in a JSON body, which a long recording overflows (a 65-minute file is ~17 MB
+    of mp3, ~23 MB base64, and the gateway 502s on that). Nothing is downloaded; the only
+    requirement is the API key. Failures are non-fatal: the source produces no transcript
+    and its peers still run.
+    """
+
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        api_base: str,
+        auth_env: str,
+        timeout: float,
+        mp3_sample_rate: int,
+        response_format: str,
+    ) -> None:
+        self.model_name = model_name
+        self.api_base = api_base
+        self.auth_env = auth_env
+        self.timeout = timeout
+        self.mp3_sample_rate = mp3_sample_rate
+        self.response_format = response_format
+
+    def ensure_downloaded(self) -> None:
+        """No model to fetch; fail early and clearly if the API key is missing."""
+        if not os.environ.get(self.auth_env, "").strip():
+            raise RuntimeError(
+                f"{self.auth_env} is not set; it is required for the 'openrouter-stt' backend"
+            )
+
+    def _effective_timeout(self, duration_seconds: float | None) -> float:
+        """Floor for short clips, growing with audio length. Generous because this only
+        bounds how long we wait — the endpoint returned a 65-minute file in ~16 s."""
+        if not duration_seconds:
+            return self.timeout
+        return min(1800.0, max(self.timeout, 90.0 + duration_seconds * 0.25))
+
+    def transcribe_file(
+        self, path: Path, language: str, *, duration_seconds: float | None = None
+    ) -> str:
+        import requests
+
+        from .audio import encode_to_mp3
+
+        api_key = os.environ.get(self.auth_env, "").strip()
+        if not api_key:
+            raise RuntimeError(f"{self.auth_env} is required for the 'openrouter-stt' backend")
+        timeout = self._effective_timeout(duration_seconds)
+        with tempfile.TemporaryDirectory(prefix="speech-note-or-stt-") as tmp_dir:
+            mp3_path = Path(tmp_dir) / "audio.mp3"
+            encode_to_mp3(path, mp3_path, sample_rate=self.mp3_sample_rate)
+            data: dict[str, str] = {
+                "model": self.model_name,
+                "response_format": self.response_format,
+            }
+            if language and language.lower() not in {"auto", "und"}:
+                data["language"] = language
+            with mp3_path.open("rb") as handle:
+                response = requests.post(
+                    self.api_base,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    files={"file": ("audio.mp3", handle, "audio/mpeg")},
+                    data=data,
+                    timeout=timeout,
+                )
+        if not response.ok:
+            detail = " ".join(response.text.split())[:400]
+            raise RuntimeError(f"{self.model_name}: HTTP {response.status_code} {detail}")
+        try:
+            payload = response.json()
+        except ValueError:
+            raise RuntimeError(
+                f"{self.model_name}: HTTP 200 with non-JSON body: "
+                f"{' '.join(response.text.split())[:200]}"
+            ) from None
+        # A 200 can still carry a provider error and no transcript; say so rather than
+        # returning "" (which the collection would report as "no speech detected").
+        text = payload.get("text")
+        if not isinstance(text, str):
+            raise RuntimeError(
+                f"{self.model_name}: response carried no transcript "
+                f"({json.dumps(payload.get('error', payload))[:200]})"
+            )
+        return normalize_paragraphs(text)
 
 
 def thread_env(cpu_threads: int) -> dict[str, str]:
