@@ -39,25 +39,84 @@ if TYPE_CHECKING:
     from .model import Transcript
 
 
+# Prompt architecture (settled by a bake-off across seven hosted models, 2026-08-04;
+# the run scripts and scores are in AUDIT.md's follow-up):
+#   * The whole contract lives HERE, in the system prompt; the user turns carry data
+#     only. Small models keep a contract better when it is not interleaved with data.
+#   * A synthetic worked example rides along as a real user/assistant message pair.
+#     Pasting an example into the system prompt made models imitate its surface
+#     instead of the schema (bare entries, no envelope); an assistant turn is the
+#     strongest format anchor there is. The example is invented, so no real
+#     transcript text ships in any prompt.
+#   * The calibration names the base rate ("a difficult recording usually yields
+#     several entries"). The previous closing line praised the empty list, and most
+#     models under it returned zero notes on recordings with half a dozen genuine
+#     divergences.
 SYSTEM_PROMPT = (
-    "You are a transcript auditor. You are given several machine transcripts of one "
-    "recording and a cleaned transcript built from them. Your job is to find the places "
-    "where the cleaned transcript states something the recording does not actually "
-    "support, and to report them as DATA. You never rewrite the transcript.\n\n"
-    "What counts as unsupported:\n"
-    "- The sources carry DIFFERENT, mutually incompatible text for the same stretch of "
-    "speech. That means the audio was unintelligible there and each recognizer guessed. "
-    "The cleaned transcript picked one guess; the reader deserves to know the others.\n"
-    "- One source states something fluent and specific (a name, a place, an event, a "
-    "relationship) where the other sources are garbled or say something unrelated. A "
-    "smooth, confident sentence supported by exactly one source is usually invention.\n\n"
-    "What does NOT count:\n"
-    "- Content present in one source and simply ABSENT from the others. Recognizers "
-    "differ in sensitivity; a quiet passage only one heard is normally real. Leave it.\n"
-    "- Ordinary wording, spelling or punctuation differences between sources.\n"
-    "- Disfluencies the cleanup correctly removed.\n\n"
-    "Report only genuine cases. An empty list is the correct answer for a clear "
-    "recording, and is much better than padding the list with weak guesses."
+    "You are a transcript auditor. You receive several machine transcripts (sources) of "
+    "one recording, plus a cleaned transcript built from them. Find the places where the "
+    "cleaned transcript says something the sources do not jointly support, and report "
+    "them as JSON data. You never rewrite the transcript.\n\n"
+    "All transcripts cover the same recording from beginning to end, in order. A "
+    "disagreement is therefore LOCAL: it happens at one moment, and the competing "
+    "readings are what different recognizers produced at that same moment. Find the "
+    "moment by the words around it. Text from a different part of the recording is never "
+    "an alternative, no matter how similar it sounds.\n\n"
+    "Report an entry when:\n"
+    "- The sources give different, mutually incompatible text for the same stretch of "
+    "speech. The audio was hard there and each recognizer guessed; the cleaned "
+    "transcript picked one guess, and the reader deserves the others.\n"
+    "- Exactly one source has a fluent, specific claim (a name, a place, an event, a "
+    "relationship) at a moment where the others are garbled or trail off. Confident "
+    "text supported by one source alone is often invention; report it, with whatever "
+    "the other sources have at that moment as the alternatives.\n\n"
+    "Do NOT report:\n"
+    "- Text present in one source and merely absent from the others. Recognizers differ "
+    "in sensitivity; a quiet passage only one heard is normally real.\n"
+    "- Wording, spelling, or punctuation differences.\n"
+    "- Disfluencies the cleanup removed.\n\n"
+    'Answer with exactly this JSON shape: {"uncertain": [{"quote": "...", '
+    '"alternatives": ["..."]}]}\n'
+    '- "quote": copied character-for-character from the CLEANED TRANSCRIPT; the '
+    "shortest span that covers the doubtful claim (a clause, not a paragraph), at most "
+    f"{ANNOTATION_MAX_QUOTE_CHARS} characters.\n"
+    '- "alternatives": what the OTHER sources have at that same moment, cleaned up just '
+    f"enough to be readable, most plausible first, at most {ANNOTATION_MAX_ALTERNATIVES}. "
+    "A source that is garbled or silent at that moment contributes nothing: give fewer "
+    "alternatives rather than reach elsewhere in the recording.\n"
+    "- Skip an entry whose alternatives all mean the same thing as the quote.\n"
+    "- Order entries as they appear in the cleaned transcript.\n\n"
+    "Calibration: a clean, well-heard recording yields an empty list; a difficult "
+    "recording usually yields several entries. Report every place the sources visibly "
+    "diverge — withholding a real divergence misleads the reader exactly as much as "
+    "inventing one."
+)
+
+_ASK = "Report the passages the sources do not jointly support."
+
+# The worked example (synthetic on purpose). It demonstrates: several entries from one
+# recording, clause-sized quotes, alternatives read off the same moment, a garbled
+# source contributing nothing (recognizer-b trails off where "grilled" is disputed),
+# and agreed text ("for everyone") not reported.
+EXAMPLE_USER = (
+    "Source 1 — recognizer-a:\n"
+    "so we drove out to the lake house on friday and my brother grilled uh grilled fish "
+    "for everyone\n\n"
+    "Source 2 — recognizer-b:\n"
+    "so we drove to the lake house on sunday and my brother uh for everyone\n\n"
+    "Source 3 — recognizer-c:\n"
+    "so we drove out to the lake house on friday and my brother um brought fish for "
+    "everyone\n\n"
+    "CLEANED TRANSCRIPT:\n"
+    "We drove out to the lake house on Friday, and my brother grilled fish for everyone.\n\n"
+    f"{_ASK}"
+)
+
+EXAMPLE_ASSISTANT = (
+    '{"uncertain": ['
+    '{"quote": "on Friday", "alternatives": ["on Sunday"]}, '
+    '{"quote": "my brother grilled fish", "alternatives": ["my brother brought fish"]}'
+    "]}"
 )
 
 
@@ -99,28 +158,13 @@ RESPONSE_FORMAT: dict[str, Any] = {
 
 
 def build_prompt(cleaned_text: str, sources: "list[Transcript]") -> str:
+    """The data-only user turn. All rules live in SYSTEM_PROMPT; mirroring them here
+    taught nothing and diluted the contract (see the prompt-architecture note above)."""
     blocks = "\n\n".join(
         f"Source {index} — {source.label} ({source.model}):\n{source.text}"
         for index, source in enumerate(sources, start=1)
     )
-    return (
-        "Below are the source transcripts and the cleaned transcript built from them.\n\n"
-        f"{blocks}\n\n"
-        f"CLEANED TRANSCRIPT:\n{cleaned_text}\n\n"
-        "Report the passages the sources do not jointly support.\n"
-        "Rules for each entry:\n"
-        '- "quote" MUST be copied CHARACTER-FOR-CHARACTER from the CLEANED TRANSCRIPT '
-        "above, and MUST be the shortest span that covers the doubtful claim (a clause or "
-        f"a sentence, not a whole paragraph), at most {ANNOTATION_MAX_QUOTE_CHARS} "
-        "characters.\n"
-        '- "alternatives" are the competing readings from the other sources, cleaned up '
-        f"just enough to be readable, most plausible first, at most "
-        f"{ANNOTATION_MAX_ALTERNATIVES}. Do not invent alternatives: take them from what "
-        "the sources actually say.\n"
-        "- Do not include an entry whose alternatives all mean the same thing as the quote.\n"
-        "- Order entries as they appear in the cleaned transcript.\n"
-        "Return an empty list if every claim is corroborated."
-    )
+    return f"{blocks}\n\nCLEANED TRANSCRIPT:\n{cleaned_text}\n\n{_ASK}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -202,15 +246,21 @@ def parse_notes(payload: object) -> list[UncertaintyNote]:
 
 def decode_response(content: str) -> tuple[list[UncertaintyNote], bool]:
     """(notes, understood). ``understood`` False means the reply was not the JSON we asked
-    for at all — distinct from a well-formed empty list, which is a real answer."""
+    for at all — distinct from a well-formed empty list, which is a real answer.
+
+    The object is prefix-parsed (raw_decode) rather than sliced to the last brace:
+    providers without schema enforcement were observed closing the envelope after the
+    first entry and continuing anyway ('{"uncertain": [..]}, {..}]}'), and the valid
+    prefix of such a reply is a real answer while the whole is unparseable.
+    """
     text = content.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end <= start:
+    start = text.find("{")
+    if start == -1:
         return [], False
     try:
-        payload = json.loads(text[start : end + 1])
+        payload = json.JSONDecoder().raw_decode(text[start:])[0]
     except ValueError:
         return [], False
     if not isinstance(payload, dict) or not isinstance(payload.get("uncertain"), list):
@@ -275,7 +325,10 @@ def annotate(
 ) -> AnnotationResult:
     """Run the audit pass. Never raises: on any failure the transcript comes back as-is."""
     prompt = build_prompt(cleaned_text, sources)
-    estimated = estimate_text_tokens(SYSTEM_PROMPT) + estimate_text_tokens(prompt)
+    estimated = sum(
+        estimate_text_tokens(text)
+        for text in (SYSTEM_PROMPT, EXAMPLE_USER, EXAMPLE_ASSISTANT, prompt)
+    )
     budget = max(256, int(context_tokens * ORGANIZER_CONTEXT_SAFETY))
     requested = min(ANNOTATION_MAX_OUTPUT_TOKENS, max(1024, budget - estimated))
     if estimated + requested > budget:
@@ -290,6 +343,8 @@ def annotate(
         response = client.chat(
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": EXAMPLE_USER},
+                {"role": "assistant", "content": EXAMPLE_ASSISTANT},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=requested,

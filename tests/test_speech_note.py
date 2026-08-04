@@ -2067,6 +2067,28 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         self.assertEqual(client.chat.call_count, 2)
         self.assertEqual(client.chat.call_args.kwargs["response_format"], RESPONSE_FORMAT)
 
+    def test_annotation_request_carries_the_worked_example(self) -> None:
+        """The synthetic example rides as a real user/assistant pair — an assistant turn
+        anchors the output format far harder than prose in the system prompt (models
+        shown an in-prompt example imitated its surface and dropped the envelope). The
+        real data must be the LAST turn, after the example."""
+        organizer, client = self._annotating_organizer()
+        from speech_note.annotate import EXAMPLE_ASSISTANT, EXAMPLE_USER
+
+        client.chat.side_effect = [
+            ChatResponse(content="She liked the letter.", served_model="m", finish_reason="stop"),
+            ChatResponse(content='{"uncertain": []}', served_model="m", finish_reason="stop"),
+        ]
+        organizer.cleanup(self._sources())
+        messages = client.chat.call_args.args[0]
+        self.assertEqual(
+            [m["role"] for m in messages], ["system", "user", "assistant", "user"]
+        )
+        self.assertEqual(messages[1]["content"], EXAMPLE_USER)
+        self.assertEqual(messages[2]["content"], EXAMPLE_ASSISTANT)
+        json.loads(EXAMPLE_ASSISTANT)  # the demonstrated reply must itself be valid JSON
+        self.assertIn("she liked the grid", messages[3]["content"])  # real data, last turn
+
     def test_parses_well_formed_response(self) -> None:
         notes, understood = self._decode(
             '{"uncertain": [{"quote": "a letter to a friend", '
@@ -2090,6 +2112,17 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         for bad in ("", "not json at all", "{", '{"uncertain": "nope"}', '{"other": []}'):
             _notes, understood = self._decode(bad)
             self.assertFalse(understood, f"{bad!r} should not read as understood")
+
+    def test_valid_prefix_survives_trailing_junk(self) -> None:
+        """Providers without schema enforcement were observed closing the envelope after
+        the first entry and continuing anyway. The valid prefix is a real answer; slicing
+        to the LAST brace (the old decode) turned it into nothing."""
+        notes, understood = self._decode(
+            '{"uncertain": [{"quote": "a b", "alternatives": ["c d"]}]}, '
+            '{"quote": "e f", "alternatives": ["g h"]}]}'
+        )
+        self.assertTrue(understood)
+        self.assertEqual([n.quote for n in notes], ["a b"])
 
     def test_malformed_entries_are_skipped(self) -> None:
         for bad in ('{"uncertain": [{"quote": "x"}]}',
