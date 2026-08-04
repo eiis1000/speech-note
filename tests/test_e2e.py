@@ -116,7 +116,7 @@ class ArchiveFullStackTests(unittest.TestCase):
             assert session.cleanup is not None
             self.assertEqual(session.cleanup.text, session.asr_transcripts()[0].text)
             self.assertIn("transcription", (tmp / "clean.latest").read_text().lower())
-            self.assertEqual(json.loads((tmp / "diagnostics.latest.json").read_text())["schema"], 3)
+            self.assertEqual(json.loads((tmp / "diagnostics.latest.json").read_text())["schema"], 4)
 
     def test_heuristic_mode_real_asr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

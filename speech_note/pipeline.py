@@ -198,6 +198,11 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
         session.add_error(f"cleanup: {cleanup.error}")
     if cleanup.warning:
         session.add_event("cleanup-warning", message=cleanup.warning)
+    if cleanup.annotation_count:
+        session.add_event("cleanup-annotated", count=cleanup.annotation_count)
+    if cleanup.annotation_error:
+        # A note, not an error: the transcript is complete and correct without markers.
+        session.add_skip(f"uncertainty annotation: {cleanup.annotation_error}")
 
 
 def organizer_cleanup_skipped(
@@ -384,6 +389,12 @@ def report(config: "Config", session: Session) -> None:
         cleanup = session.cleanup
         if cleanup is not None and cleanup.warning:
             print(f"warning: {cleanup.warning}", file=err)
+        if cleanup is not None and cleanup.annotation_count:
+            print(
+                f"marked {cleanup.annotation_count} uncertain passage(s) where the ASR "
+                "sources disagreed",
+                file=err,
+            )
         if "exported_sources" in session.paths:
             print(f"exported sources: {session.paths['exported_sources']}", file=err)
         if "error_diagnostics" in session.paths:

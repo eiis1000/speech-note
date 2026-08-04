@@ -11,6 +11,7 @@ import io
 import json
 import os
 import shutil
+import re
 import struct
 import tempfile
 import types
@@ -1295,7 +1296,7 @@ class PipelineEndToEndTests(unittest.TestCase):
             tmp = Path(tmp_dir)
             self.run_dry(tmp)
             payload = json.loads((tmp / "diagnostics.latest.json").read_text())
-            self.assertEqual(payload["schema"], 3)
+            self.assertEqual(payload["schema"], 4)
             self.assertEqual(payload["cleanup"]["method"], "heuristic")
             self.assertFalse(payload["audio_levels"]["measured"])
             self.assertEqual(payload["transcripts"][0]["label"], "user")
@@ -2003,3 +2004,276 @@ class ShortOptionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UncertaintyAnnotationTests(unittest.TestCase):
+    """The second, JSON-only pass that marks unsupported claims (see annotate.py)."""
+
+    @staticmethod
+    def _annotating_organizer() -> tuple[Organizer, mock.Mock]:
+        client = mock.Mock()
+        client.timeout = 12.0  # a real number: request_timeout_seconds does max() on it
+        organizer = Organizer(
+            mode="llama",
+            client=cast(ChatClient, client),
+            supervisor=None,
+            context_tokens=65_536,
+            max_output_tokens=16_384,
+            annotate=True,
+        )
+        return organizer, client
+
+    @staticmethod
+    def _sources() -> "list[Transcript]":
+        return [
+            Transcript(label="asr1", model="a", kind="asr-final", text="she liked the letter"),
+            Transcript(label="asr2", model="b", kind="asr-final", text="she liked the grid"),
+        ]
+
+    def _decode(self, content: str):
+        from speech_note.annotate import decode_response
+
+        return decode_response(content)
+
+    # --- the response contract -------------------------------------------------
+
+    def test_response_schema_bounds_the_reply(self) -> None:
+        """The schema is a correctness measure, not decoration: it is what makes a
+        truncated reply impossible, so every string and array must be bounded."""
+        from speech_note import annotate
+        from speech_note.config import (
+            ANNOTATION_MAX_ALTERNATIVES,
+            ANNOTATION_MAX_NOTES,
+            ANNOTATION_MAX_QUOTE_CHARS,
+        )
+
+        item = annotate.RESPONSE_SCHEMA["properties"]["uncertain"]
+        self.assertEqual(item["maxItems"], ANNOTATION_MAX_NOTES)
+        fields = item["items"]["properties"]
+        self.assertEqual(fields["quote"]["maxLength"], ANNOTATION_MAX_QUOTE_CHARS)
+        self.assertEqual(fields["alternatives"]["maxItems"], ANNOTATION_MAX_ALTERNATIVES)
+        self.assertEqual(fields["alternatives"]["items"]["maxLength"], ANNOTATION_MAX_QUOTE_CHARS)
+        self.assertEqual(annotate.RESPONSE_FORMAT["type"], "json_schema")
+
+    def test_annotation_request_sends_the_schema(self) -> None:
+        organizer, client = self._annotating_organizer()
+        from speech_note.annotate import RESPONSE_FORMAT
+
+        client.chat.side_effect = [
+            ChatResponse(content="She liked the letter.", served_model="m", finish_reason="stop"),
+            ChatResponse(content='{"uncertain": []}', served_model="m", finish_reason="stop"),
+        ]
+        organizer.cleanup(self._sources())
+        self.assertEqual(client.chat.call_count, 2)
+        self.assertEqual(client.chat.call_args.kwargs["response_format"], RESPONSE_FORMAT)
+
+    def test_parses_well_formed_response(self) -> None:
+        notes, understood = self._decode(
+            '{"uncertain": [{"quote": "a letter to a friend", '
+            '"alternatives": ["a letter to the grid", "  she liked the letter  "]}]}'
+        )
+        self.assertTrue(understood)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].quote, "a letter to a friend")
+        self.assertEqual(notes[0].alternatives, ("a letter to the grid", "she liked the letter"))
+
+    def test_tolerates_code_fence(self) -> None:
+        notes, understood = self._decode(
+            '```json\n{"uncertain": [{"quote": "x y", "alternatives": ["z"]}]}\n```'
+        )
+        self.assertTrue(understood)
+        self.assertEqual(len(notes), 1)
+
+    def test_empty_list_is_distinguishable_from_unusable_output(self) -> None:
+        """"nothing to flag" and "model ignored the contract" must not look identical."""
+        self.assertEqual(self._decode('{"uncertain": []}'), ([], True))
+        for bad in ("", "not json at all", "{", '{"uncertain": "nope"}', '{"other": []}'):
+            _notes, understood = self._decode(bad)
+            self.assertFalse(understood, f"{bad!r} should not read as understood")
+
+    def test_malformed_entries_are_skipped(self) -> None:
+        for bad in ('{"uncertain": [{"quote": "x"}]}',
+                    '{"uncertain": [{"alternatives": ["x"]}]}',
+                    '{"uncertain": [{"quote": "  ", "alternatives": ["x"]}]}'):
+            notes, understood = self._decode(bad)
+            self.assertTrue(understood)   # the shape was right...
+            self.assertEqual(notes, [])   # ...but no usable entry in it
+
+    def test_alternatives_capped(self) -> None:
+        from speech_note.config import ANNOTATION_MAX_ALTERNATIVES
+
+        notes, _ = self._decode(
+            '{"uncertain": [{"quote": "q", "alternatives": ["a","b","c","d","e"]}]}'
+        )
+        self.assertEqual(len(notes[0].alternatives), ANNOTATION_MAX_ALTERNATIVES)
+
+    def test_alternatives_that_repeat_the_quote_are_dropped(self) -> None:
+        """A marker offering the reader the same words twice is worse than no marker.
+
+        Measured with the bundled local model: it returned notes whose alternative was the
+        quote verbatim, and duplicate alternatives.
+        """
+        notes, understood = self._decode(
+            '{"uncertain": [{"quote": "I did.", "alternatives": ["I did.", "i did"]}]}'
+        )
+        self.assertTrue(understood)
+        self.assertEqual(notes, [], "a note with no genuinely different reading is useless")
+
+        notes, _ = self._decode(
+            '{"uncertain": [{"quote": "She liked it.", '
+            '"alternatives": ["She liked it", "She kicked it.", "she  kicked  it"]}]}'
+        )
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].alternatives, ("She kicked it.",))
+
+    # --- applying the notes ----------------------------------------------------
+
+    def test_applies_markers_without_altering_the_transcript(self) -> None:
+        from speech_note.annotate import UncertaintyNote, apply_notes
+
+        text = "I arrived. She liked the letter. It was late."
+        result = apply_notes(text, [UncertaintyNote("She liked the letter.", ("She liked the grid.",))])
+        self.assertEqual(result.inline_count, 1)
+        self.assertEqual(result.appended_count, 0)
+        self.assertIn("She liked the letter.", result.text)
+        self.assertIn('[unclear audio; also heard as "She liked the grid."]', result.text)
+        # Removing the marker restores the input exactly.
+        self.assertEqual(re.sub(r" \[unclear audio;[^\]]*\]", "", result.text), text)
+
+    def test_matches_across_whitespace_differences(self) -> None:
+        from speech_note.annotate import UncertaintyNote, apply_notes
+
+        result = apply_notes("One two\nthree four.", [UncertaintyNote("two three", ("two free",))])
+        self.assertEqual(result.inline_count, 1)
+
+    def test_unplaceable_quote_is_listed_not_dropped(self) -> None:
+        """A quote we cannot locate is still the auditor's finding — report it.
+
+        Attaching the marker to a guessed span would be worse than a separate list, but
+        silently discarding the finding would be worse than either.
+        """
+        from speech_note.annotate import APPENDIX_HEADING, UncertaintyNote, apply_notes
+
+        text = "Only this sentence exists."
+        result = apply_notes(text, [UncertaintyNote("something never said", ("maybe this",))])
+        self.assertEqual(result.inline_count, 0)
+        self.assertEqual(result.appended_count, 1)
+        self.assertTrue(result.text.startswith(text))
+        self.assertIn(APPENDIX_HEADING, result.text)
+        self.assertIn('"something never said"', result.text)
+        self.assertIn('"maybe this"', result.text)
+
+    def test_overlapping_notes_are_listed_rather_than_nested(self) -> None:
+        from speech_note.annotate import UncertaintyNote, apply_notes
+
+        result = apply_notes(
+            "alpha beta gamma",
+            [UncertaintyNote("alpha beta", ("x",)), UncertaintyNote("beta gamma", ("y",))],
+        )
+        self.assertEqual(result.inline_count, 1)
+        self.assertEqual(result.appended_count, 1)
+        self.assertEqual(result.text.count("[unclear audio;"), 1)
+
+    def test_multiple_notes_keep_their_positions(self) -> None:
+        from speech_note.annotate import UncertaintyNote, apply_notes
+
+        result = apply_notes(
+            "first claim here. second claim here.",
+            [UncertaintyNote("first claim", ("a",)), UncertaintyNote("second claim", ("b",))],
+        )
+        self.assertEqual(result.inline_count, 2)
+        self.assertLess(result.text.index('"a"'), result.text.index("second"))
+        self.assertLess(result.text.index("second"), result.text.index('"b"'))
+
+    # --- the organizer's use of it ---------------------------------------------
+
+    def test_organizer_annotates_after_a_successful_cleanup(self) -> None:
+        organizer, client = self._annotating_organizer()
+        client.chat.side_effect = [
+            ChatResponse(content="She liked the letter.", served_model="m", finish_reason="stop"),
+            ChatResponse(
+                content='{"uncertain": [{"quote": "She liked the letter.", '
+                '"alternatives": ["She liked the grid."]}]}',
+                served_model="m",
+                finish_reason="stop",
+            ),
+        ]
+        outcome = organizer.cleanup(self._sources())
+        self.assertEqual(outcome.annotation_count, 1)
+        self.assertEqual(outcome.annotation_appendix_count, 0)
+        self.assertEqual(outcome.text_before_annotation, "She liked the letter.")
+        self.assertIn("[unclear audio;", outcome.text)
+
+    def test_annotation_failure_leaves_the_transcript_untouched(self) -> None:
+        organizer, client = self._annotating_organizer()
+        client.chat.side_effect = [
+            ChatResponse(content="Clean text.", served_model="m", finish_reason="stop"),
+            RuntimeError("annotation endpoint down"),
+        ]
+        outcome = organizer.cleanup(self._sources())
+        self.assertEqual(outcome.text, "Clean text.")
+        self.assertEqual(outcome.annotation_count, 0)
+        assert outcome.annotation_error is not None
+        self.assertIn("annotation endpoint down", outcome.annotation_error)
+        self.assertIsNone(outcome.error)  # the run itself did not fail
+
+    def test_truncated_reply_is_reported_not_patched_up(self) -> None:
+        """The schema makes this unreachable; if it happens anyway, say so plainly."""
+        organizer, client = self._annotating_organizer()
+        client.chat.side_effect = [
+            ChatResponse(content="Clean text.", served_model="m", finish_reason="stop"),
+            ChatResponse(
+                content='{"uncertain": [{"quote": "Clean text.", "alternat',
+                served_model="m",
+                finish_reason="length",
+            ),
+        ]
+        outcome = organizer.cleanup(self._sources())
+        self.assertEqual(outcome.text, "Clean text.")
+        assert outcome.annotation_error is not None
+        self.assertIn("output limit", outcome.annotation_error)
+
+    def test_organizer_records_unusable_annotation_output(self) -> None:
+        organizer, client = self._annotating_organizer()
+        client.chat.side_effect = [
+            ChatResponse(content="Clean text.", served_model="m", finish_reason="stop"),
+            ChatResponse(content="I could not find any issues!", served_model="m", finish_reason="stop"),
+        ]
+        outcome = organizer.cleanup(self._sources())
+        self.assertEqual(outcome.text, "Clean text.")
+        assert outcome.annotation_error is not None
+        self.assertIn("did not return the requested JSON", outcome.annotation_error)
+
+    def test_well_formed_empty_result_is_not_an_error(self) -> None:
+        organizer, client = self._annotating_organizer()
+        client.chat.side_effect = [
+            ChatResponse(content="Clean text.", served_model="m", finish_reason="stop"),
+            ChatResponse(content='{"uncertain": []}', served_model="m", finish_reason="stop"),
+        ]
+        outcome = organizer.cleanup(self._sources())
+        self.assertIsNone(outcome.annotation_error)
+        self.assertEqual(outcome.annotation_count, 0)
+
+    def test_no_annotation_pass_with_a_single_source(self) -> None:
+        """With one source there is no disagreement to detect, so don't pay for a call."""
+        organizer, client = self._annotating_organizer()
+        client.chat.return_value = ChatResponse(
+            content="Clean text.", served_model="m", finish_reason="stop"
+        )
+        organizer.cleanup(
+            [Transcript(label="asr1", model="a", kind="asr-final", text="clean text")]
+        )
+        self.assertEqual(client.chat.call_count, 1)
+
+    def test_annotation_default_follows_the_cleanup_provider(self) -> None:
+        """On for remote models; off for the bundled local quant."""
+        self.assertFalse(make_config().organizer.annotate)  # local default
+        self.assertFalse(make_config("--offline").organizer.annotate)
+        self.assertTrue(make_config("--online-paid").organizer.annotate)
+        self.assertTrue(make_config("--online-free").organizer.annotate)
+
+    def test_annotation_flag_overrides_the_provider_default(self) -> None:
+        self.assertTrue(make_config("--annotate-uncertainty").organizer.annotate)
+        self.assertFalse(
+            make_config("--online-paid", "--no-annotate-uncertainty").organizer.annotate
+        )

@@ -240,8 +240,9 @@ class ArtifactStore:
         config = session.config
         cleanup = session.cleanup
         return {
-            # schema 3: config.organizer is now a nested object (was flat organizer_*).
-            "schema": 3,
+            # schema 4: cleanup carries the uncertainty-annotation fields, and
+            # facts.normalization reports speech level/spread instead of one gain.
+            "schema": 4,
             "version": __version__,
             "started_at": session.started_at.isoformat(),
             "duration_seconds": round(session.elapsed(), 3),
@@ -287,6 +288,10 @@ class ArtifactStore:
                 "requested_output_tokens": cleanup.requested_output_tokens,
                 "request_timeout": cleanup.request_timeout,
                 "seconds": cleanup.seconds,
+                "annotation_count": cleanup.annotation_count,
+                "annotation_appendix_count": cleanup.annotation_appendix_count,
+                "annotation_error": cleanup.annotation_error,
+                "text_before_annotation": cleanup.text_before_annotation,
             },
             "audio_levels": {
                 "measured": session.audio_measured,

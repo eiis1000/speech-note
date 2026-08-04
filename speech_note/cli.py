@@ -41,6 +41,9 @@ class OrganizerConfig:
     gguf: Path | None
     server_command: tuple[str, ...] | None
     prewarm: bool
+    # Run the second, JSON-only pass that marks claims the sources do not jointly
+    # support. Costs one extra (small) request per run.
+    annotate: bool
 
 
 @dataclasses.dataclass(frozen=True)
@@ -283,6 +286,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--organizer-timeout", type=float, default=12.0)
     parser.add_argument("--organizer-context-tokens", type=int, default=None)
     parser.add_argument("--organizer-max-output-tokens", type=int, default=None)
+    parser.add_argument(
+        "--annotate-uncertainty",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "After cleanup, run a second pass that marks the claims the ASR sources do "
+            "not agree on, as '[unclear audio; also heard as ...]'. Where the sources "
+            "disagree the audio was unintelligible and the cleanup picked one reading; "
+            "this shows you that it did, and what the alternatives were. The pass only "
+            "inserts markers — it never rewrites the transcript — so the worst it can do "
+            "is annotate nothing. It costs one extra request, roughly the size of the "
+            "cleanup request. Defaults to ON for remote cleanup providers and OFF for the "
+            "local one: the bundled gemma-E2B quant does now return well-formed answers "
+            "(the reply is schema-constrained), but its *judgements* are unreliable — "
+            "measured, it offers alternatives lifted from an unrelated part of the "
+            "recording. Pass it explicitly to override either way."
+        ),
+    )
     parser.add_argument("--organizer-gpu-layers", default="auto")
     parser.add_argument(
         "--organizer-kv-offload",
@@ -485,6 +506,14 @@ def resolve_config(args: argparse.Namespace) -> Config:
                 else None
             ),
             prewarm=args.organizer_prewarm,
+            # None = "user didn't say". On for remote providers; off for the bundled local
+            # quant, whose answers are well-formed but whose judgements are not (see the
+            # flag's help). Not a format problem any more — a capability one.
+            annotate=(
+                args.annotate_uncertainty
+                if args.annotate_uncertainty is not None
+                else args.organizer_provider == "openrouter"
+            ),
         ),
     )
 

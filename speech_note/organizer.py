@@ -3,8 +3,14 @@
 Only cleanup lives here. The pieces it used to carry moved out, because each is a
 separate concern with separate reasons to change:
 
-  chat.py         — the HTTP transport (auth, model fallback).
+  chat.py         — the HTTP transport (auth, model fallback, response_format).
   llama_server.py — the optional local llama-server child process.
+  annotate.py     — the uncertainty pass that runs *after* cleanup.
+
+Cleanup and annotation are deliberately two calls: one model asked to preserve content,
+strip disfluencies and judge its own confidence has the leeway to start summarizing, and
+summarizing is the failure this pipeline exists to avoid. So this prompt does one job,
+and annotate.py audits the result without being able to rewrite it.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ import sys
 import time
 from typing import TYPE_CHECKING, Callable
 
+from . import annotate as annotation
 from .chat import ChatClient, request_timeout_seconds
 from .config import (
     CLEANUP_MIN_LENGTH_RATIO,
@@ -195,12 +202,14 @@ class Organizer:
         supervisor: LocalServerSupervisor | None,
         context_tokens: int,
         max_output_tokens: int,
+        annotate: bool = False,
     ) -> None:
         self.mode = mode
         self.client = client
         self.supervisor = supervisor
         self.context_tokens = context_tokens
         self.max_output_tokens = max_output_tokens
+        self.annotate = annotate
         self.status_label_callback: Callable[[str], None] | None = None
         self.status_note_callback: Callable[[str], None] | None = None
 
@@ -218,8 +227,38 @@ class Organizer:
         sources = _dedupe_sources(sources)
         started = time.monotonic()
         outcome = self._cleanup_inner(sources, plan)
+        # Annotate only a usable result: there is nothing to audit on an error or a
+        # truncated transcript, and the sources must actually disagree to have a signal.
+        if (
+            self.annotate
+            and self.mode == "llama"
+            and outcome.text
+            and not outcome.error
+            and len(sources) > 1
+        ):
+            self._annotate(outcome, sources)
         outcome.seconds = round(time.monotonic() - started, 3)
         return outcome
+
+    def _annotate(self, outcome: CleanupOutcome, sources: list[Transcript]) -> None:
+        """Mark the claims the sources do not jointly support (see annotate.py).
+
+        Best-effort by construction: the transcript is already complete and correct
+        without markers, so a failure is recorded and the text left alone.
+        """
+        assert self.client is not None
+        result = annotation.annotate(
+            self.client,
+            cleaned_text=outcome.text,
+            sources=sources,
+            context_tokens=self.context_tokens,
+        )
+        outcome.annotation_error = result.error
+        if result.total:
+            outcome.text_before_annotation = outcome.text
+            outcome.text = result.text
+            outcome.annotation_count = result.total
+            outcome.annotation_appendix_count = result.appended_count
 
     def _cleanup_inner(
         self, sources: list[Transcript], plan: CleanupRequestPlan | None
@@ -392,6 +431,7 @@ def build_organizer(config: "Config") -> Organizer:
         auth_env=config.organizer.auth_env,
         reasoning_effort="none" if config.organizer.provider == "openrouter" else None,
     )
+    annotate = config.organizer.annotate
     supervisor: LocalServerSupervisor | None = None
     if config.organizer.provider == "local":
         launch_command = config.organizer.server_command
@@ -429,4 +469,5 @@ def build_organizer(config: "Config") -> Organizer:
         supervisor=supervisor,
         context_tokens=config.organizer.context_tokens,
         max_output_tokens=config.organizer.max_output_tokens,
+        annotate=annotate,
     )

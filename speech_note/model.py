@@ -63,6 +63,16 @@ class CleanupOutcome:
     requested_output_tokens: int | None = None
     request_timeout: float | None = None
     seconds: float | None = None
+    # Uncertainty annotation (a second, separate pass). ``text`` above is the final
+    # output *including* any markers, so every writer stays unchanged; this keeps the
+    # pre-annotation text for diagnostics and records how the pass went. Annotation is
+    # additive and best-effort: annotation_error never fails the run.
+    text_before_annotation: str | None = None
+    annotation_count: int = 0
+    # Of those, how many are listed in the trailing section because their quote could not
+    # be located in the transcript verbatim. They are reported, never dropped.
+    annotation_appendix_count: int = 0
+    annotation_error: str | None = None
 
     @property
     def ok(self) -> bool:
