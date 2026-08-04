@@ -16,7 +16,14 @@ from pathlib import Path
 __all__ = [
     "SAMPLE_RATE", "FRAME_MS", "CHANNELS", "SAMPLE_WIDTH", "VAD_SUPPORTED_SAMPLE_RATES",
     "QUIET_AUDIO_PEAK_DBFS", "NORMALIZE_TARGET_RMS_DBFS", "NORMALIZE_PEAK_CEILING_DBFS",
-    "NORMALIZE_MAX_GAIN", "LIVE_ASR_MODEL", "OPENROUTER_ASR_MODEL", "DEFAULT_ASR_CPU_THREADS",
+    "NORMALIZE_MAX_GAIN_DB", "NORMALIZE_MIN_GAIN_DB", "NORMALIZE_LEVEL_PERCENTILE",
+    "NORMALIZE_LEVEL_WINDOW_SECONDS", "NORMALIZE_GAIN_SMOOTH_SECONDS",
+    "NORMALIZE_COMPRESS_THRESHOLD_DBFS", "NORMALIZE_COMPRESS_RATIO",
+    "NORMALIZE_COMPRESS_KNEE_DB", "NORMALIZE_COMPRESS_LOOKAHEAD_MS",
+    "NORMALIZE_COMPRESS_RELEASE_MS",
+    "LIVE_ASR_MODEL", "OPENROUTER_ASR_MODEL", "DEFAULT_ASR_CPU_THREADS",
+    "OPENROUTER_STT_MODEL", "OPENROUTER_STT_SECOND_MODEL", "OPENROUTER_STT_API_BASE",
+    "OPENROUTER_STT_MP3_SAMPLE_RATE", "OPENROUTER_STT_RESPONSE_FORMAT",
     "WHISPER_CPP_MODEL_DIR", "WHISPER_CPP_MODEL_ALIASES", "BackendSpec", "ASR_BACKENDS",
     "AsrSource", "DEFAULT_ASR_SOURCES", "ONLINE_PAID_ASR_SOURCES", "CTC_STRIDE_SECONDS",
     "SHERPA_VAD_REPO", "SHERPA_VAD_FILE", "SHERPA_MAX_SEGMENT_SECONDS", "CTC_CHUNK_LENGTH_SECONDS",
@@ -28,6 +35,8 @@ __all__ = [
     "OPENROUTER_ASR_MIN_TIMEOUT", "OPENROUTER_PREFERRED_MODELS", "OPENROUTER_API_KEY_ENV",
     "DEFAULT_OPENROUTER_CONTEXT_TOKENS", "DEFAULT_OPENROUTER_MAX_OUTPUT_TOKENS",
     "ORGANIZER_MIN_OUTPUT_TOKENS", "ORGANIZER_MIN_REQUEST_TIMEOUT", "ORGANIZER_MAX_REQUEST_TIMEOUT",
+    "ANNOTATION_MAX_NOTES", "ANNOTATION_MAX_QUOTE_CHARS", "ANNOTATION_MAX_ALTERNATIVES",
+    "ANNOTATION_MAX_OUTPUT_TOKENS",
     "ORGANIZER_CONTEXT_SAFETY",
     "CLEANUP_MIN_LENGTH_RATIO", "CLEANUP_TARGET_LENGTH_RATIO",
     "ARCHIVE_AUDIO_EXTENSIONS", "ARCHIVE_TRANSCRIPT_EXTENSIONS",
@@ -41,10 +50,54 @@ SAMPLE_WIDTH = 2  # bytes per sample, int16 PCM
 VAD_SUPPORTED_SAMPLE_RATES = (48_000, 32_000, 16_000, 8_000)
 QUIET_AUDIO_PEAK_DBFS = -35.0
 
-# Gain normalization targets (matches the old pipeline's behavior).
+# --- leveling ---
+# Normalization is a slow automatic gain ride plus a peak compressor. Three principles,
+# each learned the hard way:
+#
+# 1. NOTHING IS EVER CUT OR CLASSIFIED. There is no speech/silence gate. Speech is
+#    routinely *quieter than the noise around it* — a speaker walking into a shower, a
+#    phone in a pocket — and it is still perfectly recoverable, so any attempt to label
+#    frames as "speech" or "not speech" gets that case exactly backwards: it would pick
+#    the noise as the reference and leave the real speech further below target.
+# 2. THE GAIN VARIES OVER MINUTES, NOT SECONDS. A sustained level change should be
+#    corrected — a few minutes of quiet should end up at normal level — while a brief
+#    dip should be ridden through untouched, because chasing it produces pumping and
+#    tells the ASR feature extractor that a syllable was a sentence.
+# 3. THE GAIN CURVE IS ZERO-PHASE. We hold the whole recording, so the envelope is
+#    computed from a *centred* window and smoothed forwards and backwards. A causal
+#    filter lags the audio it is describing, which means it turns the gain up after the
+#    quiet part has already gone by.
+#
+# Peaks are handled by a look-ahead compressor, never by reducing the overall gain. The
+# old code took its peak term from the absolute maximum sample, so one bump vetoed the
+# whole file: measured on two real recordings, it applied gains of 0.86 and 0.79 —
+# handing ASR audio *quieter* than the input, on exactly the quiet recordings that
+# needed the gain most.
 NORMALIZE_TARGET_RMS_DBFS = -20.0
+# The level estimate is a high percentile of frame loudness inside the window, not a
+# mean and not a maximum. A mean is dragged down by pauses (a window that is half
+# silence reads as quiet, so the gain overshoots); a maximum is set by the single
+# loudest click. A percentile is robust to both and needs no gate.
+NORMALIZE_LEVEL_PERCENTILE = 75.0
+# Centred window for that percentile. Long, so the estimate is stable across pauses.
+NORMALIZE_LEVEL_WINDOW_SECONDS = 90.0
+# Additional zero-phase smoothing of the gain curve, applied as two successive centred
+# moving averages (a triangular kernel). This is what makes the ride slow: a level
+# change has to persist on this timescale before the gain fully follows it.
+NORMALIZE_GAIN_SMOOTH_SECONDS = 45.0
+# Total gain bounds, in dB.
+NORMALIZE_MAX_GAIN_DB = 34.0
+NORMALIZE_MIN_GAIN_DB = -12.0
+# Look-ahead soft-knee compressor, applied after the gain ride to tame transients that
+# would otherwise clip. Look-ahead means the reduction starts *before* the transient, so
+# there is no click on the attack.
+NORMALIZE_COMPRESS_THRESHOLD_DBFS = -14.0
+NORMALIZE_COMPRESS_RATIO = 4.0
+NORMALIZE_COMPRESS_KNEE_DB = 6.0
+NORMALIZE_COMPRESS_LOOKAHEAD_MS = 20.0
+NORMALIZE_COMPRESS_RELEASE_MS = 250.0
+# Final safety limiter. With the compressor in front of it this should barely engage.
 NORMALIZE_PEAK_CEILING_DBFS = -2.0
-NORMALIZE_MAX_GAIN = 12.0
 
 # --- ASR ---
 # There is no "primary"/"secondary" ASR. A run transcribes the audio with an
@@ -54,13 +107,55 @@ NORMALIZE_MAX_GAIN = 12.0
 # information is attached per-model and only when we have something to say (see
 # config.display.ASR_MODEL_NOTES) — most sources carry no reliability claim at all.
 LIVE_ASR_MODEL = "Systran/faster-whisper-tiny.en"
-# The OpenRouter audio-LLM used as a network ASR source (the "openrouter" backend).
-# Gemini 3 Flash accepts a whole long recording as chat input_audio and transcribes
-# it in a single request — verified on a 44-min file — and, given the whole file, it
-# annotates non-speech instead of confabulating it (the failure mode of per-chunk
-# audio-LLM transcription). It is never used unless explicitly selected (--asr
-# openrouter) or defaulted in by --online-paid.
+# The OpenRouter audio-LLM used by the "openrouter" backend: a whole recording is sent
+# as chat input_audio and the reply is the transcript.
+#
+# CAUTION — measured 2026-08-02/03, two failure modes, both severe:
+#   * On *unintelligible* audio it does not annotate the gap. It invents fluent,
+#     confident, specific prose, differently on every call, and the cleanup stage then
+#     copies that verbatim into the output. Fluent invention is far worse than garbled
+#     output because neither the reader nor any later stage can tell it from real speech.
+#   * On a 65-minute recording it degenerated: ~9,600 consecutive repetitions of one
+#     word, half of its 19k-word output, burning to the token cap in 348 s for $0.20 —
+#     against 8.1k plausible words in 16 s for $0.04 from a dedicated STT model.
+#
+# The earlier claim that "given the whole file it annotates non-speech instead of
+# confabulating" holds only for clear, shorter audio, which is all it had been tested on.
+# Kept selectable (--asr openrouter) but no longer any default: see OPENROUTER_STT_MODEL.
 OPENROUTER_ASR_MODEL = "google/gemini-3-flash-preview"
+
+# --- dedicated speech-to-text over the network (the "openrouter-stt" backend) ---
+# OpenRouter's /audio/transcriptions endpoint. This did not exist when the audio-LLM
+# route was chosen, which is why the old comment claimed remote ASR had to be chunked;
+# it accepts a whole 65-minute recording in one multipart request.
+#
+# Measured on a hard, low-SNR recording: all 12 working models emitted visibly garbled
+# text where the audio was unintelligible and NOT ONE invented a narrative — fluent
+# confabulation is an audio-LLM behaviour, not an ASR behaviour. 11 of the 12
+# independently recovered a passage the audio-LLM had replaced with fiction. That is
+# also what makes cross-source disagreement a *usable* uncertainty signal downstream.
+#
+# whisper-large-v3-turbo leads: cheapest of the set (~$0.04 for 65 minutes, a third of
+# the audio-LLM), byte-identical across repeat calls, and never truncated in any trial.
+# parakeet-tdt-0.6b-v3 is the natural second — different vendor and training lineage, so
+# its errors are uncorrelated, and it is the v3 of the model the local sherpa source runs
+# at v2.
+OPENROUTER_STT_MODEL = "openai/whisper-large-v3-turbo"
+OPENROUTER_STT_SECOND_MODEL = "nvidia/parakeet-tdt-0.6b-v3"
+OPENROUTER_STT_API_BASE = "https://openrouter.ai/api/v1/audio/transcriptions"
+# Rejected after measurement: deepgram/nova-3 silently dropped a hard passage;
+# x-ai/grok-stt-1.0 truncated to a fifth of the recording; google/chirp-3 returns HTTP
+# 400 through this endpoint; openai/whisper-large-v3 gave different word counts across
+# batches (provider routing); openai/gpt-audio-mini degenerates into a repeated clause.
+#
+# Uploaded as multipart form-data, not base64 JSON: a 65-minute mp3 is ~17 MB and base64
+# inflates it to ~23 MB, which the gateway rejects with a 502 (15.7 MB base64 still
+# passed; 23 MB did not). Multipart carries no such overhead.
+OPENROUTER_STT_MP3_SAMPLE_RATE = 16_000
+# Only the whisper-family models accept response_format=verbose_json (which carries
+# segment timings and avg_logprob); parakeet, qwen3-asr and gpt-4o-*-transcribe reject
+# it with HTTP 400. Plain "json" is the portable request, so that is what we send.
+OPENROUTER_STT_RESPONSE_FORMAT = "json"
 # Bounded but not artificially capped at 8 like the old code was.
 DEFAULT_ASR_CPU_THREADS = max(2, min(16, os.cpu_count() or 2))
 WHISPER_CPP_MODEL_DIR = Path.home() / ".cache/whisper.cpp"
@@ -102,6 +197,8 @@ ASR_BACKENDS: dict[str, BackendSpec] = {
     # A remote audio-LLM (OpenRouter chat). device_kind "net" is neither GPU nor CPU,
     # so it forms its own scheduling group and overlaps the local sources for free.
     "openrouter": BackendSpec(OPENROUTER_ASR_MODEL, in_process=True, device_kind="net"),
+    # A remote *dedicated* speech recognizer (OpenRouter /audio/transcriptions).
+    "openrouter-stt": BackendSpec(OPENROUTER_STT_MODEL, in_process=True, device_kind="net"),
 }
 
 
@@ -255,6 +352,23 @@ DEFAULT_OPENROUTER_MAX_OUTPUT_TOKENS = 65_536
 # OpenAI-compatible endpoints may count hidden reasoning against max_tokens. A
 # transcript-sized allowance alone is therefore insufficient even for short notes.
 ORGANIZER_MIN_OUTPUT_TOKENS = 4_096
+
+# --- uncertainty annotation ---
+# The annotation pass is answered under a JSON *schema*, not merely "please emit JSON".
+# That matters for more than tidiness: llama.cpp compiles a schema into a GBNF grammar
+# and constrains sampling with it, so a small local model physically cannot emit an
+# unterminated string. Without it, the bundled gemma quant looped inside the first
+# entry's string until it hit the token cap and the whole reply was unusable.
+#
+# The bounds below are part of that guarantee — they are what makes the worst-case reply
+# a bounded length instead of "until the model stops", so truncation stops being possible
+# rather than being something to recover from afterwards.
+ANNOTATION_MAX_NOTES = 25
+ANNOTATION_MAX_QUOTE_CHARS = 200
+ANNOTATION_MAX_ALTERNATIVES = 3
+# Worst case is ANNOTATION_MAX_NOTES * (1 + MAX_ALTERNATIVES) * MAX_QUOTE_CHARS chars of
+# payload, ~5k tokens; this leaves room for that plus the JSON scaffolding.
+ANNOTATION_MAX_OUTPUT_TOKENS = 8_192
 ORGANIZER_MIN_REQUEST_TIMEOUT = 45.0
 ORGANIZER_MAX_REQUEST_TIMEOUT = 1_800.0
 ORGANIZER_CONTEXT_SAFETY = 0.92

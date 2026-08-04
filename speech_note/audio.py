@@ -16,7 +16,16 @@ import numpy as np
 
 from .config import (
     CHANNELS,
-    NORMALIZE_MAX_GAIN,
+    NORMALIZE_COMPRESS_KNEE_DB,
+    NORMALIZE_COMPRESS_LOOKAHEAD_MS,
+    NORMALIZE_COMPRESS_RATIO,
+    NORMALIZE_COMPRESS_RELEASE_MS,
+    NORMALIZE_COMPRESS_THRESHOLD_DBFS,
+    NORMALIZE_GAIN_SMOOTH_SECONDS,
+    NORMALIZE_LEVEL_PERCENTILE,
+    NORMALIZE_LEVEL_WINDOW_SECONDS,
+    NORMALIZE_MAX_GAIN_DB,
+    NORMALIZE_MIN_GAIN_DB,
     NORMALIZE_PEAK_CEILING_DBFS,
     NORMALIZE_TARGET_RMS_DBFS,
     SAMPLE_WIDTH,
@@ -165,23 +174,229 @@ def probe_duration_seconds(path: Path) -> float:
 
 @dataclasses.dataclass(frozen=True)
 class NormalizationResult:
-    gain: float
+    gain: float  # median of the gain ride; the ride is per-frame, never one constant
     input_stats: PcmStats
     applied: bool
+    # Range the ride covered. A wide range means the recording's level really moved.
+    gain_db_min: float | None = None
+    gain_db_max: float | None = None
+    speech_dbfs_before: float | None = None
+    speech_dbfs_after: float | None = None
+    # p90-p10 of frame loudness over the louder half: how *uneven* the recording is.
+    # Falling is the point of leveling; the absolute level alone doesn't show that.
+    spread_db_before: float | None = None
+    spread_db_after: float | None = None
+    compressed_db: float = 0.0  # peak gain reduction the compressor applied
+    limited_blocks: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
             "gain": round(self.gain, 4),
             "applied": self.applied,
+            "gain_db_min": self.gain_db_min,
+            "gain_db_max": self.gain_db_max,
             "input_peak_dbfs": self.input_stats.peak_dbfs,
             "input_rms_dbfs": self.input_stats.rms_dbfs,
+            "speech_dbfs_before": self.speech_dbfs_before,
+            "speech_dbfs_after": self.speech_dbfs_after,
+            "spread_db_before": self.spread_db_before,
+            "spread_db_after": self.spread_db_after,
+            "compressed_db": self.compressed_db,
+            "limited_blocks": self.limited_blocks,
         }
 
 
+# --- leveling: slow zero-phase gain ride + look-ahead compressor ---
+#
+# There is deliberately no speech/silence detection anywhere in here. See
+# config.catalog for why: speech is often quieter than the noise around it, so any
+# frame classification picks the wrong reference and buries the speech further.
+
+_FRAME_HOP = 320  # 20 ms at 16 kHz — the grid the level envelope lives on
+_FRAMES_PER_SEC = 50
+_BLOCK = 160  # 10 ms — the grid the compressor and limiter work on
+
+
+def _frame_dbfs(samples: np.ndarray) -> tuple[np.ndarray, int]:
+    """Per-frame loudness in dBFS over a 20 ms grid, plus the usable sample count."""
+    usable = len(samples) // _FRAME_HOP * _FRAME_HOP
+    if usable == 0:
+        return np.empty(0), 0
+    rms = np.sqrt((samples[:usable].reshape(-1, _FRAME_HOP) ** 2).mean(axis=1))
+    return 20.0 * np.log10(np.maximum(rms / INT16_FULL_SCALE, 1e-9)), usable
+
+
+def _centred_percentile(values: np.ndarray, *, window: int, percentile: float) -> np.ndarray:
+    """Rolling percentile over a *centred* window — zero-phase by construction.
+
+    Evaluated on a coarse grid and interpolated. The envelope this describes moves over
+    tens of seconds, so sampling it every half second loses nothing, and a true
+    per-frame percentile over a 90 s window is by far the most expensive thing in the
+    normalizer (~10x everything else on a 65-minute file).
+    """
+    count = len(values)
+    if count == 0:
+        return np.empty(0)
+    half = max(1, window // 2)
+    stride = max(1, _FRAMES_PER_SEC // 2)
+    anchors = np.arange(0, count, stride)
+    sampled = np.array(
+        [
+            np.percentile(values[max(0, a - half) : min(count, a + half + 1)], percentile)
+            for a in anchors
+        ]
+    )
+    if len(anchors) == 1:
+        return np.full(count, float(sampled[0]))
+    return np.interp(np.arange(count), anchors, sampled)
+
+
+def _centred_moving_average(values: np.ndarray, width: int) -> np.ndarray:
+    """Centred box average via cumsum, with edges averaged over what exists.
+
+    Centred, so it introduces no delay: the smoothed gain still lines up with the audio
+    it was derived from. A causal filter would turn the gain up only after the quiet
+    passage had gone by.
+    """
+    count = len(values)
+    if count == 0 or width <= 1:
+        return values.astype(np.float64)
+    width = min(width, count)
+    cumulative = np.concatenate([[0.0], np.cumsum(values, dtype=np.float64)])
+    half = width // 2
+    starts = np.clip(np.arange(count) - half, 0, count)
+    ends = np.clip(np.arange(count) - half + width, 0, count)
+    return (cumulative[ends] - cumulative[starts]) / np.maximum(ends - starts, 1)
+
+
+def _gain_curve_db(frame_db: np.ndarray) -> np.ndarray:
+    """The slow gain ride, in dB per 20 ms frame.
+
+    Level estimate: a high percentile of frame loudness in a long centred window. No
+    gate, no classification — a percentile is already robust to pauses (which a mean is
+    not) and to clicks (which a maximum is not).
+
+    Then two successive centred moving averages, which is a triangular kernel: the ride
+    only follows a level change that persists on that timescale. A few minutes of quiet
+    ends up fully corrected; a couple of seconds of quiet is ridden through untouched.
+    Both stages are zero-phase, so the gain never lags the audio.
+    """
+    level = _centred_percentile(
+        frame_db,
+        window=int(NORMALIZE_LEVEL_WINDOW_SECONDS * _FRAMES_PER_SEC),
+        percentile=NORMALIZE_LEVEL_PERCENTILE,
+    )
+    wanted = np.clip(
+        NORMALIZE_TARGET_RMS_DBFS - level, NORMALIZE_MIN_GAIN_DB, NORMALIZE_MAX_GAIN_DB
+    )
+    width = max(1, int(NORMALIZE_GAIN_SMOOTH_SECONDS * _FRAMES_PER_SEC))
+    smoothed = _centred_moving_average(_centred_moving_average(wanted, width), width)
+    # Smoothing can only pull the curve back toward the middle, never past the bounds.
+    return np.clip(smoothed, NORMALIZE_MIN_GAIN_DB, NORMALIZE_MAX_GAIN_DB)
+
+
+def _expand_to_samples(per_frame: np.ndarray, total: int, *, hop: int) -> np.ndarray:
+    """Interpolate a per-frame curve to per-sample, so gain changes are continuous.
+
+    Applying a per-frame gain as a step would put a discontinuity at every frame edge.
+    These curves move over tens of seconds, so linear interpolation is inaudible and
+    leaves nothing for the limiter to clean up.
+    """
+    if len(per_frame) == 0:
+        return np.ones(total)
+    centres = np.arange(len(per_frame)) * hop + hop / 2.0
+    return np.interp(np.arange(total), centres, per_frame)
+
+
+def _compress_peaks(samples: np.ndarray) -> tuple[np.ndarray, float]:
+    """Look-ahead soft-knee compressor. Returns (compressed, max reduction in dB).
+
+    This is what handles transients, instead of letting the loudest sample decide the
+    gain for the whole recording. Reduction is computed per 10 ms block, then a running
+    minimum over the look-ahead window pulls the gain down *before* the transient
+    arrives, so the attack has no click. Release is slow enough not to pump.
+    """
+    usable = len(samples) // _BLOCK * _BLOCK
+    if usable == 0:
+        return samples, 0.0
+    blocks = samples[:usable].reshape(-1, _BLOCK)
+    peak_db = 20.0 * np.log10(
+        np.maximum(np.abs(blocks).max(axis=1) / INT16_FULL_SCALE, 1e-9)
+    )
+
+    # Soft knee: no reduction below the knee, full ratio above it, quadratic between.
+    over = peak_db - NORMALIZE_COMPRESS_THRESHOLD_DBFS
+    knee = max(1e-6, NORMALIZE_COMPRESS_KNEE_DB)
+    slope = 1.0 - 1.0 / NORMALIZE_COMPRESS_RATIO
+    reduction = np.where(
+        over <= -knee / 2,
+        0.0,
+        np.where(
+            over >= knee / 2,
+            slope * over,
+            slope * (over + knee / 2) ** 2 / (2 * knee),
+        ),
+    )
+
+    # Look-ahead: each block also obeys the largest reduction coming up shortly.
+    ahead = max(1, int(NORMALIZE_COMPRESS_LOOKAHEAD_MS / 10.0))
+    padded = np.concatenate([reduction, np.zeros(ahead)])
+    windows = np.lib.stride_tricks.sliding_window_view(padded, ahead + 1)
+    reduction = windows.max(axis=1)[: len(reduction)]
+
+    # Release: let the reduction decay gradually once the transient has passed.
+    release = np.exp(-10.0 / max(1.0, NORMALIZE_COMPRESS_RELEASE_MS))
+    held = np.empty_like(reduction)
+    current = 0.0
+    for index, value in enumerate(reduction):
+        current = value if value > current else current * release
+        held[index] = current
+
+    gain = _expand_to_samples(10 ** (-held / 20.0), len(samples), hop=_BLOCK)
+    return samples * gain, float(held.max())
+
+
+def _limit(samples: np.ndarray) -> tuple[np.ndarray, int]:
+    """Final safety limiter. With the compressor in front, it should barely engage."""
+    ceiling = INT16_FULL_SCALE * 10 ** (NORMALIZE_PEAK_CEILING_DBFS / 20.0)
+    usable = len(samples) // _BLOCK * _BLOCK
+    if usable == 0:
+        return np.clip(samples, -ceiling, ceiling), 0
+    blocks = samples[:usable].reshape(-1, _BLOCK)
+    reduce = np.minimum(1.0, ceiling / np.maximum(np.abs(blocks).max(axis=1), 1e-9))
+    reduce = np.minimum.reduce([reduce, *(np.roll(reduce, s) for s in (-2, -1, 1, 2))])
+    limited = (blocks * reduce[:, None]).reshape(-1)
+    if usable < len(samples):
+        limited = np.concatenate([limited, samples[usable:] * reduce[-1]])
+    return limited, int((reduce < 1.0).sum())
+
+
+def _level_summary(samples: np.ndarray) -> tuple[float | None, float | None]:
+    """(median loudness, p90-p10 spread) in dBFS over the loud half of the recording.
+
+    Restricted to frames above the median so that long silences don't dominate the
+    numbers — this is a report, not a gate, and nothing is removed from the audio on the
+    strength of it.
+    """
+    frame_db, usable = _frame_dbfs(samples)
+    if usable == 0:
+        return None, None
+    loud = frame_db[frame_db >= np.median(frame_db)]
+    if loud.size == 0:
+        loud = frame_db
+    return (
+        round(float(np.median(loud)), 2),
+        round(float(np.percentile(loud, 90) - np.percentile(loud, 10)), 2),
+    )
+
+
 def normalize_pcm_wav(source: Path, target: Path) -> NormalizationResult:
-    """Apply gain so RMS approaches the target level without clipping."""
-    target_rms = INT16_FULL_SCALE * 10 ** (NORMALIZE_TARGET_RMS_DBFS / 20.0)
-    peak_ceiling = INT16_FULL_SCALE * 10 ** (NORMALIZE_PEAK_CEILING_DBFS / 20.0)
+    """Level the recording and tame its peaks.
+
+    A slow, zero-phase gain ride derived from a long centred percentile of loudness,
+    then a look-ahead compressor, then a safety limiter. Nothing is gated, classified,
+    or removed. See config.catalog for the reasoning behind each stage.
+    """
     with wave.open(str(source), "rb") as handle:
         params = handle.getparams()
         if handle.getnchannels() != CHANNELS or handle.getsampwidth() != SAMPLE_WIDTH:
@@ -195,13 +410,34 @@ def normalize_pcm_wav(source: Path, target: Path) -> NormalizationResult:
         target.write_bytes(source.read_bytes())
         return NormalizationResult(gain=1.0, input_stats=stats, applied=False)
 
-    gain = min(target_rms / stats.rms_abs, peak_ceiling / stats.peak_abs, NORMALIZE_MAX_GAIN)
-    scaled = np.clip(np.rint(samples * gain), -32768, 32767).astype("<i2")
+    before_level, before_spread = _level_summary(samples)
+    frame_db, _usable = _frame_dbfs(samples)
+    gain_db = _gain_curve_db(frame_db)
+    leveled = samples * _expand_to_samples(
+        10 ** (gain_db / 20.0), len(samples), hop=_FRAME_HOP
+    )
+    leveled, compressed_db = _compress_peaks(leveled)
+    leveled, limited_blocks = _limit(leveled)
+    after_level, after_spread = _level_summary(leveled)
+
+    scaled = np.clip(np.rint(leveled), -32768, 32767).astype("<i2")
     target.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(target), "wb") as out:
         out.setparams(params)
         out.writeframes(scaled.tobytes())
-    return NormalizationResult(gain=float(gain), input_stats=stats, applied=True)
+    return NormalizationResult(
+        gain=float(10 ** (float(np.median(gain_db)) / 20.0)),
+        input_stats=stats,
+        applied=True,
+        gain_db_min=round(float(gain_db.min()), 2) if gain_db.size else None,
+        gain_db_max=round(float(gain_db.max()), 2) if gain_db.size else None,
+        speech_dbfs_before=before_level,
+        speech_dbfs_after=after_level,
+        spread_db_before=before_spread,
+        spread_db_after=after_spread,
+        compressed_db=round(compressed_db, 2),
+        limited_blocks=limited_blocks,
+    )
 
 
 def normalize_audio_for_asr(source: Path, target: Path, *, sample_rate: int) -> NormalizationResult:

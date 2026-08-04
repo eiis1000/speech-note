@@ -159,7 +159,117 @@ class AudioTests(unittest.TestCase):
             target = Path(tmp) / "out.wav"
             self._write_test_wav(source, amplitude=2)
             result = audio.normalize_pcm_wav(source, target)
-            self.assertLessEqual(result.gain, audio.NORMALIZE_MAX_GAIN + 1e-9)
+            ceiling = 10 ** (audio.NORMALIZE_MAX_GAIN_DB / 20.0)
+            self.assertLessEqual(result.gain, ceiling + 1e-9)
+
+    def _write_samples(self, path: Path, samples: "list[int]") -> None:
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(16000)
+            handle.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+
+    def test_normalize_is_not_vetoed_by_one_transient(self) -> None:
+        """A single full-scale sample must not stop quiet speech being amplified.
+
+        Regression test: the old global gain took its peak term from the absolute
+        maximum sample, so one bump or click drove the gain below 1 and the pipeline
+        handed ASR audio *quieter* than the input.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "in.wav"
+            target = Path(tmp) / "out.wav"
+            quiet = [300 if index % 2 else -300 for index in range(16000)]
+            quiet[8000] = 32767  # the transient
+            self._write_samples(source, quiet)
+            result = audio.normalize_pcm_wav(source, target)
+            self.assertTrue(result.applied)
+            self.assertGreater(result.gain, 1.0, "one transient must not veto the gain")
+            with wave.open(str(target), "rb") as handle:
+                out = handle.readframes(handle.getnframes())
+            # The quiet body got louder even though the input already peaked at full scale.
+            body = struct.unpack(f"<{len(out) // 2}h", out)[:4000]
+            self.assertGreater(max(abs(value) for value in body), 300)
+
+    @staticmethod
+    def _tone(amplitude: int, seconds: float) -> "list[int]":
+        count = int(16000 * seconds)
+        return [amplitude if index % 2 else -amplitude for index in range(count)]
+
+    @staticmethod
+    def _rms(values) -> float:
+        return (sum(float(v) * v for v in values) / max(1, len(values))) ** 0.5
+
+    def _normalized(self, samples: "list[int]", tmp: str):
+        source, target = Path(tmp) / "in.wav", Path(tmp) / "out.wav"
+        self._write_samples(source, samples)
+        result = audio.normalize_pcm_wav(source, target)
+        with wave.open(str(target), "rb") as handle:
+            out = struct.unpack(f"<{handle.getnframes()}h", handle.readframes(handle.getnframes()))
+        return result, out
+
+    def test_normalize_corrects_a_sustained_level_change(self) -> None:
+        """Minutes of quiet end up at normal level — the pocketed-mic case.
+
+        The gain ride is deliberately slow, so the change has to persist on that
+        timescale; a few seconds would not (and should not) move it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = self._tone(6000, 180) + self._tone(600, 180)
+            result, out = self._normalized(samples, tmp)
+            self.assertTrue(result.applied)
+            loud = self._rms(out[16000 * 60 : 16000 * 90])
+            faint = self._rms(out[16000 * 270 : 16000 * 300])
+            after_ratio = max(loud, faint) / max(1.0, min(loud, faint))
+            self.assertLess(after_ratio, 10.0 / 2, "the sustained gap should mostly close")
+
+    def test_normalize_rides_through_a_brief_dip(self) -> None:
+        """A couple of seconds of quiet must NOT be chased up to full level.
+
+        Chasing short excursions is what produces pumping, and it tells the ASR feature
+        extractor that a dropped syllable was a whole sentence.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = self._tone(6000, 120) + self._tone(600, 3) + self._tone(6000, 120)
+            _result, out = self._normalized(samples, tmp)
+            steady = self._rms(out[16000 * 30 : 16000 * 60])
+            dip = self._rms(out[16000 * 121 : 16000 * 122])
+            self.assertLess(dip, steady / 3, "the brief dip should stay quiet")
+
+    def test_normalize_never_gates_or_cuts_audio(self) -> None:
+        """Speech is often quieter than the noise around it and is still recoverable.
+
+        Nothing may be classified as non-speech and removed: the output must be the input
+        times a gain curve, so its shape is preserved sample for sample.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            rng = __import__("random").Random(0)
+            # Quiet "speech" riding under much louder "noise".
+            samples = [
+                max(-32000, min(32000, int(rng.gauss(0, 4000)) + (300 if i % 2 else -300)))
+                for i in range(16000 * 20)
+            ]
+            _result, out = self._normalized(samples, tmp)
+            self.assertEqual(len(out), len(samples))
+            # Every non-zero input sample stays non-zero and keeps its sign: a gate would
+            # zero whole stretches, and nothing here may be silenced.
+            checked = 0
+            for index in range(0, len(samples), 997):
+                if abs(samples[index]) > 500:
+                    self.assertNotEqual(out[index], 0, f"sample {index} was silenced")
+                    self.assertEqual(
+                        samples[index] > 0, out[index] > 0, f"sample {index} changed sign"
+                    )
+                    checked += 1
+            self.assertGreater(checked, 100)
+
+    def test_normalize_compresses_peaks_instead_of_dropping_the_gain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = self._tone(400, 30)
+            samples[16000 * 15] = 32767  # one full-scale transient
+            result, _out = self._normalized(samples, tmp)
+            self.assertGreater(result.gain, 1.0, "one transient must not veto the gain")
+            self.assertGreater(result.compressed_db, 0.0, "the peak should be compressed")
 
 
 class SegmentCollectorTests(unittest.TestCase):
