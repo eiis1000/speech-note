@@ -1,47 +1,35 @@
-"""Transcript cleanup via an OpenAI-compatible chat endpoint.
+"""Transcript cleanup: build the prompt from the ASR sources, call the model, sanity-check.
 
-Three separated concerns:
-  LocalServerSupervisor — owns the optional llama-server child process.
-  ChatClient            — HTTP: auth, model fallback, finish_reason, the model
-                          the response says it served (not the one we asked for).
-  Organizer             — builds the prompt from Transcript sources (named, with
-                          quality hints) and applies the length sanity check as
-                          a *warning*, never a gate.
+Only cleanup lives here. The pieces it used to carry moved out, because each is a
+separate concern with separate reasons to change:
+
+  chat.py         — the HTTP transport (auth, model fallback).
+  llama_server.py — the optional local llama-server child process.
 """
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
-import json
 import math
-import os
 import shutil
-import subprocess
 import sys
-import tempfile
-import threading
 import time
-from collections.abc import Sequence
-from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-import requests
-
+from .chat import ChatClient, request_timeout_seconds
 from .config import (
     CLEANUP_MIN_LENGTH_RATIO,
     CLEANUP_TARGET_LENGTH_RATIO,
-    DEFAULT_GGUF_FILE,
     DEFAULT_GGUF_MODEL,
-    DEFAULT_GGUF_REPO,
-    DEFAULT_GGUF_SIZE_HINT,
     ORGANIZER_CONTEXT_SAFETY,
-    ORGANIZER_MAX_REQUEST_TIMEOUT,
     ORGANIZER_MIN_OUTPUT_TOKENS,
-    ORGANIZER_MIN_REQUEST_TIMEOUT,
+)
+from .llama_server import (
+    LocalServerSupervisor,
+    default_server_command,
+    ensure_default_cleanup_model,
 )
 from .model import CleanupOutcome, Transcript
-from .terminal import debug_log
 from .textproc import count_words, estimate_text_tokens, heuristic_cleanup
 
 if TYPE_CHECKING:
@@ -64,354 +52,6 @@ class CleanupRequestPlan:
     # the two can never drift apart.
     reference_words: int
     minimum_words: int
-
-
-def default_server_command(
-    *,
-    context_tokens: int,
-    gpu_layers: str = "auto",
-    kv_offload: bool = True,
-    model_path: Path | None = None,
-) -> list[str] | None:
-    model_path = model_path or DEFAULT_GGUF_MODEL
-    llama_server = shutil.which("llama-server")
-    if not llama_server or not model_path.exists():
-        return None
-    command = [
-        llama_server,
-        "--model", str(model_path),
-        "--host", "127.0.0.1",
-        "--port", "8011",
-        "--parallel", "1",
-        "--ctx-size", str(context_tokens),
-        "--gpu-layers", str(gpu_layers),
-        "--reasoning", "off",
-        "--jinja",
-        "--no-warmup",
-    ]
-    if not kv_offload:
-        # Escape hatch for older llama.cpp/Vulkan stacks where allocating the
-        # split SWA/shared KV cache on the GPU hung during slot init. Fixed by
-        # b9190 (measured: KV on GPU is ~1.5x faster generation, no hang), so
-        # KV offload is on by default; --no-organizer-kv-offload restores this.
-        command.append("--no-kv-offload")
-    return command
-
-
-def ensure_default_cleanup_model(*, auto_yes: bool, interactive: bool | None = None) -> bool:
-    """Install the bundled cleanup GGUF if it's missing. Returns True if present.
-
-    Consent-gated like the ASR models (``--auto-download`` answers yes). Only the
-    default quant has a known source — a user-supplied ``--organizer-gguf`` path is
-    never fetched here. A download failure (offline, wrong repo) is non-fatal: it
-    returns False so the caller falls back to its existing "place a GGUF" notice.
-    """
-    if DEFAULT_GGUF_MODEL.exists():
-        return True
-    from .install import ModelInstallDeclined, require_consent
-
-    try:
-        require_consent(
-            f"cleanup LM '{DEFAULT_GGUF_FILE}' ({DEFAULT_GGUF_REPO})",
-            str(DEFAULT_GGUF_MODEL.parent),
-            size_hint=DEFAULT_GGUF_SIZE_HINT,
-            auto_yes=auto_yes,
-            interactive=interactive,
-        )
-    except ModelInstallDeclined:
-        return False
-    try:
-        from huggingface_hub import hf_hub_download
-
-        DEFAULT_GGUF_MODEL.parent.mkdir(parents=True, exist_ok=True)
-        hf_hub_download(
-            DEFAULT_GGUF_REPO,
-            DEFAULT_GGUF_FILE,
-            local_dir=str(DEFAULT_GGUF_MODEL.parent),
-        )
-    except Exception as exc:  # noqa: BLE001 — any fetch failure should fall back, not crash
-        print(f"note: could not download cleanup model: {exc}", file=sys.stderr)
-        return False
-    return DEFAULT_GGUF_MODEL.exists()
-
-
-def request_timeout_seconds(
-    *,
-    configured_timeout: float,
-    estimated_prompt_tokens: int,
-    requested_output_tokens: int,
-) -> float:
-    """Scale the request timeout with the work being asked for."""
-    prompt_seconds = estimated_prompt_tokens / 250.0
-    output_seconds = requested_output_tokens / 12.0
-    estimated = 15.0 + prompt_seconds + output_seconds
-    return min(
-        ORGANIZER_MAX_REQUEST_TIMEOUT,
-        max(configured_timeout, ORGANIZER_MIN_REQUEST_TIMEOUT, estimated),
-    )
-
-
-class LocalServerSupervisor:
-    """Launches and supervises a local llama-server when one isn't running."""
-
-    def __init__(self, *, launch_command: Sequence[str] | None, healthcheck_url: str) -> None:
-        self.launch_command = launch_command
-        self.healthcheck_url = healthcheck_url
-        self.process: subprocess.Popen[str] | None = None
-        self.log_path: Path | None = None
-        self._log_handle = None
-        self._lock = threading.Lock()
-
-    def is_healthy(self) -> bool:
-        try:
-            return requests.get(self.healthcheck_url, timeout=1.5).ok
-        except requests.RequestException:
-            return False
-
-    def ensure_running(self, *, startup_timeout: float = 45.0) -> None:
-        with self._lock:
-            if self.is_healthy():
-                return
-            if not self.launch_command:
-                return
-            if self.process is None or self.process.poll() is not None:
-                fd, log_name = tempfile.mkstemp(prefix="speech-note-llama-server-", suffix=".log")
-                os.close(fd)
-                self.log_path = Path(log_name)
-                self._log_handle = self.log_path.open("a", encoding="utf-8")
-                self.process = subprocess.Popen(
-                    self.launch_command,
-                    stdout=self._log_handle,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                    text=True,
-                )
-            deadline = time.monotonic() + startup_timeout
-            while time.monotonic() < deadline:
-                if self.process is not None and self.process.poll() is not None:
-                    raise RuntimeError("organizer server exited during startup" + self._log_tail_suffix())
-                if self.is_healthy():
-                    return
-                time.sleep(0.5)
-            raise RuntimeError("organizer server did not become ready" + self._log_tail_suffix())
-
-    def close(self) -> None:
-        with self._lock:
-            if self.process is not None and self.process.poll() is None:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait(timeout=5)
-            if self._log_handle is not None:
-                self._log_handle.close()
-                self._log_handle = None
-
-    def log_tail(self, max_chars: int = 4000) -> str:
-        if self._log_handle is not None:
-            with contextlib.suppress(Exception):
-                self._log_handle.flush()
-        if self.log_path is None or not self.log_path.exists():
-            return ""
-        with contextlib.suppress(Exception):
-            return self.log_path.read_text(encoding="utf-8", errors="replace")[-max_chars:].strip()
-        return ""
-
-    def _log_tail_suffix(self) -> str:
-        tail = self.log_tail()
-        return f"; llama-server log tail: {' '.join(tail.split())}" if tail else ""
-
-
-@dataclasses.dataclass
-class ChatResponse:
-    content: str
-    served_model: str | None
-    finish_reason: str | None
-
-
-class ChatClient:
-    """OpenAI-compatible chat client with model fallback."""
-
-    TRANSIENT_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
-
-    def __init__(
-        self,
-        *,
-        api_base: str,
-        models: Sequence[str],
-        timeout: float,
-        auth_env: str | None = None,
-        reasoning_effort: str | None = None,
-    ) -> None:
-        self.api_base = api_base
-        self.configured_models = [m for m in models if m]
-        self.timeout = timeout
-        self.auth_env = auth_env
-        self.reasoning_effort = reasoning_effort
-        self.last_served_model: str | None = None
-        self._catalog_checked = False
-        self._available_models: list[str] | None = None
-
-    def models_url(self) -> str:
-        if self.api_base.endswith("/chat/completions"):
-            return self.api_base[: -len("/chat/completions")] + "/models"
-        return self.api_base.rstrip("/") + "/models"
-
-    def request_headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if self.auth_env is not None:
-            api_key = os.environ.get(self.auth_env, "").strip()
-            if not api_key:
-                raise RuntimeError(f"{self.auth_env} is required for this organizer provider")
-            headers["Authorization"] = f"Bearer {api_key}"
-        return headers
-
-    def candidate_models(self) -> list[str]:
-        """Configured models filtered against the live catalog when possible.
-
-        The configured list is a preference order, not a claim of existence:
-        entries missing from the provider's /models catalog are dropped (and
-        the drop is logged). If the catalog cannot be fetched, fall back to the
-        configured list unfiltered.
-        """
-        if self._catalog_checked:
-            return self._available_models or self.configured_models
-        self._catalog_checked = True
-        try:
-            response = requests.get(self.models_url(), timeout=10.0, headers=self.request_headers())
-            response.raise_for_status()
-            catalog = {entry.get("id") for entry in response.json().get("data", [])}
-        except Exception as exc:
-            debug_log(f"model catalog check failed; using configured list: {exc}")
-            return self.configured_models
-        available = [model for model in self.configured_models if model in catalog]
-        dropped = [model for model in self.configured_models if model not in catalog]
-        if dropped:
-            debug_log(f"models missing from provider catalog, skipped: {dropped}")
-        # An empty intersection means our list is fully stale; trying the
-        # configured names anyway gives clearer errors than failing silently.
-        self._available_models = available or self.configured_models
-        return self._available_models
-
-    def _is_transient(self, response: requests.Response) -> bool:
-        return response.status_code in self.TRANSIENT_STATUS or (
-            # Model-specific 404s mean the model vanished from the catalog
-            # between our check and the request; fall through to the next.
-            self.auth_env is not None and response.status_code == 404
-        )
-
-    def _advance_or_raise(
-        self,
-        failures: list[str],
-        *,
-        index: int,
-        models: list[str],
-        on_model_failure: Callable[[str, str], None] | None,
-        from_exc: Exception | None = None,
-    ) -> None:
-        """Either advance to the next model (notifying on_model_failure) or, if this
-        was the last model, raise the accumulated failures. Returns normally only when
-        the caller should `continue` to the next model."""
-        if index + 1 >= len(models):
-            if from_exc is not None:
-                raise RuntimeError("; ".join(failures)) from from_exc
-            raise RuntimeError("; ".join(failures))
-        if on_model_failure is not None:
-            on_model_failure(models[index], models[index + 1])
-
-    def chat(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        max_tokens: int,
-        timeout: float,
-        on_model_attempt: Callable[[str], None] | None = None,
-        on_model_failure: Callable[[str, str], None] | None = None,
-    ) -> ChatResponse:
-        failures: list[str] = []
-        models = self.candidate_models()
-        for index, model in enumerate(models):
-            if on_model_attempt is not None:
-                on_model_attempt(model)
-            payload = {
-                "model": model,
-                "messages": messages,
-                "temperature": 0.0,
-                "max_tokens": max_tokens,
-            }
-            if self.reasoning_effort is not None:
-                payload["reasoning"] = {"effort": self.reasoning_effort}
-            try:
-                response = requests.post(
-                    self.api_base,
-                    timeout=timeout,
-                    headers=self.request_headers(),
-                    data=json.dumps(payload),
-                )
-                if not response.ok:
-                    body = " ".join(response.text.split())[:500]
-                    failures.append(f"{model}: HTTP {response.status_code} {body}")
-                    # A non-transient error (e.g. 400 malformed request) won't be fixed
-                    # by another model; fail fast. Transient errors fall through.
-                    if not self._is_transient(response):
-                        raise RuntimeError("; ".join(failures))
-                    self._advance_or_raise(
-                        failures, index=index, models=models, on_model_failure=on_model_failure
-                    )
-                    continue
-                # A 200 OK can still carry a gateway/provider error and no choices:
-                # OpenRouter surfaces upstream rate limits and outages this way. Treat
-                # an unusable body as a failed attempt and fall through instead of
-                # crashing on data["choices"][0].
-                try:
-                    data = response.json()
-                except ValueError:
-                    snippet = " ".join(response.text.split())[:300]
-                    failures.append(f"{model}: HTTP 200 with non-JSON body: {snippet}")
-                    self._advance_or_raise(
-                        failures, index=index, models=models, on_model_failure=on_model_failure
-                    )
-                    continue
-                choices = data.get("choices")
-                if not choices:
-                    detail = data.get("error", data)
-                    failures.append(f"{model}: HTTP 200 but no choices ({json.dumps(detail)[:300]})")
-                    self._advance_or_raise(
-                        failures, index=index, models=models, on_model_failure=on_model_failure
-                    )
-                    continue
-                choice = choices[0]
-                # Record what the server says it served; for llama-server the
-                # requested name is decorative, the response is authoritative.
-                served = data.get("model") or model
-                self.last_served_model = served
-                return ChatResponse(
-                    content=_content_to_text(choice.get("message", {}).get("content")),
-                    served_model=served,
-                    finish_reason=choice.get("finish_reason"),
-                )
-            except requests.RequestException as exc:
-                failures.append(f"{model}: {exc}")
-                self._advance_or_raise(
-                    failures, index=index, models=models,
-                    on_model_failure=on_model_failure, from_exc=exc,
-                )
-                continue
-        raise RuntimeError("; ".join(failures) or "no organizer models configured")
-
-
-def _content_to_text(content: object) -> str:
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts = [
-            str(item.get("text", ""))
-            for item in content
-            if isinstance(item, dict) and item.get("type") == "text"
-        ]
-        return "\n".join(part for part in parts if part).strip()
-    return ""
 
 
 SYSTEM_PROMPT = (

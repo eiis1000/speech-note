@@ -669,7 +669,7 @@ class OpenRouterTranscriber(Transcriber):
     ) -> str:
         # Whole file in one request; length is handled by the API, not chunking.
         from .audio import encode_to_mp3
-        from .organizer import ChatClient
+        from .chat import ChatClient
 
         with tempfile.TemporaryDirectory(prefix="speech-note-or-asr-") as tmp_dir:
             mp3_path = Path(tmp_dir) / "audio.mp3"

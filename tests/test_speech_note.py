@@ -26,16 +26,13 @@ from speech_note import audio, naming, textproc
 from speech_note.capture import SegmentCollector
 from speech_note.cli import Config, parse_args, resolve_config, validate
 from speech_note.model import Transcript
+from speech_note.chat import ChatClient, ChatResponse, request_timeout_seconds
+from speech_note.llama_server import default_server_command, ensure_default_cleanup_model
 from speech_note.organizer import (
     SYSTEM_PROMPT,
-    ChatClient,
-    ChatResponse,
     Organizer,
     build_user_prompt,
     cleanup_request_plan,
-    default_server_command,
-    ensure_default_cleanup_model,
-    request_timeout_seconds,
 )
 from speech_note.cli import _interactive_capture_setup, fold_unified_input
 from speech_note.pipeline import (
@@ -891,7 +888,7 @@ class OrganizerLlmTests(unittest.TestCase):
     def setUp(self) -> None:
         # No catalog endpoint in tests: candidate_models falls back to configured.
         patcher = mock.patch(
-            "speech_note.organizer.requests.get", side_effect=Exception("no catalog")
+            "speech_note.chat.requests.get", side_effect=Exception("no catalog")
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -906,7 +903,7 @@ class OrganizerLlmTests(unittest.TestCase):
         organizer = make_llm_organizer()
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
         response = fake_response(200, self.chat_payload("clean " * 89 + "done."))
-        with mock.patch("speech_note.organizer.requests.post", return_value=response):
+        with mock.patch("speech_note.chat.requests.post", return_value=response):
             outcome = organizer.cleanup(sources)
         self.assertTrue(outcome.ok)
         self.assertEqual(outcome.method, "llama")
@@ -925,7 +922,7 @@ class OrganizerLlmTests(unittest.TestCase):
             return fake_response(200, self.chat_payload("clean " * 90, model="second"))
 
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
-        with mock.patch("speech_note.organizer.requests.post", side_effect=fake_post):
+        with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
             outcome = organizer.cleanup(sources)
         self.assertEqual(calls, ["first", "second"])
         self.assertEqual(outcome.served_model, "second")
@@ -952,7 +949,7 @@ class OrganizerLlmTests(unittest.TestCase):
 
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
         with mock.patch.dict("os.environ", {"OPENROUTER_API_KEY": "k"}):
-            with mock.patch("speech_note.organizer.requests.post", side_effect=fake_post):
+            with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
                 outcome = organizer.cleanup(sources)
         self.assertEqual(calls, ["stale:free", "working:free"])
         self.assertTrue(outcome.ok)
@@ -972,7 +969,7 @@ class OrganizerLlmTests(unittest.TestCase):
             return fake_response(200, self.chat_payload("clean " * 90, model="second"))
 
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
-        with mock.patch("speech_note.organizer.requests.post", side_effect=fake_post):
+        with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
             outcome = organizer.cleanup(sources)
         self.assertEqual(calls, ["first", "second"])
         self.assertTrue(outcome.ok)
@@ -982,7 +979,7 @@ class OrganizerLlmTests(unittest.TestCase):
         organizer = make_llm_organizer("only")
         response = fake_response(200, {"error": {"message": "upstream down"}})
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
-        with mock.patch("speech_note.organizer.requests.post", return_value=response):
+        with mock.patch("speech_note.chat.requests.post", return_value=response):
             outcome = organizer.cleanup(sources)
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.method, "error")
@@ -1004,7 +1001,7 @@ class OrganizerLlmTests(unittest.TestCase):
             return fake_response(200, self.chat_payload("clean " * 90, model="second"))
 
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
-        with mock.patch("speech_note.organizer.requests.post", side_effect=fake_post):
+        with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
             outcome = organizer.cleanup(sources)
         self.assertTrue(outcome.ok)
         self.assertEqual(outcome.served_model, "second")
@@ -1013,7 +1010,7 @@ class OrganizerLlmTests(unittest.TestCase):
         organizer = make_llm_organizer()
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
         response = fake_response(200, self.chat_payload("clean " * 90, finish="length"))
-        with mock.patch("speech_note.organizer.requests.post", return_value=response):
+        with mock.patch("speech_note.chat.requests.post", return_value=response):
             outcome = organizer.cleanup(sources)
         self.assertTrue(outcome.flagged_short)
         assert outcome.error is not None
@@ -1023,7 +1020,7 @@ class OrganizerLlmTests(unittest.TestCase):
         organizer = make_llm_organizer()
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
         response = fake_response(200, self.chat_payload("too short"))
-        with mock.patch("speech_note.organizer.requests.post", return_value=response):
+        with mock.patch("speech_note.chat.requests.post", return_value=response):
             outcome = organizer.cleanup(sources)
         self.assertEqual(outcome.text, "too short")
         self.assertTrue(outcome.flagged_short)
@@ -1038,7 +1035,7 @@ class OrganizerLlmTests(unittest.TestCase):
         # punctuation) — the rita-c failure mode that finish_reason="stop" hid.
         cut_off = "clean " * 89 + "and then I"
         response = fake_response(200, self.chat_payload(cut_off))
-        with mock.patch("speech_note.organizer.requests.post", return_value=response):
+        with mock.patch("speech_note.chat.requests.post", return_value=response):
             outcome = organizer.cleanup(sources)
         self.assertEqual(outcome.text, cut_off.strip())  # output preserved, not deleted
         self.assertTrue(outcome.flagged_short)
@@ -1053,7 +1050,7 @@ class OrganizerLlmTests(unittest.TestCase):
             organizer = make_llm_organizer()
             sources = [Transcript("primary", "whisper", "asr-final", "word " * 10)]
             response = fake_response(200, self.chat_payload("clean " * 20 + ending))
-            with mock.patch("speech_note.organizer.requests.post", return_value=response):
+            with mock.patch("speech_note.chat.requests.post", return_value=response):
                 outcome = organizer.cleanup(sources)
             self.assertFalse(outcome.flagged_short, msg=f"false positive on {ending!r}")
             self.assertIsNone(outcome.warning, msg=f"false positive on {ending!r}")
@@ -1081,7 +1078,7 @@ class OrganizerLlmTests(unittest.TestCase):
             Transcript("primary", "whisper", "asr-final", same),
             Transcript("secondary", "parakeet", "asr-final", same),
         ]
-        with mock.patch("speech_note.organizer.requests.post", side_effect=fake_post):
+        with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
             organizer.cleanup(sources)
         self.assertIn("Source 1", prompts[0])
         self.assertNotIn("Source 2", prompts[0])
@@ -1102,7 +1099,7 @@ class ChatClientCatalogTests(unittest.TestCase):
                 "choices": [{"message": {"content": "clean"}, "finish_reason": "stop"}],
             },
         )
-        with mock.patch("speech_note.organizer.requests.post", return_value=response) as post:
+        with mock.patch("speech_note.chat.requests.post", return_value=response) as post:
             client.chat([{"role": "user", "content": "transcript"}], max_tokens=4096, timeout=1)
         payload = json.loads(post.call_args.kwargs["data"])
         self.assertEqual(payload["reasoning"], {"effort": "none"})
@@ -1115,7 +1112,7 @@ class ChatClientCatalogTests(unittest.TestCase):
         )
         catalog = fake_response(200, {"data": [{"id": "alive:free"}, {"id": "other"}]})
         catalog.raise_for_status = mock.Mock()
-        with mock.patch("speech_note.organizer.requests.get", return_value=catalog):
+        with mock.patch("speech_note.chat.requests.get", return_value=catalog):
             self.assertEqual(client.candidate_models(), ["alive:free"])
 
     def test_catalog_failure_keeps_configured_list(self) -> None:
@@ -1123,7 +1120,7 @@ class ChatClientCatalogTests(unittest.TestCase):
             api_base="http://127.0.0.1:9/v1/chat/completions", models=["a", "b"], timeout=0.01
         )
         with mock.patch(
-            "speech_note.organizer.requests.get", side_effect=Exception("offline")
+            "speech_note.chat.requests.get", side_effect=Exception("offline")
         ):
             self.assertEqual(client.candidate_models(), ["a", "b"])
 
@@ -1133,7 +1130,7 @@ class ChatClientCatalogTests(unittest.TestCase):
         )
         catalog = fake_response(200, {"data": [{"id": "other"}]})
         catalog.raise_for_status = mock.Mock()
-        with mock.patch("speech_note.organizer.requests.get", return_value=catalog):
+        with mock.patch("speech_note.chat.requests.get", return_value=catalog):
             self.assertEqual(client.candidate_models(), ["a"])
 
 
@@ -1142,8 +1139,8 @@ class ServerCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             model = Path(tmp) / "model.gguf"
             model.write_text("fake")
-            with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", model):
-                with mock.patch("speech_note.organizer.shutil.which", return_value="/bin/llama-server"):
+            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
+                with mock.patch("speech_note.llama_server.shutil.which", return_value="/bin/llama-server"):
                     # KV offload is on by default (fixed upstream; ~1.5x faster).
                     command = default_server_command(context_tokens=4096)
                     assert command is not None
@@ -1154,7 +1151,7 @@ class ServerCommandTests(unittest.TestCase):
                     self.assertIn("--no-kv-offload", command)
 
     def test_default_server_command_missing_model(self) -> None:
-        with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", Path("/nonexistent.gguf")):
+        with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", Path("/nonexistent.gguf")):
             self.assertIsNone(default_server_command(context_tokens=4096))
 
     def test_default_server_command_model_path_override(self) -> None:
@@ -1163,8 +1160,8 @@ class ServerCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             stronger = Path(tmp) / "gemma-31b.gguf"
             stronger.write_text("fake")
-            with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", Path("/nonexistent.gguf")):
-                with mock.patch("speech_note.organizer.shutil.which", return_value="/bin/llama-server"):
+            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", Path("/nonexistent.gguf")):
+                with mock.patch("speech_note.llama_server.shutil.which", return_value="/bin/llama-server"):
                     command = default_server_command(context_tokens=4096, model_path=stronger)
                     assert command is not None
                     self.assertIn(str(stronger), command)
@@ -1178,14 +1175,14 @@ class ServerCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             model = Path(tmp) / "cleanup.gguf"
             model.write_text("fake")
-            with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", model):
+            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
                 # Present already: returns True without importing/calling the downloader.
                 self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
 
     def test_ensure_default_cleanup_model_declined(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             model = Path(tmp) / "missing.gguf"
-            with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", model):
+            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
                 # Non-interactive without --auto-download declines, no download attempted.
                 self.assertFalse(
                     ensure_default_cleanup_model(auto_yes=False, interactive=False)
@@ -1206,7 +1203,7 @@ class ServerCommandTests(unittest.TestCase):
 
             fake_hub = types.ModuleType("huggingface_hub")
             fake_hub.hf_hub_download = fake_download  # type: ignore[attr-defined]
-            with mock.patch("speech_note.organizer.DEFAULT_GGUF_MODEL", model):
+            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
                 with mock.patch.dict("sys.modules", {"huggingface_hub": fake_hub}):
                     self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
             self.assertTrue(model.exists())
@@ -1370,10 +1367,10 @@ class PipelineEndToEndTests(unittest.TestCase):
 
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 with mock.patch(
-                    "speech_note.organizer.requests.get",
+                    "speech_note.chat.requests.get",
                     return_value=fake_response(503, {"error": "offline"}),
                 ):
-                    with mock.patch("speech_note.organizer.requests.post", side_effect=fake_post):
+                    with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
                         run_dry_text_pipeline(config)
             prompt = (export / "cleanup-prompt.txt").read_text()
             messages = cast("list[dict[str, str]]", posted["messages"])
@@ -1408,10 +1405,10 @@ class FullAutoTests(unittest.TestCase):
             )
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 with mock.patch(
-                    "speech_note.organizer.requests.get", side_effect=Exception("offline")
+                    "speech_note.chat.requests.get", side_effect=Exception("offline")
                 ):
                     with mock.patch(
-                        "speech_note.organizer.requests.post",
+                        "speech_note.chat.requests.post",
                         side_effect=Exception("connection refused"),
                     ):
                         from speech_note.pipeline import run_dry_text_pipeline
@@ -1441,7 +1438,7 @@ class FullAutoTests(unittest.TestCase):
                 )
             )
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                with mock.patch("speech_note.organizer.requests.post") as post:
+                with mock.patch("speech_note.chat.requests.post") as post:
                     session = run_dry_text_pipeline(config)
             post.assert_not_called()
             self.assertTrue(session.run_failed)
@@ -1692,7 +1689,7 @@ class OpenRouterAsrTests(unittest.TestCase):
             self.assertEqual(sample_rate, 16_000)
             Path(target).write_bytes(b"FAKEAUDIO")
 
-        with mock.patch("speech_note.organizer.ChatClient", FakeClient), \
+        with mock.patch("speech_note.chat.ChatClient", FakeClient), \
              mock.patch("speech_note.audio.encode_to_mp3", fake_encode):
             text = self._transcriber().transcribe_file(
                 Path("/tmp/x.wav"), "en", duration_seconds=240.0
