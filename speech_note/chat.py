@@ -163,6 +163,12 @@ class ChatClient:
                 # constrains sampling, so a reply cannot come back malformed or truncated
                 # mid-string. See annotate.RESPONSE_SCHEMA.
                 payload["response_format"] = response_format
+                if "openrouter" in self.api_base:
+                    # OpenRouter routes to providers that silently IGNORE parameters
+                    # they don't support — an unenforced schema is how malformed
+                    # replies happened. Only route where the schema is honored; a
+                    # model with no such provider fails over to the next in the chain.
+                    payload["provider"] = {"require_parameters": True}
             if self.reasoning_effort is not None:
                 payload["reasoning"] = {"effort": self.reasoning_effort}
             try:

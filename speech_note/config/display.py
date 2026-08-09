@@ -56,6 +56,8 @@ MODEL_SHORT_NAMES: dict[str, str] = {
     "qwen/qwen3-asr-flash-2026-02-10": "qwen3-asr",
     "google/gemini-3-flash-preview": "gemini",
     "deepseek/deepseek-v3.2": "deepseek",
+    "anthropic/claude-haiku-4.5": "haiku",
+    "google/gemma-4-26b-a4b-it": "gemma-26b",
     "nvidia/nemotron-3-super-120b-a12b:free": "nemotron-super",
     "google/gemma-4-31b-it:free": "gemma-4",
     "openai/gpt-oss-20b:free": "gpt-oss",

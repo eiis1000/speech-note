@@ -2210,6 +2210,51 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         self.assertEqual(client.chat.call_count, 2)
         self.assertEqual(client.chat.call_args.kwargs["response_format"], RESPONSE_FORMAT)
 
+    def test_annotation_uses_its_own_client_when_given(self) -> None:
+        """The measured best auditors are not the measured best cleaner — and a
+        separate judge means cleanup never grades its own work."""
+        cleanup_client = mock.Mock()
+        cleanup_client.timeout = 12.0
+        cleanup_client.chat.return_value = ChatResponse(
+            content="She liked the letter.", served_model="cleaner", finish_reason="stop"
+        )
+        auditor = mock.Mock()
+        auditor.timeout = 12.0
+        auditor.chat.return_value = ChatResponse(
+            content='{"uncertain": []}', served_model="auditor", finish_reason="stop"
+        )
+        organizer = Organizer(
+            mode="llama",
+            client=cast(ChatClient, cleanup_client),
+            supervisor=None,
+            context_tokens=65_536,
+            max_output_tokens=16_384,
+            annotate=True,
+            annotation_client=cast(ChatClient, auditor),
+        )
+        organizer.cleanup(self._sources())
+        self.assertEqual(cleanup_client.chat.call_count, 1)  # cleanup only
+        self.assertEqual(auditor.chat.call_count, 1)  # the audit went to the auditor
+
+    def test_openrouter_build_gets_a_dedicated_auditor_chain(self) -> None:
+        from speech_note.config import OPENROUTER_ANNOTATION_MODELS
+        from speech_note.organizer import build_organizer
+
+        config = make_config(
+            "--organizer-mode", "llama", "--organizer-provider", "openrouter",
+            "--input-text", "x",
+        )
+        organizer = build_organizer(config)
+        try:
+            assert organizer.annotation_client is not None
+            self.assertIsNot(organizer.annotation_client, organizer.client)
+            self.assertEqual(
+                organizer.annotation_client.configured_models,
+                list(OPENROUTER_ANNOTATION_MODELS),
+            )
+        finally:
+            organizer.close()
+
     def test_annotation_request_carries_the_worked_example(self) -> None:
         """The synthetic example rides as a real user/assistant pair — an assistant turn
         anchors the output format far harder than prose in the system prompt (models

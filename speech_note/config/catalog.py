@@ -31,6 +31,7 @@ __all__ = [
     "DEFAULT_LOCAL_MODEL_LABEL", "DEFAULT_GGUF_MODEL", "DEFAULT_GGUF_REPO", "DEFAULT_GGUF_FILE",
     "DEFAULT_GGUF_SIZE_HINT", "DEFAULT_ORGANIZER_CONTEXT_TOKENS", "DEFAULT_ORGANIZER_MAX_OUTPUT_TOKENS",
     "DEFAULT_OPENROUTER_API_BASE", "OPENROUTER_FREE_MODELS", "OPENROUTER_PAID_MODELS",
+    "OPENROUTER_ANNOTATION_MODELS",
     "OPENROUTER_ASR_MP3_SAMPLE_RATE", "DEFAULT_OPENROUTER_ASR_MAX_OUTPUT_TOKENS",
     "OPENROUTER_ASR_MIN_TIMEOUT", "OPENROUTER_PREFERRED_MODELS", "OPENROUTER_API_KEY_ENV",
     "DEFAULT_OPENROUTER_CONTEXT_TOKENS", "DEFAULT_OPENROUTER_MAX_OUTPUT_TOKENS",
@@ -352,6 +353,18 @@ OPENROUTER_PAID_MODELS = [
     "deepseek/deepseek-v3.2",
     "google/gemini-3-flash-preview",
     *OPENROUTER_FREE_MODELS,
+]
+
+# The uncertainty-annotation pass gets its own model chain: the auditor sweep
+# (2026-08-09, pinned serving, n=3 per case) found claude-haiku-4.5 and
+# gemma-4-26b-a4b the only models with zero spurious/displaced alternatives across
+# every run, both beating the cleanup lead at the audit — and a separate auditor
+# also means the cleanup model no longer grades its own work. Falls through to the
+# cleanup chain so an outage degrades quality, not availability.
+OPENROUTER_ANNOTATION_MODELS = [
+    "anthropic/claude-haiku-4.5",
+    "google/gemma-4-26b-a4b-it",
+    *OPENROUTER_PAID_MODELS,
 ]
 
 # OpenRouter ASR request shaping (the "openrouter" backend). The whole recording is

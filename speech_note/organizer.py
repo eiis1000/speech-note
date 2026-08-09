@@ -28,6 +28,7 @@ from .config import (
     CLEANUP_MIN_LENGTH_RATIO,
     CLEANUP_TARGET_LENGTH_RATIO,
     DEFAULT_GGUF_MODEL,
+    OPENROUTER_ANNOTATION_MODELS,
     ORGANIZER_CONTEXT_SAFETY,
     ORGANIZER_MIN_OUTPUT_TOKENS,
 )
@@ -275,6 +276,7 @@ class Organizer:
         context_tokens: int,
         max_output_tokens: int,
         annotate: bool = False,
+        annotation_client: ChatClient | None = None,
     ) -> None:
         self.mode = mode
         self.client = client
@@ -282,6 +284,10 @@ class Organizer:
         self.context_tokens = context_tokens
         self.max_output_tokens = max_output_tokens
         self.annotate = annotate
+        # The audit runs on its own model chain when one is provided: the measured
+        # best auditors are not the measured best cleaner, and a separate judge also
+        # means cleanup never grades its own work.
+        self.annotation_client = annotation_client or client
         self.status_label_callback: Callable[[str], None] | None = None
         self.status_note_callback: Callable[[str], None] | None = None
 
@@ -318,14 +324,14 @@ class Organizer:
         Best-effort by construction: the transcript is already complete and correct
         without markers, so a failure is recorded and the text left alone.
         """
-        assert self.client is not None
+        assert self.annotation_client is not None
         if self.status_label_callback is not None:
             # The audit runs inside the "Cleanup" status phase; without this the
             # spinner claims cleanup is still generating for the extra minute.
             self.status_label_callback("auditing uncertainty")
         started = time.monotonic()
         result = annotation.annotate(
-            self.client,
+            self.annotation_client,
             cleaned_text=outcome.text,
             sources=sources,
             context_tokens=self.context_tokens,
@@ -508,6 +514,17 @@ def build_organizer(config: "Config") -> Organizer:
         auth_env=config.organizer.auth_env,
         reasoning_effort="none" if config.organizer.provider == "openrouter" else None,
     )
+    annotation_client: ChatClient | None = None
+    if config.organizer.provider == "openrouter":
+        # A dedicated auditor chain (see OPENROUTER_ANNOTATION_MODELS for the
+        # measurements behind it). Local stays on the one loaded model.
+        annotation_client = ChatClient(
+            api_base=config.organizer.api_base,
+            models=tuple(OPENROUTER_ANNOTATION_MODELS),
+            timeout=config.organizer.timeout,
+            auth_env=config.organizer.auth_env,
+            reasoning_effort="none",
+        )
     annotate = config.organizer.annotate
     supervisor: LocalServerSupervisor | None = None
     if config.organizer.provider == "local":
@@ -547,4 +564,5 @@ def build_organizer(config: "Config") -> Organizer:
         context_tokens=config.organizer.context_tokens,
         max_output_tokens=config.organizer.max_output_tokens,
         annotate=annotate,
+        annotation_client=annotation_client,
     )
