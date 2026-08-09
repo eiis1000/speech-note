@@ -25,8 +25,6 @@ from typing import TYPE_CHECKING, cast
 
 import warnings
 
-import sounddevice as sd
-
 # webrtcvad still imports pkg_resources; not actionable from here.
 warnings.filterwarnings(
     "ignore",
@@ -38,7 +36,11 @@ import webrtcvad  # noqa: E402
 from .audio import convert_to_pcm_wav, write_wav
 from .config import LIVE_ASR_MODEL, SAMPLE_WIDTH
 from .asr import build_live_transcriber, build_transcriber, build_transcribers
-from .devices import choose_live_capture_sample_rate, choose_replay_capture_sample_rate
+from .devices import (
+    choose_live_capture_sample_rate,
+    choose_replay_capture_sample_rate,
+    require_sounddevice,
+)
 from .model import Transcript
 from .organizer import build_organizer
 from .pipeline import (
@@ -355,6 +357,7 @@ class CaptureRunner:
             }
         else:
             with contextlib.suppress(Exception):
+                sd = require_sounddevice()
                 info = cast("dict[str, object]", sd.query_devices(config.input_device, "input"))
                 session.selected_input_device = {
                     "name": info["name"],
@@ -379,7 +382,7 @@ class CaptureRunner:
                     self._spawn(lambda: self._replay_feeder(replay_wav), "replay-feeder")
                     self._consume_until_stopped()
                 else:
-                    with sd.RawInputStream(
+                    with require_sounddevice().RawInputStream(
                         samplerate=self.sample_rate,
                         blocksize=0,
                         dtype="int16",

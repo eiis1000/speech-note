@@ -4,10 +4,29 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-import sounddevice as sd
+# sounddevice needs the PortAudio C library, which only live capture actually uses.
+# Importing it lazily keeps file-input runs (and the test suite) working on machines
+# without the audio stack; the functions that really need it raise at call time.
+try:
+    import sounddevice as _sounddevice
+except (ImportError, OSError) as exc:  # OSError: module present, PortAudio missing
+    _sounddevice = None  # type: ignore[assignment]
+    _SOUNDDEVICE_ERROR: Exception | None = exc
+else:
+    _SOUNDDEVICE_ERROR = None
 
 from .config import CHANNELS, VAD_SUPPORTED_SAMPLE_RATES
 from .terminal import read_single_choice
+
+
+def require_sounddevice() -> Any:
+    """The sounddevice module, or a clear error where live capture is attempted."""
+    if _sounddevice is None:
+        raise RuntimeError(
+            "live audio capture needs sounddevice/PortAudio (available in the Nix dev "
+            "shell); file and text input still work without it"
+        ) from _SOUNDDEVICE_ERROR
+    return _sounddevice
 
 
 def coerce_input_device(device: object) -> int | str | None:
@@ -24,6 +43,7 @@ def coerce_input_device(device: object) -> int | str | None:
 
 
 def list_input_devices() -> list[dict[str, object]]:
+    sd = require_sounddevice()
     devices = cast("list[dict[str, Any]]", sd.query_devices())
     default_input = sd.default.device[0]
     entries: list[dict[str, object]] = []
@@ -100,6 +120,7 @@ def select_input_device() -> int | str | None:
 
 def choose_live_capture_sample_rate(device: object, preferred_rate: int) -> int:
     """Pick a capture rate the device supports and webrtcvad accepts."""
+    sd = require_sounddevice()
     try:
         device_info = cast("dict[str, Any]", sd.query_devices(device, "input"))
         default_rate = int(round(float(device_info["default_samplerate"])))
