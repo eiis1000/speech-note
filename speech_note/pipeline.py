@@ -292,8 +292,12 @@ def write_sources_export(config: "Config", session: Session, *, directory: Path 
         written.append(str(path))
     cleanup = session.cleanup
     if cleanup is not None and cleanup.text:
+        # The export exists for reuse (extra transcripts, eval cases), so it gets the
+        # plain prose: anchors and the notes list are derivable and live in the run's
+        # diagnostics; baked into clean.txt they would just be noise to strip.
         clean_path = directory / "clean.txt"
-        clean_path.write_text(cleanup.text + "\n", encoding="utf-8")
+        plain = cleanup.text_before_annotation or cleanup.text
+        clean_path.write_text(plain + "\n", encoding="utf-8")
         written.append(str(clean_path))
     if written:
         session.paths["exported_sources"] = str(directory)
