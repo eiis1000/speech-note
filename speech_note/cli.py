@@ -283,7 +283,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Model name, or a comma-separated fallback list.",
     )
-    parser.add_argument("--organizer-timeout", type=float, default=12.0)
+    parser.add_argument(
+        "--organizer-timeout",
+        type=float,
+        default=45.0,
+        help=(
+            "Base cleanup-request timeout in seconds. Requests are floored at 45s and "
+            "scale up with prompt/output size, so values below 45 are inert (the old "
+            "default of 12 was silently floored)."
+        ),
+    )
     parser.add_argument("--organizer-context-tokens", type=int, default=None)
     parser.add_argument("--organizer-max-output-tokens", type=int, default=None)
     parser.add_argument(

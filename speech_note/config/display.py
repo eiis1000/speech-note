@@ -56,12 +56,11 @@ MODEL_SHORT_NAMES: dict[str, str] = {
     "qwen/qwen3-asr-flash-2026-02-10": "qwen3-asr",
     "google/gemini-3-flash-preview": "gemini",
     "deepseek/deepseek-v3.2": "deepseek",
-    "openai/gpt-oss-120b:free": "gpt-oss",
     "nvidia/nemotron-3-super-120b-a12b:free": "nemotron-super",
-    "qwen/qwen3-next-80b-a3b-instruct:free": "qwen3-next",
-    "meta-llama/llama-3.3-70b-instruct:free": "llama-3.3",
     "google/gemma-4-31b-it:free": "gemma-4",
-    "nousresearch/hermes-3-llama-3.1-405b:free": "hermes-3",
+    "openai/gpt-oss-20b:free": "gpt-oss",
+    "nvidia/nemotron-nano-9b-v2:free": "nemotron-nano",
+    "inclusionai/ling-3.0-flash:free": "ling-flash",
     "nvidia/nemotron-3-ultra-550b-a55b:free": "nemotron-ultra",
     "local-gguf": "local",  # DEFAULT_LOCAL_MODEL_LABEL
 }

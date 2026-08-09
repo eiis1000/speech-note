@@ -316,18 +316,24 @@ DEFAULT_OPENROUTER_API_BASE = "https://openrouter.ai/api/v1/chat/completions"
 # and missing entries are dropped, and the client falls through the list on transient
 # errors, so order = preference and length = resilience.
 #
-# Free endpoints flap (rate limits, capacity), so OPENROUTER_FREE_MODELS is a long,
-# provider-diverse fallback chain: if one provider's free tier is down, the next is a
-# different provider. Lead is gpt-oss-120b (strongest open model here). The big free
-# flagship nemotron-ultra-550b is deliberately last — in the cleanup bake-off it
-# bloated output ~2x and missed the fix, so it's a last resort, not a preference.
+# Free endpoints flap (rate limits, capacity), so OPENROUTER_FREE_MODELS is a fallback
+# chain, provider-diverse as far as the actual free catalog allows. Missing entries are
+# dropped against the live /models catalog at request time, so a stale entry degrades
+# to a skip, not an error — which is how this list rotted silently: checked against the
+# live catalog on 2026-08-08, four of seven entries (gpt-oss-120b, qwen3-next-80b,
+# llama-3.3-70b, hermes-3-405b) had quietly stopped being free. Current chain:
+# nemotron-super leads (strongest live free model; enforced structured outputs);
+# gemma-31b next (best measured annotation judgement, but its free route rate-limits
+# hard); gpt-oss-20b requires reasoning and so runs with hidden-token overhead;
+# ling-flash rejects json_schema (falls through on the annotation pass, fine for
+# cleanup). The big free flagship nemotron-ultra-550b stays last — in the cleanup
+# bake-off it bloated output ~2x and missed the fix, so it's a last resort.
 OPENROUTER_FREE_MODELS = [
-    "openai/gpt-oss-120b:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
     "google/gemma-4-31b-it:free",
-    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "openai/gpt-oss-20b:free",
+    "nvidia/nemotron-nano-9b-v2:free",
+    "inclusionai/ling-3.0-flash:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
 ]
 # Paid leads with the cleanup bake-off winners (2026-06-15, reconciling whisper +

@@ -169,9 +169,15 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
             write_sources_export(config, session, directory=export_dir)
             return
     if config.organizer.provider != "local" and organizer.mode == "llama":
+        # The training caveat belongs to the free tier. A paid-lead chain still ends in
+        # free fallbacks, so it gets the caveat in conditional form rather than being
+        # (wrongly) accused of logging outright.
+        if all(model.endswith(":free") for model in config.organizer.models):
+            caveat = "free remote endpoints may log or train on inputs"
+        else:
+            caveat = "paid models; if they all fail, free fallbacks may log or train on inputs"
         print(
-            f"note: sending transcripts to {config.organizer.provider} for cleanup; "
-            "free remote endpoints may log or train on inputs",
+            f"note: sending transcripts to {config.organizer.provider} for cleanup; {caveat}",
             file=sys.stderr,
         )
     phase_label = {

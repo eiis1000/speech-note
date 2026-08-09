@@ -1033,7 +1033,9 @@ class OrganizerLlmTests(unittest.TestCase):
         organizer = make_llm_organizer()
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
         # Long enough to pass the length ratio, but cut off mid-sentence (no terminal
-        # punctuation) — the rita-c failure mode that finish_reason="stop" hid.
+        # punctuation). Observed on a real recording: a cleanup reply stopped
+        # mid-sentence yet reported finish_reason="stop", so truncation looked like a
+        # complete answer and nothing flagged it.
         cut_off = "clean " * 89 + "and then I"
         response = fake_response(200, self.chat_payload(cut_off))
         with mock.patch("speech_note.chat.requests.post", return_value=response):
