@@ -30,3 +30,8 @@ __pycache__/
 
 # Scratch outputs
 /tmp/
+
+# Eval material that must never enter history: real-recording cases and raw model
+# replies (which quote them). Synthetic committed cases live in evals/cases/.
+/evals/local/
+/evals/out/
