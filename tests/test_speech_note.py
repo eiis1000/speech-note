@@ -2099,24 +2099,48 @@ class UncertaintyAnnotationTests(unittest.TestCase):
 
         return decode_response(content)
 
+    @staticmethod
+    def _note(quote: str, *alternatives: str, before: str = "", after: str = ""):
+        """A note whose alternatives are uncited (display text only) — the common
+        fixture for placement/rendering tests, where citations play no role."""
+        from speech_note.annotate import Citation, UncertaintyNote
+
+        return UncertaintyNote(
+            quote,
+            tuple(Citation(text=alt, source=0, verbatim="") for alt in alternatives),
+            before=before,
+            after=after,
+        )
+
     # --- the response contract -------------------------------------------------
 
     def test_response_schema_bounds_the_reply(self) -> None:
         """The schema is a correctness measure, not decoration: it is what makes a
-        truncated reply impossible, so every string and array must be bounded."""
+        truncated reply impossible, so every string and array must be bounded — and
+        every property must be in "required" because strict-mode providers demand it
+        (absence is expressed as an empty string, not an omitted field)."""
         from speech_note import annotate
         from speech_note.config import (
             ANNOTATION_MAX_ALTERNATIVES,
+            ANNOTATION_MAX_CONTEXT_CHARS,
             ANNOTATION_MAX_NOTES,
             ANNOTATION_MAX_QUOTE_CHARS,
+            ANNOTATION_MAX_VERBATIM_CHARS,
         )
 
         item = annotate.RESPONSE_SCHEMA["properties"]["uncertain"]
         self.assertEqual(item["maxItems"], ANNOTATION_MAX_NOTES)
         fields = item["items"]["properties"]
+        self.assertEqual(sorted(item["items"]["required"]), sorted(fields.keys()))
         self.assertEqual(fields["quote"]["maxLength"], ANNOTATION_MAX_QUOTE_CHARS)
+        self.assertEqual(fields["before"]["maxLength"], ANNOTATION_MAX_CONTEXT_CHARS)
+        self.assertEqual(fields["after"]["maxLength"], ANNOTATION_MAX_CONTEXT_CHARS)
         self.assertEqual(fields["alternatives"]["maxItems"], ANNOTATION_MAX_ALTERNATIVES)
-        self.assertEqual(fields["alternatives"]["items"]["maxLength"], ANNOTATION_MAX_QUOTE_CHARS)
+        citation = fields["alternatives"]["items"]
+        self.assertEqual(sorted(citation["required"]), sorted(citation["properties"].keys()))
+        self.assertEqual(
+            citation["properties"]["verbatim"]["maxLength"], ANNOTATION_MAX_VERBATIM_CHARS
+        )
         self.assertEqual(annotate.RESPONSE_FORMAT["type"], "json_schema")
 
     def test_annotation_request_sends_the_schema(self) -> None:
@@ -2156,12 +2180,33 @@ class UncertaintyAnnotationTests(unittest.TestCase):
     def test_parses_well_formed_response(self) -> None:
         notes, understood = self._decode(
             '{"uncertain": [{"quote": "a letter to a friend", '
-            '"alternatives": ["a letter to the grid", "  she liked the letter  "]}]}'
+            '"before": "she wrote", "after": "last week", '
+            '"alternatives": [{"text": "a letter to the grid", "source": 2, '
+            '"verbatim": "letter to the grid"}]}]}'
         )
         self.assertTrue(understood)
         self.assertEqual(len(notes), 1)
         self.assertEqual(notes[0].quote, "a letter to a friend")
-        self.assertEqual(notes[0].alternatives, ("a letter to the grid", "she liked the letter"))
+        self.assertEqual(notes[0].before, "she wrote")
+        self.assertEqual(notes[0].after, "last week")
+        alt = notes[0].alternatives[0]
+        self.assertEqual(alt.display(), "a letter to the grid")
+        self.assertEqual(alt.verbatim, "letter to the grid")
+        self.assertEqual(alt.source, 2)
+
+    def test_parses_bare_string_alternatives_from_schemaless_providers(self) -> None:
+        """The old shape (and what a provider without schema enforcement may emit).
+        They become uncited citations; verify_notes decides whether they survive."""
+        notes, understood = self._decode(
+            '{"uncertain": [{"quote": "a letter to a friend", '
+            '"alternatives": ["a letter to the grid", "  she liked the letter  "]}]}'
+        )
+        self.assertTrue(understood)
+        self.assertEqual(
+            [alt.display() for alt in notes[0].alternatives],
+            ["a letter to the grid", "she liked the letter"],
+        )
+        self.assertEqual(notes[0].alternatives[0].verbatim, "")
 
     def test_tolerates_code_fence(self) -> None:
         notes, understood = self._decode(
@@ -2221,7 +2266,7 @@ class UncertaintyAnnotationTests(unittest.TestCase):
             '"alternatives": ["She liked it", "She kicked it.", "she  kicked  it"]}]}'
         )
         self.assertEqual(len(notes), 1)
-        self.assertEqual(notes[0].alternatives, ("She kicked it.",))
+        self.assertEqual([a.display() for a in notes[0].alternatives], ["She kicked it."])
 
     # --- applying the notes ----------------------------------------------------
 
@@ -2229,7 +2274,7 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         from speech_note.annotate import NOTES_HEADING, UncertaintyNote, apply_notes
 
         text = "I arrived. She liked the letter. It was late."
-        result = apply_notes(text, [UncertaintyNote("She liked the letter.", ("She liked the grid.",))])
+        result = apply_notes(text, [self._note("She liked the letter.", "She liked the grid.")])
         self.assertEqual(result.inline_count, 1)
         self.assertEqual(result.appended_count, 0)
         # Body gets a bare [1] anchor; the detail lives in one trailing list. The
@@ -2243,10 +2288,23 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         self.assertEqual(re.sub(r"\[\d+\]", "", body), text)
 
     def test_matches_across_whitespace_differences(self) -> None:
-        from speech_note.annotate import UncertaintyNote, apply_notes
+        from speech_note.annotate import apply_notes
 
-        result = apply_notes("One two\nthree four.", [UncertaintyNote("two three", ("two free",))])
+        result = apply_notes("One two\nthree four.", [self._note("two three", "two free")])
         self.assertEqual(result.inline_count, 1)
+
+    def test_matches_across_punctuation_style_differences(self) -> None:
+        """Measured: a model quoted with 'single' quote marks where the transcript has
+        "double" ones, and the note failed to anchor. Word tokens must match exactly;
+        the punctuation between them must not decide placement."""
+        from speech_note.annotate import apply_notes
+
+        text = 'I said, "come on, let\'s go." Then we left.'
+        result = apply_notes(text, [self._note("I said, 'come on, let's go.'", "come on let go")])
+        self.assertEqual(result.inline_count, 1)
+        # The word-tier match ends at the last word token, so the anchor lands right
+        # after "go" (trailing punctuation is not part of the match).
+        self.assertIn("go[1]", result.text)
 
     def test_unplaceable_quote_is_listed_not_dropped(self) -> None:
         """A quote we cannot locate is still the auditor's finding — report it.
@@ -2257,7 +2315,7 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         from speech_note.annotate import NOTES_HEADING, UncertaintyNote, apply_notes
 
         text = "Only this sentence exists."
-        result = apply_notes(text, [UncertaintyNote("something never said", ("maybe this",))])
+        result = apply_notes(text, [self._note("something never said", "maybe this")])
         self.assertEqual(result.inline_count, 0)
         self.assertEqual(result.appended_count, 1)
         self.assertTrue(result.text.startswith(text))
@@ -2266,18 +2324,20 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         self.assertIn('"maybe this"', result.text)
         self.assertIn("could not anchor", result.text)  # flagged as unanchored, not hidden
 
-    def test_overlapping_notes_are_listed_rather_than_nested(self) -> None:
-        from speech_note.annotate import NOTES_HEADING, UncertaintyNote, apply_notes
+    def test_overlapping_notes_merge_into_one_anchor(self) -> None:
+        from speech_note.annotate import NOTES_HEADING, apply_notes
 
         result = apply_notes(
             "alpha beta gamma",
-            [UncertaintyNote("alpha beta", ("x",)), UncertaintyNote("beta gamma", ("y",))],
+            [self._note("alpha beta", "x"), self._note("beta gamma", "y")],
         )
         self.assertEqual(result.inline_count, 1)
-        self.assertEqual(result.appended_count, 1)
+        self.assertEqual(result.appended_count, 0)
         body = result.text.split(f"\n\n{NOTES_HEADING}\n")[0]
         self.assertEqual(len(re.findall(r"\[\d+\]", body)), 1)  # one anchor, no nesting
-        self.assertIn('"y"', result.text)  # the demoted note is still reported
+        # Both readings survive, folded into the anchored note's line.
+        self.assertIn('"x"', result.text)
+        self.assertIn('"y"', result.text)
 
     def test_notes_are_numbered_in_body_order(self) -> None:
         from speech_note.annotate import NOTES_HEADING, UncertaintyNote, apply_notes
@@ -2286,13 +2346,89 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         # the order the model returned the notes in.
         result = apply_notes(
             "first claim here. second claim here.",
-            [UncertaintyNote("second claim", ("b",)), UncertaintyNote("first claim", ("a",))],
+            [self._note("second claim", "b"), self._note("first claim", "a")],
         )
         self.assertEqual(result.inline_count, 2)
         self.assertIn("first claim[1]", result.text)
         self.assertIn("second claim[2]", result.text)
         listing = result.text.split(f"\n\n{NOTES_HEADING}\n")[1]
         self.assertLess(listing.index('"a"'), listing.index('"b"'))
+
+    def test_context_pins_the_right_instance_of_a_repeated_phrase(self) -> None:
+        """The same words can occur several times; before/after (cited from the cleaned
+        transcript by the model) decide WHICH occurrence carries the anchor. A bare
+        find() always hit the first instance, even between two other corrections."""
+        from speech_note.annotate import apply_notes
+
+        text = "It was fine. We got home. It was fine. The end."
+        result = apply_notes(
+            text,
+            [self._note("It was fine", "it was raining", before="We got home.", after="The end.")],
+        )
+        self.assertIn("We got home. It was fine[1]. The end.", result.text)
+        self.assertTrue(result.text.startswith("It was fine. We got home."))  # 1st untouched
+
+    def test_ordered_notes_anchor_to_successive_instances(self) -> None:
+        """Without context fields, placement still honours the prompt's entries-in-order
+        rule: the search cursor moves forward, so two notes quoting the same words land
+        on successive occurrences instead of stacking on the first."""
+        from speech_note.annotate import apply_notes
+
+        text = "we said stop. then we said stop. done."
+        result = apply_notes(text, [self._note("said stop", "said shop"), self._note("said stop", "set sail")])
+        self.assertIn("we said stop[1]. then we said stop[2]. done.", result.text)
+
+    # --- citation verification --------------------------------------------------
+
+    def test_uncited_alternatives_are_rejected_and_counted(self) -> None:
+        """The invented-alternative failure, killed structurally: an alternative whose
+        verbatim citation appears in no source is dropped (and counted), because the
+        model either finds real source text or has nothing to offer. Measured examples
+        it would have caught: 'I didn't kill her', '(garbled/no clear text)'."""
+        from speech_note.annotate import Citation, UncertaintyNote, verify_notes
+
+        notes = [
+            UncertaintyNote(
+                "on Friday",
+                (
+                    Citation("on Sunday", 2, "to the lake house on sunday"),
+                    Citation("on Tuesday", 2, "on tuesday obviously"),
+                ),
+            )
+        ]
+        kept, rejected = verify_notes(notes, self._sources() + [
+            Transcript(label="asr3", model="c", kind="asr-final",
+                       text="we drove to the lake house on sunday i think"),
+        ])
+        self.assertEqual(rejected, 1)
+        self.assertEqual([a.display() for a in kept[0].alternatives], ["on Sunday"])
+
+    def test_citation_lookup_ignores_case_punctuation_and_claimed_source(self) -> None:
+        """The lookup is mechanical word-sequence containment: casefolded alphanumeric
+        words, no fuzz. A wrong source index must not kill a real reading — the text
+        exists either way — and punctuation differences are not fabrication."""
+        from speech_note.annotate import Citation, UncertaintyNote, verify_notes
+
+        note = UncertaintyNote(
+            "x", (Citation("", 7, "We've arrived -- it WAS great!"),)
+        )
+        kept, rejected = verify_notes([note], [
+            Transcript(label="asr1", model="a", kind="asr-final",
+                       text="um we've arrived, it was great, um"),
+        ])
+        self.assertEqual((len(kept), rejected), (1, 0))
+
+    def test_exact_bare_string_alternative_still_verifies(self) -> None:
+        """A schemaless provider returns display text only; if it is an exact copy of
+        source text the same lookup admits it, so old-shape replies keep working."""
+        from speech_note.annotate import Citation, UncertaintyNote, verify_notes
+
+        exact = UncertaintyNote("q", (Citation("she liked the grid", 0, ""),))
+        invented = UncertaintyNote("q", (Citation("she adored the mesh", 0, ""),))
+        kept, rejected = verify_notes([exact, invented], self._sources())
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(rejected, 1)
+        self.assertEqual(kept[0].alternatives[0].display(), "she liked the grid")
 
     # --- the organizer's use of it ---------------------------------------------
 

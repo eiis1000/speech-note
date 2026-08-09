@@ -31,9 +31,11 @@ from typing import TYPE_CHECKING, Any
 
 from .config import (
     ANNOTATION_MAX_ALTERNATIVES,
+    ANNOTATION_MAX_CONTEXT_CHARS,
     ANNOTATION_MAX_NOTES,
     ANNOTATION_MAX_OUTPUT_TOKENS,
     ANNOTATION_MAX_QUOTE_CHARS,
+    ANNOTATION_MAX_VERBATIM_CHARS,
     ORGANIZER_CONTEXT_SAFETY,
 )
 from .chat import request_timeout_seconds
@@ -67,28 +69,33 @@ SYSTEM_PROMPT = (
     "readings are what different recognizers produced at that same moment. Find the "
     "moment by the words around it. Text from a different part of the recording is never "
     "an alternative, no matter how similar it sounds.\n\n"
-    "Report an entry when:\n"
-    "- The sources give different, mutually incompatible text for the same stretch of "
-    "speech. The audio was hard there and each recognizer guessed; the cleaned "
-    "transcript picked one guess, and the reader deserves the others.\n"
-    "- Exactly one source has a fluent, specific claim (a name, a place, an event, a "
-    "relationship) at a moment where the others are garbled or trail off. Confident "
-    "text supported by one source alone is often invention; report it, with whatever "
-    "the other sources have at that moment as the alternatives.\n\n"
+    "Report an entry when the sources give different, mutually incompatible text for "
+    "the same stretch of speech. The audio was hard there and each recognizer guessed; "
+    "the cleaned transcript picked one guess, and the reader deserves the others. "
+    "Garble is a reading too: when one source has a fluent, specific claim and another "
+    "has garbled text at that same moment, the garble is the competing reading — cite "
+    "it as the alternative.\n\n"
     "Do NOT report:\n"
     "- Text present in one source and merely absent from the others. Recognizers differ "
     "in sensitivity; a quiet passage only one heard is normally real.\n"
     "- Wording, spelling, or punctuation differences.\n"
     "- Disfluencies the cleanup removed.\n\n"
-    'Answer with exactly this JSON shape: {"uncertain": [{"quote": "...", '
-    '"alternatives": ["..."]}]}\n'
+    "Answer with exactly this JSON shape:\n"
+    '{"uncertain": [{"quote": "...", "before": "...", "after": "...", '
+    '"alternatives": [{"text": "...", "source": 1, "verbatim": "..."}]}]}\n'
     '- "quote": copied character-for-character from the CLEANED TRANSCRIPT; the '
     "shortest span that covers the doubtful claim (a clause, not a paragraph), at most "
     f"{ANNOTATION_MAX_QUOTE_CHARS} characters.\n"
-    '- "alternatives": what the OTHER sources have at that same moment, cleaned up just '
-    f"enough to be readable, most plausible first, at most {ANNOTATION_MAX_ALTERNATIVES}. "
-    "A source that is garbled or silent at that moment contributes nothing: give fewer "
-    "alternatives rather than reach elsewhere in the recording.\n"
+    '- "before" and "after": the few words of the CLEANED TRANSCRIPT immediately '
+    "around the quote, copied exactly. They pin WHICH occurrence you mean when the "
+    'same words appear more than once; use "" only at the very start or end.\n'
+    '- Each alternative cites its source: "verbatim" is the competing text COPIED '
+    'EXACTLY from one source at that same moment, "source" is that source\'s number, '
+    'and "text" is a lightly cleaned readable form of it (or "" to display the '
+    "verbatim as is). An alternative you cannot copy out of a source does not exist — "
+    "leave it out. A source that is silent at that moment contributes nothing: give "
+    f"fewer alternatives (at most {ANNOTATION_MAX_ALTERNATIVES}) rather than reach "
+    "elsewhere in the recording.\n"
     "- Skip an entry whose alternatives all mean the same thing as the quote.\n"
     "- Order entries as they appear in the cleaned transcript.\n\n"
     "Calibration: a clean, well-heard recording yields an empty list; a difficult "
@@ -119,14 +126,21 @@ EXAMPLE_USER = (
 
 EXAMPLE_ASSISTANT = (
     '{"uncertain": ['
-    '{"quote": "on Friday", "alternatives": ["on Sunday"]}, '
-    '{"quote": "my brother grilled fish", "alternatives": ["my brother brought fish"]}'
+    '{"quote": "on Friday", '
+    '"before": "out to the lake house", "after": ", and my brother", '
+    '"alternatives": [{"text": "on Sunday", "source": 2, '
+    '"verbatim": "on sunday and my brother"}]}, '
+    '{"quote": "my brother grilled fish", '
+    '"before": "on Friday, and", "after": "for everyone.", '
+    '"alternatives": [{"text": "my brother brought fish", "source": 3, '
+    '"verbatim": "my brother um brought fish"}]}'
     "]}"
 )
 
 
 # The schema is sent as response_format, so the model is *constrained* to it rather than
-# merely asked. maxLength/maxItems are what bound the worst-case reply length.
+# merely asked. maxLength/maxItems are what bound the worst-case reply length. Every
+# property is in "required" because strict-mode providers demand it; "" plays absent.
 RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -137,17 +151,31 @@ RESPONSE_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "quote": {"type": "string", "maxLength": ANNOTATION_MAX_QUOTE_CHARS},
+                    "before": {"type": "string", "maxLength": ANNOTATION_MAX_CONTEXT_CHARS},
+                    "after": {"type": "string", "maxLength": ANNOTATION_MAX_CONTEXT_CHARS},
                     "alternatives": {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": ANNOTATION_MAX_ALTERNATIVES,
                         "items": {
-                            "type": "string",
-                            "maxLength": ANNOTATION_MAX_QUOTE_CHARS,
+                            "type": "object",
+                            "properties": {
+                                "text": {
+                                    "type": "string",
+                                    "maxLength": ANNOTATION_MAX_QUOTE_CHARS,
+                                },
+                                "source": {"type": "integer", "minimum": 0},
+                                "verbatim": {
+                                    "type": "string",
+                                    "maxLength": ANNOTATION_MAX_VERBATIM_CHARS,
+                                },
+                            },
+                            "required": ["text", "source", "verbatim"],
+                            "additionalProperties": False,
                         },
                     },
                 },
-                "required": ["quote", "alternatives"],
+                "required": ["quote", "before", "after", "alternatives"],
                 "additionalProperties": False,
             },
         }
@@ -164,24 +192,52 @@ RESPONSE_FORMAT: dict[str, Any] = {
 
 def build_prompt(cleaned_text: str, sources: "list[Transcript]") -> str:
     """The data-only user turn. All rules live in SYSTEM_PROMPT; mirroring them here
-    taught nothing and diluted the contract (see the prompt-architecture note above)."""
-    blocks = "\n\n".join(
-        f"Source {index} — {source.label} ({source.model}):\n{source.text}"
-        for index, source in enumerate(sources, start=1)
-    )
-    return f"{blocks}\n\nCLEANED TRANSCRIPT:\n{cleaned_text}\n\n{_ASK}"
+    taught nothing and diluted the contract (see the prompt-architecture note above).
+
+    Known per-source pathologies (quality_hint, e.g. "tends to repeat phrases") ride
+    along in the header — the cleanup prompt already gets them, and the auditor can
+    weigh a source's testimony better knowing how it usually fails."""
+    blocks = []
+    for index, source in enumerate(sources, start=1):
+        header = f"Source {index} — {source.label} ({source.model})"
+        if source.quality_hint:
+            header += f" — {source.quality_hint}"
+        blocks.append(f"{header}:\n{source.text}")
+    joined = "\n\n".join(blocks)
+    return f"{joined}\n\nCLEANED TRANSCRIPT:\n{cleaned_text}\n\n{_ASK}"
+
+
+@dataclasses.dataclass(frozen=True)
+class Citation:
+    """A competing reading, cited: ``verbatim`` is the exact span the model copied out
+    of a source, ``text`` the readable form shown to the reader. The citation is what
+    makes an alternative admissible at all — verify_notes drops anything whose verbatim
+    cannot be found in a source, which keeps invented alternatives out without any
+    linguistic judgement in code."""
+
+    text: str
+    source: int  # 1-based source number as the model claimed it; informational
+    verbatim: str
+
+    def display(self) -> str:
+        return self.text or self.verbatim
 
 
 @dataclasses.dataclass(frozen=True)
 class UncertaintyNote:
     quote: str
-    alternatives: tuple[str, ...]
+    alternatives: tuple[Citation, ...]
+    # The quote's surroundings in the cleaned transcript, used to pin WHICH occurrence
+    # of a repeated phrase is meant. Empty at the transcript edges (or from a model
+    # that did not fill them in, in which case placement falls back to reading order).
+    before: str = ""
+    after: str = ""
 
     def listed(self, number: int, anchored: bool) -> str:
         # "sources also heard", not "unclear audio": when one recognizer invented text
         # the audio may have been perfectly clear, and the note must not blame the
         # recording for a model's guess.
-        joined = " / ".join(f'"{alt}"' for alt in self.alternatives)
+        joined = " / ".join(f'"{alt.display()}"' for alt in self.alternatives)
         suffix = "" if anchored else " (could not anchor this in the text above)"
         return f'[{number}] "{self.quote}" — sources also heard: {joined}{suffix}'
 
@@ -196,6 +252,10 @@ class AnnotationResult:
     text: str
     inline_count: int = 0
     appended_count: int = 0
+    # Alternatives whose citation could not be found in any source (see verify_notes):
+    # dropped, never shown, but counted so the eval and diagnostics can see which
+    # models fabricate.
+    rejected_citations: int = 0
     error: str | None = None
 
     @property
@@ -206,6 +266,24 @@ class AnnotationResult:
 def _comparable(text: str) -> str:
     """Loose form for deciding whether two readings actually differ."""
     return re.sub(r"[^a-z0-9 ]+", "", " ".join(text.lower().split()))
+
+
+def _citation(candidate: object) -> Citation | None:
+    """One alternative from the reply. A bare string (schemaless provider, or the old
+    shape) is tolerated as an uncited citation — verify_notes decides its fate."""
+    if isinstance(candidate, str):
+        text = " ".join(candidate.split())
+        return Citation(text=text, source=0, verbatim="") if text else None
+    if not isinstance(candidate, dict):
+        return None
+    text = " ".join(str(candidate.get("text") or "").split())
+    verbatim = " ".join(str(candidate.get("verbatim") or "").split())
+    source = candidate.get("source")
+    if not text and not verbatim:
+        return None
+    return Citation(
+        text=text, source=source if isinstance(source, int) else 0, verbatim=verbatim
+    )
 
 
 def parse_notes(payload: object) -> list[UncertaintyNote]:
@@ -227,26 +305,73 @@ def parse_notes(payload: object) -> list[UncertaintyNote]:
         raw = entry.get("alternatives")
         if not isinstance(quote, str) or not quote.strip():
             continue
-        if isinstance(raw, str):
+        if isinstance(raw, (str, dict)):
             raw = [raw]
         if not isinstance(raw, list):
             continue
         quote = quote.strip()
         seen = {_comparable(quote)}
-        alternatives: list[str] = []
+        alternatives: list[Citation] = []
         for candidate in raw:
-            text = " ".join(str(candidate).split())
-            key = _comparable(text)
+            citation = _citation(candidate)
+            if citation is None:
+                continue
+            key = _comparable(citation.display())
             if not key or key in seen:
                 continue
             seen.add(key)
-            alternatives.append(text)
+            alternatives.append(citation)
             if len(alternatives) == ANNOTATION_MAX_ALTERNATIVES:
                 break
         if not alternatives:
             continue
-        notes.append(UncertaintyNote(quote, tuple(alternatives)))
+        notes.append(
+            UncertaintyNote(
+                quote,
+                tuple(alternatives),
+                before=" ".join(str(entry.get("before") or "").split()),
+                after=" ".join(str(entry.get("after") or "").split()),
+            )
+        )
     return notes
+
+
+def _word_key(text: str) -> str:
+    """Tokenized form for exact word-sequence containment: alphanumeric words only,
+    casefolded, space-joined. Mechanical — no stemming, no synonyms, no fuzz."""
+    return " ".join(re.findall(r"[a-z0-9']+", text.casefold()))
+
+
+def verify_notes(
+    notes: list[UncertaintyNote], sources: "list[Transcript]"
+) -> tuple[list[UncertaintyNote], int]:
+    """(kept notes, rejected alternative count). An alternative survives only if its
+    citation actually appears in some source as a contiguous word sequence.
+
+    The claimed source number is deliberately not trusted or required to match — a
+    citation found in any source is real text either way, and a wrong index should not
+    kill a genuine reading. This is what makes invented alternatives impossible without
+    putting linguistic judgement in code: the model judges, the code looks the citation
+    up. A citation-less alternative (bare string from a schemaless provider) gets the
+    same lookup on its display text, so an exact copy still verifies.
+    """
+    haystacks = [f" {_word_key(source.text)} " for source in sources]
+
+    def cited(alt: Citation) -> bool:
+        for candidate in (alt.verbatim, alt.text):
+            needle = _word_key(candidate)
+            if needle and any(f" {needle} " in haystack for haystack in haystacks):
+                return True
+        return False
+
+    kept: list[UncertaintyNote] = []
+    rejected = 0
+    for note in notes:
+        surviving = tuple(alt for alt in note.alternatives if cited(alt))
+        rejected += len(note.alternatives) - len(surviving)
+        if surviving:
+            kept.append(dataclasses.replace(note, alternatives=surviving))
+    return kept, rejected
 
 
 def decode_response(content: str) -> tuple[list[UncertaintyNote], bool]:
@@ -273,20 +398,71 @@ def decode_response(content: str) -> tuple[list[UncertaintyNote], bool]:
     return parse_notes(payload), True
 
 
-def _locate(text: str, quote: str) -> tuple[int, int] | None:
-    """Find a quote, tolerating whitespace differences only.
+def _flexible_pattern(fragment: str) -> str:
+    """Whitespace-flexible regex for a fragment, exact otherwise."""
+    return r"\s+".join(re.escape(word) for word in fragment.split())
 
-    Nothing fuzzier on purpose: a marker attached to the wrong sentence is worse than one
-    listed separately, and an unlocatable quote is never lost — it goes to the appendix.
+
+def _locate(text: str, note: UncertaintyNote, start: int = 0) -> tuple[int, int] | None:
+    """Find a note's quote, most-pinned reading first.
+
+    1. Context match: before + quote + after as the model cited them from the cleaned
+       transcript. This is what disambiguates repeated phrases — the words around each
+       occurrence differ even when the quote doesn't.
+    2. Exact / whitespace-flexible quote match from ``start`` (the end of the previous
+       placed note; the prompt requires entries in transcript order), falling back to a
+       global search.
+
+    Nothing fuzzier than whitespace and case on purpose: an anchor attached to the
+    wrong sentence is worse than an unanchored listing, and an unlocatable quote is
+    never lost — it stays in the notes list.
     """
-    index = text.find(quote)
-    if index != -1:
-        return index, index + len(quote)
-    words = quote.split()
-    if not words:
+    quote_pattern = _flexible_pattern(note.quote)
+    if not quote_pattern:
         return None
-    match = re.search(r"\s+".join(re.escape(word) for word in words), text)
-    return (match.start(), match.end()) if match else None
+    if note.before or note.after:
+        parts = []
+        if note.before:
+            parts.append(_flexible_pattern(note.before) + r"\W{0,4}")
+        parts.append(f"({quote_pattern})")
+        if note.after:
+            parts.append(r"\W{0,4}" + _flexible_pattern(note.after))
+        match = re.search(r"\s*".join(parts), text, re.IGNORECASE)
+        if match:
+            return match.start(1), match.end(1)
+    index = text.find(note.quote, start)
+    if index == -1:
+        index = text.find(note.quote)
+    if index != -1:
+        return index, index + len(note.quote)
+    # Word tokens joined by any non-word run: tolerates punctuation-style differences
+    # (a model writing 'single' where the transcript has "double" quotes) while still
+    # requiring the exact word sequence. Measured: a real quote failed to anchor over
+    # exactly that.
+    # Interior apostrophes stay inside a token ("let's"); a bare ' is a quotation
+    # mark, not a word, and must not become a token of its own.
+    tokens = re.findall(r"\w+(?:'\w+)*", note.quote)
+    word_pattern = r"\W+".join(re.escape(token) for token in tokens) if tokens else quote_pattern
+    for pattern in (quote_pattern, word_pattern):
+        match = re.search(pattern, text[start:], re.IGNORECASE)
+        if match:
+            return start + match.start(), start + match.end()
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.start(), match.end()
+    return None
+
+
+def _merge(base: UncertaintyNote, extra: UncertaintyNote) -> UncertaintyNote:
+    """Fold an overlapping note's alternatives into the one already anchored there."""
+    seen = {_comparable(base.quote)} | {_comparable(alt.display()) for alt in base.alternatives}
+    merged = list(base.alternatives)
+    for alt in extra.alternatives:
+        key = _comparable(alt.display())
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(alt)
+    return dataclasses.replace(base, alternatives=tuple(merged))
 
 
 def apply_notes(text: str, notes: list[UncertaintyNote]) -> AnnotationResult:
@@ -294,20 +470,30 @@ def apply_notes(text: str, notes: list[UncertaintyNote]) -> AnnotationResult:
 
     The transcript body is never altered — anchors are only inserted — so this cannot
     lose content even if the auditor misbehaves. Numbers follow body order; notes that
-    could not be anchored take the numbers after the last anchored one.
+    could not be anchored take the numbers after the last anchored one. Notes whose
+    spans overlap are merged into one anchor rather than one of them losing its place.
     """
     located: list[tuple[int, int, UncertaintyNote]] = []
     unplaced: list[UncertaintyNote] = []
+    cursor = 0
     for note in notes:
-        span = _locate(text, note.quote)
+        span = _locate(text, note, cursor)
         if span is None:
             unplaced.append(note)
             continue
         start, end = span
-        if any(start < other_end and other_start < end for other_start, other_end, _ in located):
-            # Overlapping spans would stack anchors mid-word; the first wins and the
-            # second is still reported in the list, just without a body anchor.
-            unplaced.append(note)
+        cursor = max(cursor, end)
+        overlap = next(
+            (
+                index
+                for index, (other_start, other_end, _) in enumerate(located)
+                if start < other_end and other_start < end
+            ),
+            None,
+        )
+        if overlap is not None:
+            other_start, other_end, other = located[overlap]
+            located[overlap] = (other_start, other_end, _merge(other, note))
             continue
         located.append((start, end, note))
 
@@ -390,6 +576,9 @@ def annotate(
                 f"(model {response.served_model}): {snippet}"
             ),
         )
+    notes, rejected = verify_notes(notes, sources)
     if not notes:
-        return AnnotationResult(text=cleaned_text)
-    return apply_notes(cleaned_text, notes)
+        return AnnotationResult(text=cleaned_text, rejected_citations=rejected)
+    result = apply_notes(cleaned_text, notes)
+    result.rejected_citations = rejected
+    return result
