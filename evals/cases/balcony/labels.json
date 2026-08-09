@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "The displacement trap. The recording opens with a fluent, corroborated passage",
+    "('harbor lights from the balcony') that is acoustically adjacent to a garbled,",
+    "genuinely divergent passage near the end ('harvest slides / harbor slides /",
+    "harvest lights' from 'the balance / the balancing'). The one observed failure",
+    "class the citation check cannot catch is an auditor citing the EARLY fluent",
+    "text as an 'alternative' for the LATE quote — real source words, wrong moment.",
+    "The eval's displaced metric fires on exactly that; the forbidden label also",
+    "punishes flagging the early corroborated passage itself."
+  ],
+  "expected": {
+    "slides": ["harvest slides from the balance"]
+  },
+  "optional": [
+    "balance meeting"
+  ],
+  "forbidden": [
+    "harbor lights from the balcony"
+  ]
+}

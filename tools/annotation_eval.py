@@ -244,6 +244,7 @@ def ask(
         # run-to-run comparisons meaningless. Pin to high-precision serving; pass
         # --any-quant to measure whatever the route feels like today.
         body["provider"] = {"quantizations": ["bf16", "fp16", "fp8"]}
+    unpinned = False
     for attempt in range(6):
         response = requests.post(
             url,
