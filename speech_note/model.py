@@ -64,14 +64,21 @@ class CleanupOutcome:
     request_timeout: float | None = None
     seconds: float | None = None
     # Uncertainty annotation (a second, separate pass). ``text`` above is the final
-    # output *including* any markers, so every writer stays unchanged; this keeps the
+    # output *including* any anchors, so every writer stays unchanged; this keeps the
     # pre-annotation text for diagnostics and records how the pass went. Annotation is
     # additive and best-effort: annotation_error never fails the run.
     text_before_annotation: str | None = None
     annotation_count: int = 0
-    # Of those, how many are listed in the trailing section because their quote could not
-    # be located in the transcript verbatim. They are reported, never dropped.
+    # Of those, how many appear in the notes list without a body anchor because their
+    # quote could not be located verbatim. They are reported, never dropped.
     annotation_appendix_count: int = 0
+    # Alternatives whose citation matched no source text: dropped and counted, so the
+    # diagnostics show when a model fabricates readings (see annotate.verify_notes).
+    annotation_rejected_citations: int = 0
+    annotation_seconds: float | None = None
+    # The structured notes as applied (quote/alternatives/anchored), so post-hoc
+    # analysis never has to parse anchors back out of the rendered text.
+    annotation_notes: list[dict[str, object]] | None = None
     annotation_error: str | None = None
 
     @property

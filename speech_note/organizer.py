@@ -247,18 +247,22 @@ class Organizer:
         without markers, so a failure is recorded and the text left alone.
         """
         assert self.client is not None
+        started = time.monotonic()
         result = annotation.annotate(
             self.client,
             cleaned_text=outcome.text,
             sources=sources,
             context_tokens=self.context_tokens,
         )
+        outcome.annotation_seconds = round(time.monotonic() - started, 3)
         outcome.annotation_error = result.error
+        outcome.annotation_rejected_citations = result.rejected_citations
         if result.total:
             outcome.text_before_annotation = outcome.text
             outcome.text = result.text
             outcome.annotation_count = result.total
             outcome.annotation_appendix_count = result.appended_count
+            outcome.annotation_notes = result.notes
 
     def _cleanup_inner(
         self, sources: list[Transcript], plan: CleanupRequestPlan | None

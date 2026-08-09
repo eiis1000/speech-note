@@ -401,6 +401,10 @@ def report(config: "Config", session: Session) -> None:
                 "sources disagreed",
                 file=err,
             )
+        if cleanup is not None and cleanup.annotation_error:
+            # The non-full-auto path prints this via the skips tail; full-auto returns
+            # here, and a silently skipped audit pass looks identical to a clean bill.
+            print(f"note: uncertainty annotation: {cleanup.annotation_error}", file=err)
         if "exported_sources" in session.paths:
             print(f"exported sources: {session.paths['exported_sources']}", file=err)
         if "error_diagnostics" in session.paths:

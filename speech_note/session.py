@@ -218,6 +218,11 @@ class ArtifactStore:
 
         write_pair("raw.latest", "raw", session.raw_text())
         write_pair("clean.latest", "clean", session.clean_text())
+        if session.cleanup is not None and session.cleanup.text_before_annotation:
+            # clean.latest carries the anchors and notes list; downstream consumers
+            # that want pure prose (TTS, word counts, pasting into notes) get the
+            # pre-annotation text as a real artifact instead of a diagnostics field.
+            write_pair("clean.plain.latest", "clean-plain", session.cleanup.text_before_annotation)
 
         if session.recorded_audio:
             latest_wav = self.artifacts_dir / "recording.latest.wav"
@@ -240,9 +245,10 @@ class ArtifactStore:
         config = session.config
         cleanup = session.cleanup
         return {
-            # schema 4: cleanup carries the uncertainty-annotation fields, and
-            # facts.normalization reports speech level/spread instead of one gain.
-            "schema": 4,
+            # schema 5: annotation records structured notes, rejected-citation count,
+            # and its own timing (schema 4 added the annotation fields; 3 and earlier
+            # predate the annotation pass).
+            "schema": 5,
             "version": __version__,
             "started_at": session.started_at.isoformat(),
             "duration_seconds": round(session.elapsed(), 3),
@@ -290,6 +296,9 @@ class ArtifactStore:
                 "seconds": cleanup.seconds,
                 "annotation_count": cleanup.annotation_count,
                 "annotation_appendix_count": cleanup.annotation_appendix_count,
+                "annotation_rejected_citations": cleanup.annotation_rejected_citations,
+                "annotation_seconds": cleanup.annotation_seconds,
+                "annotation_notes": cleanup.annotation_notes,
                 "annotation_error": cleanup.annotation_error,
                 "text_before_annotation": cleanup.text_before_annotation,
             },

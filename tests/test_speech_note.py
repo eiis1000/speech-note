@@ -1360,7 +1360,7 @@ class PipelineEndToEndTests(unittest.TestCase):
             tmp = Path(tmp_dir)
             self.run_dry(tmp)
             payload = json.loads((tmp / "diagnostics.latest.json").read_text())
-            self.assertEqual(payload["schema"], 4)
+            self.assertEqual(payload["schema"], 5)
             self.assertEqual(payload["cleanup"]["method"], "heuristic")
             self.assertFalse(payload["audio_levels"]["measured"])
             self.assertEqual(payload["transcripts"][0]["label"], "user")
@@ -2417,6 +2417,51 @@ class UncertaintyAnnotationTests(unittest.TestCase):
                        text="um we've arrived, it was great, um"),
         ])
         self.assertEqual((len(kept), rejected), (1, 0))
+
+    def test_note_cap_scales_with_transcript_length(self) -> None:
+        """A memo keeps the base cap; an hour-long transcript may legitimately carry
+        more divergences, so the schema's maxItems grows with length, to a ceiling."""
+        from speech_note.annotate import notes_cap, response_format
+        from speech_note.config import ANNOTATION_MAX_NOTES, ANNOTATION_MAX_NOTES_CEILING
+
+        self.assertEqual(notes_cap("short note"), ANNOTATION_MAX_NOTES)
+        hour_long = "word " * 9000
+        self.assertEqual(notes_cap(hour_long), ANNOTATION_MAX_NOTES_CEILING)
+        fmt = response_format(notes_cap(hour_long))
+        self.assertEqual(
+            fmt["json_schema"]["schema"]["properties"]["uncertain"]["maxItems"],
+            ANNOTATION_MAX_NOTES_CEILING,
+        )
+
+    def test_organizer_persists_structured_notes_and_timing(self) -> None:
+        """Diagnostics carry the notes as data (quote/alternatives/anchored) plus the
+        pass timing and rejected-citation count — never to be re-parsed from text."""
+        organizer, client = self._annotating_organizer()
+        client.chat.side_effect = [
+            ChatResponse(content="She liked the letter.", served_model="m", finish_reason="stop"),
+            ChatResponse(
+                content='{"uncertain": [{"quote": "She liked the letter.", '
+                '"before": "", "after": "", '
+                '"alternatives": ['
+                '{"text": "", "source": 2, "verbatim": "she liked the grid"}, '
+                '{"text": "invented reading", "source": 1, "verbatim": "never said this"}'
+                "]}]}",
+                served_model="m",
+                finish_reason="stop",
+            ),
+        ]
+        outcome = organizer.cleanup(self._sources())
+        self.assertEqual(outcome.annotation_count, 1)
+        self.assertEqual(outcome.annotation_rejected_citations, 1)
+        self.assertIsNotNone(outcome.annotation_seconds)
+        assert outcome.annotation_notes is not None
+        (note,) = outcome.annotation_notes
+        self.assertEqual(note["quote"], "She liked the letter.")
+        self.assertTrue(note["anchored"])
+        self.assertEqual(
+            note["alternatives"],
+            [{"text": "", "source": 2, "verbatim": "she liked the grid"}],
+        )
 
     def test_exact_bare_string_alternative_still_verifies(self) -> None:
         """A schemaless provider returns display text only; if it is an exact copy of

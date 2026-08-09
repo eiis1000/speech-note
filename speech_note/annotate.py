@@ -33,9 +33,12 @@ from .config import (
     ANNOTATION_MAX_ALTERNATIVES,
     ANNOTATION_MAX_CONTEXT_CHARS,
     ANNOTATION_MAX_NOTES,
+    ANNOTATION_MAX_NOTES_CEILING,
     ANNOTATION_MAX_OUTPUT_TOKENS,
     ANNOTATION_MAX_QUOTE_CHARS,
     ANNOTATION_MAX_VERBATIM_CHARS,
+    ANNOTATION_TOKENS_PER_NOTE,
+    ANNOTATION_WORDS_PER_NOTE,
     ORGANIZER_CONTEXT_SAFETY,
 )
 from .chat import request_timeout_seconds
@@ -141,12 +144,15 @@ EXAMPLE_ASSISTANT = (
 # The schema is sent as response_format, so the model is *constrained* to it rather than
 # merely asked. maxLength/maxItems are what bound the worst-case reply length. Every
 # property is in "required" because strict-mode providers demand it; "" plays absent.
-RESPONSE_SCHEMA: dict[str, Any] = {
+def response_schema(max_notes: int = ANNOTATION_MAX_NOTES) -> dict[str, Any]:
+    """The reply schema, with the note cap scaled to the transcript being audited
+    (an hour of unclear audio legitimately carries more divergences than a memo)."""
+    return {
     "type": "object",
     "properties": {
         "uncertain": {
             "type": "array",
-            "maxItems": ANNOTATION_MAX_NOTES,
+            "maxItems": max_notes,
             "items": {
                 "type": "object",
                 "properties": {
@@ -182,12 +188,32 @@ RESPONSE_SCHEMA: dict[str, Any] = {
     },
     "required": ["uncertain"],
     "additionalProperties": False,
-}
+    }
 
-RESPONSE_FORMAT: dict[str, Any] = {
-    "type": "json_schema",
-    "json_schema": {"name": "uncertain_passages", "strict": True, "schema": RESPONSE_SCHEMA},
-}
+
+def response_format(max_notes: int = ANNOTATION_MAX_NOTES) -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "uncertain_passages",
+            "strict": True,
+            "schema": response_schema(max_notes),
+        },
+    }
+
+
+def notes_cap(cleaned_text: str) -> int:
+    """The note budget for one transcript: the base cap, plus one per
+    ANNOTATION_WORDS_PER_NOTE words, up to the ceiling."""
+    return min(
+        ANNOTATION_MAX_NOTES_CEILING,
+        max(ANNOTATION_MAX_NOTES, len(cleaned_text.split()) // ANNOTATION_WORDS_PER_NOTE),
+    )
+
+
+# The defaults, for callers (and tests) that treat the contract as static.
+RESPONSE_SCHEMA: dict[str, Any] = response_schema()
+RESPONSE_FORMAT: dict[str, Any] = response_format()
 
 
 def build_prompt(cleaned_text: str, sources: "list[Transcript]") -> str:
@@ -256,6 +282,9 @@ class AnnotationResult:
     # dropped, never shown, but counted so the eval and diagnostics can see which
     # models fabricate.
     rejected_citations: int = 0
+    # The applied notes as plain data (quote, alternatives, anchored), for diagnostics —
+    # post-hoc analysis should never have to parse anchors back out of rendered text.
+    notes: list[dict[str, object]] = dataclasses.field(default_factory=list)
     error: str | None = None
 
     @property
@@ -509,8 +538,23 @@ def apply_notes(text: str, notes: list[UncertaintyNote]) -> AnnotationResult:
     ]
     if lines:
         annotated = f"{annotated.rstrip()}\n\n{NOTES_HEADING}\n" + "\n".join(lines)
+
+    def payload(note: UncertaintyNote, anchored: bool) -> dict[str, object]:
+        return {
+            "quote": note.quote,
+            "anchored": anchored,
+            "alternatives": [
+                {"text": alt.text, "source": alt.source, "verbatim": alt.verbatim}
+                for alt in note.alternatives
+            ],
+        }
+
     return AnnotationResult(
-        text=annotated, inline_count=len(located), appended_count=len(unplaced)
+        text=annotated,
+        inline_count=len(located),
+        appended_count=len(unplaced),
+        notes=[payload(note, True) for _, _, note in located]
+        + [payload(note, False) for note in unplaced],
     )
 
 
@@ -528,7 +572,11 @@ def annotate(
         for text in (SYSTEM_PROMPT, EXAMPLE_USER, EXAMPLE_ASSISTANT, prompt)
     )
     budget = max(256, int(context_tokens * ORGANIZER_CONTEXT_SAFETY))
-    requested = min(ANNOTATION_MAX_OUTPUT_TOKENS, max(1024, budget - estimated))
+    cap = notes_cap(cleaned_text)
+    # The output allowance grows with the note cap: a bounded schema is no protection
+    # if a full legitimate answer cannot fit in the tokens requested for it.
+    wanted = max(ANNOTATION_MAX_OUTPUT_TOKENS, cap * ANNOTATION_TOKENS_PER_NOTE)
+    requested = min(wanted, max(1024, budget - estimated))
     if estimated + requested > budget:
         return AnnotationResult(
             text=cleaned_text,
@@ -551,7 +599,7 @@ def annotate(
                 estimated_prompt_tokens=estimated,
                 requested_output_tokens=requested,
             ),
-            response_format=RESPONSE_FORMAT,
+            response_format=response_format(cap),
         )
     except Exception as exc:  # noqa: BLE001 — annotation must never fail the run
         return AnnotationResult(text=cleaned_text, error=f"uncertainty annotation failed: {exc}")

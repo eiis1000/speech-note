@@ -37,7 +37,8 @@ __all__ = [
     "ORGANIZER_MIN_OUTPUT_TOKENS", "ORGANIZER_MIN_REQUEST_TIMEOUT", "ORGANIZER_MAX_REQUEST_TIMEOUT",
     "ANNOTATION_MAX_NOTES", "ANNOTATION_MAX_QUOTE_CHARS", "ANNOTATION_MAX_ALTERNATIVES",
     "ANNOTATION_MAX_OUTPUT_TOKENS", "ANNOTATION_MAX_CONTEXT_CHARS",
-    "ANNOTATION_MAX_VERBATIM_CHARS",
+    "ANNOTATION_MAX_VERBATIM_CHARS", "ANNOTATION_WORDS_PER_NOTE",
+    "ANNOTATION_MAX_NOTES_CEILING", "ANNOTATION_TOKENS_PER_NOTE",
     "ORGANIZER_CONTEXT_SAFETY",
     "CLEANUP_MIN_LENGTH_RATIO", "CLEANUP_TARGET_LENGTH_RATIO",
     "ARCHIVE_AUDIO_EXTENSIONS", "ARCHIVE_TRANSCRIPT_EXTENSIONS",
@@ -389,6 +390,14 @@ ANNOTATION_MAX_ALTERNATIVES = 3
 # alternative citable at all — see annotate.verify_notes).
 ANNOTATION_MAX_CONTEXT_CHARS = 80
 ANNOTATION_MAX_VERBATIM_CHARS = 300
+# ANNOTATION_MAX_NOTES is sized for a note-length recording; an hour of unclear audio
+# legitimately carries more divergences than a memo, so the schema's maxItems scales
+# with transcript length (one extra note allowed per this many words) up to a ceiling,
+# and the requested output tokens scale with the cap so a full legitimate answer is
+# never cut off by its own budget.
+ANNOTATION_WORDS_PER_NOTE = 150
+ANNOTATION_MAX_NOTES_CEILING = 50
+ANNOTATION_TOKENS_PER_NOTE = 300
 # Worst case is ANNOTATION_MAX_NOTES * (1 + MAX_ALTERNATIVES) * MAX_QUOTE_CHARS chars of
 # payload, ~5k tokens; this leaves room for that plus the JSON scaffolding.
 ANNOTATION_MAX_OUTPUT_TOKENS = 8_192
