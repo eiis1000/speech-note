@@ -104,7 +104,11 @@ SYSTEM_PROMPT = (
     "Calibration: a clean, well-heard recording yields an empty list; a difficult "
     "recording usually yields several entries. Report every place the sources visibly "
     "diverge — withholding a real divergence misleads the reader exactly as much as "
-    "inventing one."
+    "inventing one.\n\n"
+    "Corroboration means agreement on the words, not a vote count: when two sources "
+    "agree and a third carries incompatible substance at that same moment, that is "
+    "still a divergence — report it, with the odd reading out as the alternative. A "
+    "majority of fallible recognizers is evidence, not proof."
 )
 
 _ASK = "Report the passages the sources do not jointly support."
