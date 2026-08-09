@@ -29,7 +29,7 @@ from .config import (
 from .model import Transcript
 from .naming import full_auto_output_path, unique_directory_path, unique_output_path
 from .textproc import sanitize_filename_stem
-from .organizer import Organizer, SYSTEM_PROMPT, build_organizer, cleanup_request_plan
+from .organizer import Organizer, build_organizer, cleanup_messages, cleanup_request_plan
 from .session import ArtifactStore, Session
 from .terminal import (
     copy_with_wl_copy,
@@ -277,10 +277,11 @@ def write_sources_export(config: "Config", session: Session, *, directory: Path 
         )
         prompt_path = directory / "cleanup-prompt.txt"
         prompt_path.write_text(
-            "[system]\n"
-            f"{SYSTEM_PROMPT}\n\n"
-            "[user]\n"
-            f"{plan.user_prompt}\n",
+            "\n\n".join(
+                f"[{message['role']}]\n{message['content']}"
+                for message in cleanup_messages(plan)
+            )
+            + "\n",
             encoding="utf-8",
         )
         written.append(str(prompt_path))

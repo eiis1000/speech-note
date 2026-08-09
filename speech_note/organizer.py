@@ -81,6 +81,75 @@ SYSTEM_PROMPT = (
 )
 
 
+# The worked example rides as a real user/assistant exchange, the strongest format
+# anchor there is (measured on the annotation prompt: an example pasted into the
+# system prompt gets its surface imitated; an assistant turn gets its behaviour
+# followed). The user turn is built by build_user_prompt on synthetic transcripts, so
+# the demonstrated format can never drift from the real one. The scene is invented and
+# deliberately NOT one of the eval cases — a prompt must never contain an answer the
+# eval then measures. It demonstrates the invariants that actually go wrong:
+#   * union: the spare-tire sentence exists in one source only and is kept;
+#   * corroboration decides HOW, not WHETHER: two sources' "chain ... ring" beats the
+#     lone fluent "train ... rails" misdecode;
+#   * disfluencies stripped, nothing summarized, chronology preserved.
+_EXAMPLE_SOURCES = [
+    Transcript(
+        label="asr1",
+        model="recognizer-a",
+        kind="asr-final",
+        text=(
+            "so this morning i finally fixed the bike um the the chain kept slipping "
+            "off the ring you know so i cleaned it and tightened the derailleur. i "
+            "also pumped the spare tire while i was down there. then i rode to the "
+            "market before it got hot"
+        ),
+    ),
+    Transcript(
+        label="asr2",
+        model="recognizer-b",
+        kind="asr-final",
+        text=(
+            "so this morning i finally fixed the bike the train kept slipping off the "
+            "rails so i cleaned it and tightened the derailleur then i rode to the "
+            "market before it got hot"
+        ),
+    ),
+    Transcript(
+        label="asr3",
+        model="recognizer-c",
+        kind="asr-final",
+        text=(
+            "this morning i finally fixed the bike the chain kept slipping off the "
+            "ring so i cleaned it and tightened the uh derailleur then i rode to the "
+            "market before it got hot"
+        ),
+    ),
+]
+
+_EXAMPLE_CLEAN = (
+    "This morning I finally fixed the bike. The chain kept slipping off the ring, so I "
+    "cleaned it and tightened the derailleur. I also pumped the spare tire while I was "
+    "down there. Then I rode to the market before it got hot."
+)
+
+
+def example_messages() -> list[dict[str, str]]:
+    return [
+        {"role": "user", "content": build_user_prompt(_EXAMPLE_SOURCES)},
+        {"role": "assistant", "content": _EXAMPLE_CLEAN},
+    ]
+
+
+def cleanup_messages(plan: "CleanupRequestPlan") -> list[dict[str, str]]:
+    """The full message list for one cleanup request — the single source of truth,
+    shared by the live request and the --export-sources prompt dump."""
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        *example_messages(),
+        {"role": "user", "content": plan.user_prompt},
+    ]
+
+
 def _reference_words(sources: list[Transcript]) -> int:
     """Mean word count across non-empty sources, used to anchor the length expectation.
 
@@ -174,7 +243,10 @@ def cleanup_request_plan(
     sources = _dedupe_sources([source for source in sources if source.text.strip()])
     user_prompt = build_user_prompt(sources)
     estimated_prompt_tokens = (
-        estimate_text_tokens(SYSTEM_PROMPT) + estimate_text_tokens(user_prompt) + 32
+        estimate_text_tokens(SYSTEM_PROMPT)
+        + sum(estimate_text_tokens(m["content"]) for m in example_messages())
+        + estimate_text_tokens(user_prompt)
+        + 32
     )
     largest_source_tokens = max((estimate_text_tokens(s.text) for s in sources), default=0)
     uncapped_output_tokens = max(ORGANIZER_MIN_OUTPUT_TOKENS, largest_source_tokens * 2)
@@ -307,10 +379,7 @@ class Organizer:
         label_callback = self.status_label_callback
         note_callback = self.status_note_callback
         response = self.client.chat(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": plan.user_prompt},
-            ],
+            cleanup_messages(plan),
             max_tokens=plan.requested_output_tokens,
             timeout=timeout,
             on_model_attempt=(

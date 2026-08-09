@@ -1073,7 +1073,9 @@ class OrganizerLlmTests(unittest.TestCase):
         prompts: list[str] = []
 
         def fake_post(_url, *, data, **_kwargs):
-            prompts.append(json.loads(data)["messages"][1]["content"])
+            # The real data rides in the LAST user turn; earlier turns are the
+            # worked example, whose own sources must not trip this assertion.
+            prompts.append(json.loads(data)["messages"][-1]["content"])
             return fake_response(200, self.chat_payload("clean " * 90))
 
         same = "word " * 100
@@ -1439,7 +1441,11 @@ class PipelineEndToEndTests(unittest.TestCase):
                         run_dry_text_pipeline(config)
             prompt = (export / "cleanup-prompt.txt").read_text()
             messages = cast("list[dict[str, str]]", posted["messages"])
-            self.assertEqual(prompt, f"[system]\n{messages[0]['content']}\n\n[user]\n{messages[1]['content']}\n")
+            # The dump mirrors the real request turn for turn — system prompt, the
+            # worked example exchange, then the actual data.
+            expected = "\n\n".join(f"[{m['role']}]\n{m['content']}" for m in messages) + "\n"
+            self.assertEqual(prompt, expected)
+            self.assertEqual([m["role"] for m in messages], ["system", "user", "assistant", "user"])
 
     def test_extra_transcripts_reach_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
