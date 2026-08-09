@@ -35,10 +35,11 @@ sys.path.insert(0, str(REPO))
 from speech_note.annotate import (  # noqa: E402
     EXAMPLE_ASSISTANT,
     EXAMPLE_USER,
-    RESPONSE_FORMAT,
     SYSTEM_PROMPT,
     build_prompt,
     decode_response,
+    notes_cap,
+    response_format,
     verify_notes,
 )
 from speech_note.model import Transcript  # noqa: E402
@@ -133,7 +134,12 @@ def overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
 
 
 def best_source_position(alternative: str, sources: list[Transcript]) -> tuple[float, float]:
-    """(relative position of best-matching window, overlap fraction) across sources."""
+    """(relative position of best-matching window, overlap fraction) across sources.
+
+    Known limitation: a source with partial coverage (e.g. a recognizer that gave up a
+    third of the way in) distorts relative position — text at 0.9 of a short source may
+    sit at 0.3 of the recording — so a DISPLACED flag against such a source can be a
+    false positive. Read flags against the fullest source before believing them."""
     target = [w for w in words(alternative) if w not in STOP]
     if not target:
         return -1.0, 0.0
@@ -217,14 +223,17 @@ def score_case(case: Case, notes) -> dict:
 # ----------------------------------------------------------------------- requests
 
 
-def ask(key: str, model: str, messages: list[dict], out_file: Path) -> tuple[list, str]:
+def ask(
+    key: str, model: str, messages: list[dict], fmt: dict, out_file: Path
+) -> tuple[list, str]:
     body: dict = {
         "model": model,
         "messages": messages,
         "temperature": 0,
         "top_p": 1,
         "max_tokens": 12288 if model in REASONING_MANDATORY else 4096,
-        "response_format": RESPONSE_FORMAT,
+        # The same length-scaled schema the product sends, not a static default.
+        "response_format": fmt,
         "reasoning": {"effort": "low" if model in REASONING_MANDATORY else "none"},
     }
     for attempt in range(6):
@@ -285,7 +294,8 @@ def main() -> None:
 
         def one(model: str):
             slug = model.replace("/", "_").replace(":", "_")
-            notes, error = ask(key, model, messages, out_root / case.name / f"{slug}.json")
+            fmt = response_format(notes_cap(case.clean))
+            notes, error = ask(key, model, messages, fmt, out_root / case.name / f"{slug}.json")
             return model, notes, error
 
         with ThreadPoolExecutor(max_workers=len(args.models)) as pool:

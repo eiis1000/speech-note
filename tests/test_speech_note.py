@@ -2469,6 +2469,41 @@ class UncertaintyAnnotationTests(unittest.TestCase):
             [{"text": "", "source": 2, "verbatim": "she liked the grid"}],
         )
 
+    def test_display_text_must_be_faithful_to_its_citation(self) -> None:
+        """The reader sees ``text``; only ``verbatim`` is verified. A display that
+        introduces words absent from the cited span would smuggle unvetted content
+        past the citation check, so it is replaced by the verbatim itself. A faithful
+        cleanup (deleting fillers, changing case) passes untouched."""
+        from speech_note.annotate import Citation, UncertaintyNote, verify_notes
+
+        source = Transcript(
+            label="asr1", model="a", kind="asr-final",
+            text="um she liked, you know, the grid",
+        )
+        faithful = Citation("She liked the grid", 1, "she liked, you know, the grid")
+        smuggled = Citation("She flew to Mars", 1, "she liked, you know, the grid")
+        kept, rejected = verify_notes(
+            [UncertaintyNote("q", (faithful, smuggled))], [source]
+        )
+        self.assertEqual(rejected, 0)  # both citations are real; nothing is dropped
+        shown = [alt.display() for alt in kept[0].alternatives]
+        self.assertEqual(shown[0], "She liked the grid")
+        self.assertEqual(shown[1], "she liked, you know, the grid")  # verbatim shown
+
+    def test_fabricated_verbatim_with_real_text_keeps_the_text(self) -> None:
+        """The inverse smuggle: a real display paired with an invented citation. The
+        display verifies on its own; the fake citation must not survive into the
+        diagnostics as though it were evidence."""
+        from speech_note.annotate import Citation, UncertaintyNote, verify_notes
+
+        alt = Citation("she liked the grid", 1, "completely invented span")
+        kept, rejected = verify_notes(
+            [UncertaintyNote("q", (alt,))], self._sources()
+        )
+        self.assertEqual(rejected, 0)
+        self.assertEqual(kept[0].alternatives[0].display(), "she liked the grid")
+        self.assertEqual(kept[0].alternatives[0].verbatim, "")
+
     def test_exact_bare_string_alternative_still_verifies(self) -> None:
         """A schemaless provider returns display text only; if it is an exact copy of
         source text the same lookup admits it, so old-shape replies keep working."""

@@ -362,6 +362,10 @@ def parse_notes(payload: object) -> list[UncertaintyNote]:
                 after=" ".join(str(entry.get("after") or "").split()),
             )
         )
+        if len(notes) == ANNOTATION_MAX_NOTES_CEILING:
+            # The schema bounds enforced providers; this bounds the schemaless ones,
+            # which could otherwise anchor an unlimited number of notes.
+            break
     return notes
 
 
@@ -386,17 +390,35 @@ def verify_notes(
     """
     haystacks = [f" {_word_key(source.text)} " for source in sources]
 
-    def cited(alt: Citation) -> bool:
-        for candidate in (alt.verbatim, alt.text):
-            needle = _word_key(candidate)
-            if needle and any(f" {needle} " in haystack for haystack in haystacks):
-                return True
-        return False
+    def in_sources(fragment: str) -> bool:
+        needle = _word_key(fragment)
+        return bool(needle) and any(f" {needle} " in haystack for haystack in haystacks)
+
+    def verified(alt: Citation) -> Citation | None:
+        if in_sources(alt.verbatim):
+            # The reader sees ``text``, but only ``verbatim`` was verified — an
+            # unfaithful "readable form" would smuggle unvetted words past the
+            # citation check. A legitimate cleanup only DELETES fillers, so every
+            # displayed word must exist in the cited span; otherwise show the
+            # verbatim itself.
+            if alt.text and not (
+                set(_word_key(alt.text).split()) <= set(_word_key(alt.verbatim).split())
+            ):
+                return dataclasses.replace(alt, text="")
+            return alt
+        if in_sources(alt.text):
+            # The display text is itself source text (the bare-string shape). Any
+            # accompanying verbatim failed the lookup and must not survive into
+            # diagnostics as though it were a citation.
+            return dataclasses.replace(alt, verbatim="")
+        return None
 
     kept: list[UncertaintyNote] = []
     rejected = 0
     for note in notes:
-        surviving = tuple(alt for alt in note.alternatives if cited(alt))
+        surviving = tuple(
+            checked for alt in note.alternatives if (checked := verified(alt)) is not None
+        )
         rejected += len(note.alternatives) - len(surviving)
         if surviving:
             kept.append(dataclasses.replace(note, alternatives=surviving))

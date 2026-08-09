@@ -319,6 +319,10 @@ class Organizer:
         without markers, so a failure is recorded and the text left alone.
         """
         assert self.client is not None
+        if self.status_label_callback is not None:
+            # The audit runs inside the "Cleanup" status phase; without this the
+            # spinner claims cleanup is still generating for the extra minute.
+            self.status_label_callback("auditing uncertainty")
         started = time.monotonic()
         result = annotation.annotate(
             self.client,

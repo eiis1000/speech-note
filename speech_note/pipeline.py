@@ -431,6 +431,12 @@ def report(config: "Config", session: Session) -> None:
     cleanup = session.cleanup
     if cleanup is not None and cleanup.warning:
         print(f"warning: {cleanup.warning}", file=err)
+    if cleanup is not None and cleanup.annotation_count:
+        print(
+            f"marked {cleanup.annotation_count} uncertain passage(s) where the ASR "
+            "sources disagreed",
+            file=err,
+        )
     if session.skips:
         for message in session.skips[-4:]:
             print(f"note: {message}", file=err)
