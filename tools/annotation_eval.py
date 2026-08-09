@@ -284,6 +284,16 @@ def main() -> None:
         help="chat-completions endpoint; point at a local llama-server "
         "(e.g. http://127.0.0.1:8011/v1/chat/completions) to measure a local model",
     )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="run each model this many times and report mean and range — free-tier "
+        "routes vary wildly run to run, and a single sample has fooled us before",
+    )
+    parser.add_argument(
+        "--details", action="store_true", help="print per-note details for every run"
+    )
     args = parser.parse_args()
 
     key = load_env_key(args.api_base)
@@ -300,30 +310,68 @@ def main() -> None:
             {"role": "user", "content": messages_tail},
         ]
 
-        def one(model: str):
+        def one(job: tuple[str, int]):
+            model, repeat = job
             slug = model.replace("/", "_").replace(":", "_")
             fmt = response_format(notes_cap(case.clean))
             notes, error = ask(
-                key, model, messages, fmt, out_root / case.name / f"{slug}.json", args.api_base
+                key, model, messages, fmt,
+                out_root / case.name / f"{slug}.{repeat}.json", args.api_base,
             )
-            return model, notes, error
+            return model, repeat, notes, error
 
-        with ThreadPoolExecutor(max_workers=len(args.models)) as pool:
-            for model, notes, error in pool.map(one, args.models):
-                short = model.split("/")[-1].removesuffix(":free")
+        jobs = [(model, repeat) for model in args.models for repeat in range(args.repeats)]
+        by_model: dict[str, list] = {model: [] for model in args.models}
+        with ThreadPoolExecutor(max_workers=min(12, len(jobs))) as pool:
+            for model, repeat, notes, error in pool.map(one, jobs):
+                by_model[model].append((repeat, notes, error))
+
+        for model in args.models:
+            short = model.split("/")[-1].removesuffix(":free")
+            runs = []
+            failures = 0
+            for repeat, notes, error in sorted(by_model[model]):
                 if error:
-                    print(f"  {short:30s} FAILED  {error}")
+                    failures += 1
+                    if args.repeats == 1 or args.details:
+                        print(f"  {short:30s} run{repeat} FAILED  {error}")
                     continue
                 kept, rejected = verified(notes, case)
                 scored = score_case(case, kept)
+                scored["rejected"] = rejected
+                hits, total = scored["recall"].split("/")
+                scored["recall_n"] = int(hits)
+                scored["recall_d"] = int(total)
+                runs.append(scored)
+                if args.repeats == 1 or args.details:
+                    print(
+                        f"  {short:30s} recall={scored['recall']} notes={scored['notes']:2d} "
+                        f"rejected={rejected} spurious={scored['spurious']} "
+                        f"forbidden={scored['forbidden']} displaced={scored['displaced']} "
+                        f"unlocatable={scored['unlocatable']}"
+                    )
+                    for line in scored["detail"]:
+                        print(line)
+            if args.repeats > 1:
+                if not runs:
+                    print(f"  {short:30s} all {args.repeats} runs FAILED")
+                    continue
+
+                def agg(field: str) -> str:
+                    values = [r[field] for r in runs]
+                    mean = sum(values) / len(values)
+                    return f"{mean:.1f}" if min(values) == max(values) else (
+                        f"{mean:.1f} [{min(values)}-{max(values)}]"
+                    )
+
+                denominator = runs[0]["recall_d"]
                 print(
-                    f"  {short:30s} recall={scored['recall']} notes={scored['notes']:2d} "
-                    f"rejected={rejected} spurious={scored['spurious']} "
-                    f"forbidden={scored['forbidden']} displaced={scored['displaced']} "
-                    f"unlocatable={scored['unlocatable']}"
+                    f"  {short:30s} n={len(runs)}{'+' + str(failures) + 'fail' if failures else ''} "
+                    f"recall={agg('recall_n')}/{denominator} "
+                    f"spurious={agg('spurious')} forbidden={agg('forbidden')} "
+                    f"displaced={agg('displaced')} unlocatable={agg('unlocatable')} "
+                    f"rejected={agg('rejected')}"
                 )
-                for line in scored["detail"]:
-                    print(line)
 
 
 if __name__ == "__main__":
