@@ -226,8 +226,9 @@ def score_case(case: Case, notes) -> dict:
 
 
 def ask(
-    key: str, model: str, messages: list[dict], fmt: dict, out_file: Path, url: str
-) -> tuple[list, str]:
+    key: str, model: str, messages: list[dict], fmt: dict, out_file: Path, url: str,
+    any_quant: bool = False,
+) -> tuple[list, str, str]:
     body: dict = {
         "model": model,
         "messages": messages,
@@ -238,6 +239,11 @@ def ask(
         "response_format": fmt,
         "reasoning": {"effort": "low" if model in REASONING_MANDATORY else "none"},
     }
+    if "openrouter" in url and not any_quant:
+        # Routes silently swap providers AND quantizations between runs, which makes
+        # run-to-run comparisons meaningless. Pin to high-precision serving; pass
+        # --any-quant to measure whatever the route feels like today.
+        body["provider"] = {"quantizations": ["bf16", "fp16", "fp8"]}
     for attempt in range(6):
         response = requests.post(
             url,
@@ -248,24 +254,36 @@ def ask(
         if response.status_code == 429:
             time.sleep(30 * (attempt + 1))
             continue
+        if response.status_code == 404 and "quantization" in response.text and "provider" in body:
+            # Closed-weight models expose no quantization metadata, so the precision
+            # filter excludes every endpoint. Retry unpinned; the provider report
+            # marks it so mixed-precision serving stays visible.
+            body.pop("provider")
+            unpinned = True
+            continue
         if response.status_code == 400 and "response_format" in body:
             # Provider rejects json_schema: measure whether the prompt alone holds
             # the format — the situation the product is in on such providers.
             body.pop("response_format")
             continue
         if not response.ok:
-            return [], f"HTTP {response.status_code} {' '.join(response.text.split())[:90]}"
+            return [], f"HTTP {response.status_code} {' '.join(response.text.split())[:90]}", ""
         payload = response.json()
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(json.dumps(payload, indent=2))
+        served_by = str(payload.get("provider") or "?") + (" (unpinned)" if unpinned else "")
         choice = (payload.get("choices") or [{}])[0]
         content = (choice.get("message") or {}).get("content") or ""
         notes, understood = decode_response(content)
         if not understood:
             finish = choice.get("finish_reason")
-            return [], f"NOT the requested JSON (finish={finish}): {' '.join(content.split())[:90]}"
-        return notes, ""
-    return [], "429 after retries"
+            return (
+                [],
+                f"NOT the requested JSON (finish={finish}): {' '.join(content.split())[:90]}",
+                served_by,
+            )
+        return notes, "", served_by
+    return [], "429 after retries", ""
 
 
 def verified(notes, case: Case) -> tuple[list, int]:
@@ -294,6 +312,11 @@ def main() -> None:
     parser.add_argument(
         "--details", action="store_true", help="print per-note details for every run"
     )
+    parser.add_argument(
+        "--any-quant",
+        action="store_true",
+        help="do not pin OpenRouter serving to bf16/fp16/fp8 (see the ask() comment)",
+    )
     args = parser.parse_args()
 
     key = load_env_key(args.api_base)
@@ -314,17 +337,21 @@ def main() -> None:
             model, repeat = job
             slug = model.replace("/", "_").replace(":", "_")
             fmt = response_format(notes_cap(case.clean))
-            notes, error = ask(
+            notes, error, served_by = ask(
                 key, model, messages, fmt,
                 out_root / case.name / f"{slug}.{repeat}.json", args.api_base,
+                any_quant=args.any_quant,
             )
-            return model, repeat, notes, error
+            return model, repeat, notes, error, served_by
 
         jobs = [(model, repeat) for model in args.models for repeat in range(args.repeats)]
         by_model: dict[str, list] = {model: [] for model in args.models}
+        providers: dict[str, list[str]] = {model: [] for model in args.models}
         with ThreadPoolExecutor(max_workers=min(12, len(jobs))) as pool:
-            for model, repeat, notes, error in pool.map(one, jobs):
+            for model, repeat, notes, error, served_by in pool.map(one, jobs):
                 by_model[model].append((repeat, notes, error))
+                if served_by:
+                    providers[model].append(served_by)
 
         for model in args.models:
             short = model.split("/")[-1].removesuffix(":free")
@@ -365,12 +392,13 @@ def main() -> None:
                     )
 
                 denominator = runs[0]["recall_d"]
+                served = ",".join(sorted(set(providers[model]))) or "?"
                 print(
                     f"  {short:30s} n={len(runs)}{'+' + str(failures) + 'fail' if failures else ''} "
                     f"recall={agg('recall_n')}/{denominator} "
                     f"spurious={agg('spurious')} forbidden={agg('forbidden')} "
                     f"displaced={agg('displaced')} unlocatable={agg('unlocatable')} "
-                    f"rejected={agg('rejected')}"
+                    f"rejected={agg('rejected')} via={served}"
                 )
 
 

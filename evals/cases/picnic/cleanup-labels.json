@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Cleanup-eval labels (tools/cleanup_eval.py). must_keep: content phrases that a",
+    "correct UNION reconstruction cannot lose (case-insensitive substring). must_not:",
+    "phrases whose presence means the cleanup promoted the wrong reading. Ratios",
+    "bound output length relative to the mean source word count."
+  ],
+  "must_keep": [
+    "back gate",
+    "airport",
+    "ladder",
+    "tent",
+    "exit twice",
+    "chairs",
+    "Miller"
+  ],
+  "must_not": [
+    "mill on the point"
+  ],
+  "min_ratio": 0.75,
+  "max_ratio": 1.6
+}

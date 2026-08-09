@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "The confabulation-promotion trap, synthetic. Recognizers a and c agree on",
+    "'position at the observatory' (a's is stuttered); recognizer b — the fluent",
+    "audio-LLM persona — renders the same moment as 'promotion at the conservatory",
+    "gala'. A correct cleanup uses agreement to decide HOW the moment was said, so",
+    "the corroborated reading must win and the fluent lone variant must lose.",
+    "The quiet cat sentence exists only in source a: union keeps it. b's extra",
+    "funding-committee sentence has no competing attempt at that stretch, so the",
+    "include-over-drop policy keeps it too — it is deliberately NOT in must_not;",
+    "the annotation pass is what flags it."
+  ],
+  "must_keep": [
+    "position at the observatory",
+    "fed the neighbor's cat",
+    "new director",
+    "half a movie"
+  ],
+  "must_not": [
+    "conservatory",
+    "promotion"
+  ],
+  "min_ratio": 0.75,
+  "max_ratio": 1.6
+}
