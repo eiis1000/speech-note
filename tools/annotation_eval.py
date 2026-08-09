@@ -44,7 +44,7 @@ from speech_note.annotate import (  # noqa: E402
 )
 from speech_note.model import Transcript  # noqa: E402
 
-URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Free where the free route is usable; gemma-4-31b's free route 429s through every
 # retry window, so it runs paid (identical weights, ~2k-token prompts, well under a
@@ -62,7 +62,9 @@ DEFAULT_MODELS = [
 REASONING_MANDATORY = {"openai/gpt-oss-20b:free"}
 
 
-def load_env_key() -> str:
+def load_env_key(api_base: str) -> str:
+    if "openrouter" not in api_base:
+        return "unused-local"  # a local llama-server ignores auth entirely
     key = os.environ.get("OPENROUTER_API_KEY")
     if key:
         return key
@@ -224,7 +226,7 @@ def score_case(case: Case, notes) -> dict:
 
 
 def ask(
-    key: str, model: str, messages: list[dict], fmt: dict, out_file: Path
+    key: str, model: str, messages: list[dict], fmt: dict, out_file: Path, url: str
 ) -> tuple[list, str]:
     body: dict = {
         "model": model,
@@ -238,7 +240,7 @@ def ask(
     }
     for attempt in range(6):
         response = requests.post(
-            URL,
+            url,
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             json=body,
             timeout=300,
@@ -276,9 +278,15 @@ def main() -> None:
     parser.add_argument("--cases", nargs="*", help="case directories (default: all under evals/)")
     parser.add_argument("--models", nargs="*", default=DEFAULT_MODELS)
     parser.add_argument("--run-name", default="run")
+    parser.add_argument(
+        "--api-base",
+        default=DEFAULT_URL,
+        help="chat-completions endpoint; point at a local llama-server "
+        "(e.g. http://127.0.0.1:8011/v1/chat/completions) to measure a local model",
+    )
     args = parser.parse_args()
 
-    key = load_env_key()
+    key = load_env_key(args.api_base)
     cases = discover_cases(args.cases)
     out_root = REPO / "evals" / "out" / args.run_name
 
@@ -295,7 +303,9 @@ def main() -> None:
         def one(model: str):
             slug = model.replace("/", "_").replace(":", "_")
             fmt = response_format(notes_cap(case.clean))
-            notes, error = ask(key, model, messages, fmt, out_root / case.name / f"{slug}.json")
+            notes, error = ask(
+                key, model, messages, fmt, out_root / case.name / f"{slug}.json", args.api_base
+            )
             return model, notes, error
 
         with ThreadPoolExecutor(max_workers=len(args.models)) as pool:

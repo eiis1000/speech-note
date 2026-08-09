@@ -327,6 +327,7 @@ def parse_notes(payload: object) -> list[UncertaintyNote]:
     if not isinstance(entries, list):
         return []
     notes: list[UncertaintyNote] = []
+    seen_notes: set[tuple[str, str, str]] = set()
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -354,14 +355,24 @@ def parse_notes(payload: object) -> list[UncertaintyNote]:
                 break
         if not alternatives:
             continue
-        notes.append(
-            UncertaintyNote(
-                quote,
-                tuple(alternatives),
-                before=" ".join(str(entry.get("before") or "").split()),
-                after=" ".join(str(entry.get("after") or "").split()),
-            )
+        note = UncertaintyNote(
+            quote,
+            tuple(alternatives),
+            before=" ".join(str(entry.get("before") or "").split()),
+            after=" ".join(str(entry.get("after") or "").split()),
         )
+        # Degenerate repetition guard, measured on a 9B model: the same note emitted
+        # 14 times in one reply. Same quote + same context + same readings = one note;
+        # a genuine second instance of a repeated phrase differs in before/after.
+        key = (
+            _comparable(note.quote),
+            _comparable(f"{note.before}|{note.after}"),
+            _comparable(" / ".join(alt.display() for alt in note.alternatives)),
+        )
+        if key in seen_notes:
+            continue
+        seen_notes.add(key)
+        notes.append(note)
         if len(notes) == ANNOTATION_MAX_NOTES_CEILING:
             # The schema bounds enforced providers; this bounds the schemaless ones,
             # which could otherwise anchor an unlimited number of notes.

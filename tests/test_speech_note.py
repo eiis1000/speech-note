@@ -2247,6 +2247,15 @@ class UncertaintyAnnotationTests(unittest.TestCase):
             self.assertTrue(understood)   # the shape was right...
             self.assertEqual(notes, [])   # ...but no usable entry in it
 
+    def test_duplicate_notes_collapse_to_one(self) -> None:
+        """Measured on a 9B model: the same note emitted 14 times in one reply. Same
+        quote + context + readings = one note. A genuine second instance of a repeated
+        phrase differs in before/after and survives."""
+        entry = '{"quote": "we were tired", "before": "home.", "after": "The end.", "alternatives": ["we were fine"]}'
+        other = '{"quote": "we were tired", "before": "at ten and", "after": "Sarah", "alternatives": ["we were fine"]}'
+        notes, _ = self._decode('{"uncertain": [' + ", ".join([entry] * 5 + [other]) + "]}")
+        self.assertEqual(len(notes), 2)
+
     def test_alternatives_capped(self) -> None:
         from speech_note.config import ANNOTATION_MAX_ALTERNATIVES
 
