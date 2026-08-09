@@ -1218,6 +1218,55 @@ class ServerCommandTests(unittest.TestCase):
                     self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
             self.assertTrue(model.exists())
 
+    def test_default_server_command_refuses_models_that_cannot_fit_in_ram(self) -> None:
+        """The iGPU allocates from system RAM; launching a hopeless model swap-thrashes
+        the machine instead of failing cleanly. The default path refuses (and says so
+        loudly); an explicit --organizer-gguf is respected with a warning."""
+        from speech_note.llama_server import default_server_command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "huge.gguf"
+            model.write_bytes(b"x" * 1024)
+            err = io.StringIO()
+            with mock.patch("speech_note.llama_server.shutil.which", return_value="/bin/llama-server"):
+                with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
+                    with mock.patch(
+                        "speech_note.llama_server.model_ram_shortfall",
+                        return_value=5 * 1024**3,
+                    ):
+                        with redirect_stderr(err):
+                            default_cmd = default_server_command(context_tokens=65_536)
+                            explicit_cmd = default_server_command(
+                                context_tokens=65_536, model_path=model
+                            )
+            self.assertIsNone(default_cmd)  # refused, not launched into a swap storm
+            self.assertIn("not enough free RAM", err.getvalue())
+            assert explicit_cmd is not None  # the user's explicit choice is respected
+            self.assertIn(str(model), explicit_cmd)
+            self.assertIn("WARNING", err.getvalue())
+
+    def test_ram_shortfall_estimate_is_sane(self) -> None:
+        from speech_note.llama_server import model_ram_shortfall
+
+        with tempfile.TemporaryDirectory() as tmp:
+            small = Path(tmp) / "small.gguf"
+            small.write_bytes(b"x" * 1024)
+            with mock.patch(
+                "speech_note.llama_server.available_ram_bytes", return_value=8 * 1024**3
+            ):
+                # 1 KiB of weights + KV/overhead allowance fits easily in 8 GiB.
+                self.assertIsNone(model_ram_shortfall(small, context_tokens=32_768))
+            with mock.patch(
+                "speech_note.llama_server.available_ram_bytes", return_value=1 * 1024**3
+            ):
+                shortfall = model_ram_shortfall(small, context_tokens=65_536)
+                assert shortfall is not None and shortfall > 0
+            with mock.patch(
+                "speech_note.llama_server.available_ram_bytes", return_value=None
+            ):
+                # Unknown RAM: the guard stays out of the way.
+                self.assertIsNone(model_ram_shortfall(small, context_tokens=65_536))
+
     def test_ensure_default_cleanup_model_resumes_after_network_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             model = Path(tmp) / "sub" / "cleanup.gguf"

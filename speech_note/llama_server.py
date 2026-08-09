@@ -27,6 +27,38 @@ from .config import (
 )
 
 
+# RAM guard. The iGPU allocates from system RAM, so a model that does not fit in
+# MemAvailable does not fail cleanly — it swap-thrashes or wedges the compositor.
+# The estimate is deliberately crude (weights + a per-token KV allowance + fixed
+# overhead); it is a guard against launching something hopeless, not an allocator.
+_KV_BYTES_PER_CTX_TOKEN = 32 * 1024
+_RAM_OVERHEAD_BYTES = 1_500 * 1024 * 1024
+
+
+def available_ram_bytes() -> int | None:
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def model_ram_shortfall(model_path: Path, context_tokens: int) -> int | None:
+    """Bytes MISSING to run this model comfortably, or None when it fits (or when
+    either quantity is unknowable, in which case the guard stays out of the way)."""
+    available = available_ram_bytes()
+    if available is None:
+        return None
+    try:
+        weights = model_path.stat().st_size
+    except OSError:
+        return None
+    need = weights + context_tokens * _KV_BYTES_PER_CTX_TOKEN + _RAM_OVERHEAD_BYTES
+    return None if need <= available else need - available
+
+
 def default_server_command(
     *,
     context_tokens: int,
@@ -34,10 +66,38 @@ def default_server_command(
     kv_offload: bool = True,
     model_path: Path | None = None,
 ) -> list[str] | None:
+    explicit = model_path is not None
     model_path = model_path or DEFAULT_GGUF_MODEL
     llama_server = shutil.which("llama-server")
     if not llama_server or not model_path.exists():
         return None
+    shortfall = model_ram_shortfall(model_path, context_tokens)
+    if shortfall is not None:
+        gib = shortfall / 1024**3
+        if explicit:
+            # The user picked this file; proceed, but say what they are in for.
+            print(
+                f"WARNING: {model_path.name} likely needs ~{gib:.1f} GiB more RAM than "
+                "is available; expect heavy swapping or an allocation failure.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "\n".join(
+                    (
+                        "=" * 72,
+                        f"WARNING: not enough free RAM for the local cleanup model "
+                        f"({model_path.name} is short ~{gib:.1f} GiB).",
+                        "Local cleanup is DISABLED for this run so the machine does not "
+                        "swap-thrash.",
+                        "Free some memory, lower --organizer-context-tokens, or force a "
+                        "model with --organizer-gguf.",
+                        "=" * 72,
+                    )
+                ),
+                file=sys.stderr,
+            )
+            return None
     command = [
         llama_server,
         "--model", str(model_path),
