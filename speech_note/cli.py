@@ -264,10 +264,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     connectivity.add_argument(
         "-P", "--online-paid", dest="connectivity", action="store_const", const="online-paid",
-        help="OpenRouter cleanup with paid models (deepseek-v3.2 / gemini-3-flash, not "
-             "logged), AND run ASR remotely: hosted Whisper + Parakeet (larger checkpoints "
-             "than fit locally, and a long recording transcribes in seconds) plus a Gemini "
-             "audio-LLM peer. Needs OPENROUTER_API_KEY.",
+        help="OpenRouter cleanup with paid models (deepseek-v3.2 lead, not logged), AND "
+             "run ASR remotely: hosted Whisper + Parakeet + MAI (larger checkpoints than "
+             "fit locally, and a long recording transcribes in seconds). Needs "
+             "OPENROUTER_API_KEY.",
     )
     parser.set_defaults(connectivity=None)
     # organizer

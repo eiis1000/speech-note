@@ -22,7 +22,8 @@ __all__ = [
     "NORMALIZE_COMPRESS_KNEE_DB", "NORMALIZE_COMPRESS_LOOKAHEAD_MS",
     "NORMALIZE_COMPRESS_RELEASE_MS",
     "LIVE_ASR_MODEL", "OPENROUTER_ASR_MODEL", "DEFAULT_ASR_CPU_THREADS",
-    "OPENROUTER_STT_MODEL", "OPENROUTER_STT_SECOND_MODEL", "OPENROUTER_STT_API_BASE",
+    "OPENROUTER_STT_MODEL", "OPENROUTER_STT_SECOND_MODEL", "OPENROUTER_STT_THIRD_MODEL",
+    "OPENROUTER_STT_API_BASE",
     "OPENROUTER_STT_MP3_SAMPLE_RATE", "OPENROUTER_STT_RESPONSE_FORMAT",
     "WHISPER_CPP_MODEL_DIR", "WHISPER_CPP_MODEL_ALIASES", "BackendSpec", "ASR_BACKENDS",
     "AsrSource", "DEFAULT_ASR_SOURCES", "ONLINE_PAID_ASR_SOURCES", "CTC_STRIDE_SECONDS",
@@ -145,6 +146,12 @@ OPENROUTER_ASR_MODEL = "google/gemini-3-flash-preview"
 # at v2.
 OPENROUTER_STT_MODEL = "openai/whisper-large-v3-turbo"
 OPENROUTER_STT_SECOND_MODEL = "nvidia/parakeet-tdt-0.6b-v3"
+# Third peer, replacing the gemini audio-LLM in the paid default (ASR bakeoff round 2,
+# 2026-08-09): on the 65-minute file MAI had the highest genuine coverage of the panel
+# (9787 words, uniq8 = 1.000) while gemini degenerated (uniq8 = 0.569 — 43% of its
+# output was loops); on the hard 132s clip both recover the same anchors (5/6) but MAI
+# adds architecture diversity without the confabulation risk.
+OPENROUTER_STT_THIRD_MODEL = "microsoft/mai-transcribe-1.5"
 OPENROUTER_STT_API_BASE = "https://openrouter.ai/api/v1/audio/transcriptions"
 # Rejected after measurement: deepgram/nova-3 silently dropped a hard passage;
 # x-ai/grok-stt-1.0 truncated to a fifth of the recording; google/chirp-3 returns HTTP
@@ -262,20 +269,19 @@ DEFAULT_ASR_SOURCES: tuple[AsrSource, ...] = (
 # against minutes on the local iGPU), and the hosted checkpoints are larger than what
 # fits locally — large-v3-turbo rather than medium-q8_0, Parakeet v3 rather than v2.
 #
-# The audio-LLM rides along as a third peer. It is the most dangerous source in the set
-# (see OPENROUTER_ASR_MODEL: fluent fabrication on unintelligible audio, degenerate
-# repetition on long files) and it is listed LAST so it is never the raw/fallback
-# transcript. It is still worth having, for two reasons: it is the most sensitive source
-# on faint speech, and — now that the annotation pass exists — a passage it invents
-# disagrees with both dedicated recognizers, which is exactly the signal that gets the
-# passage flagged rather than silently believed.
+# The third peer used to be the gemini audio-LLM; ASR bakeoff round 2 (2026-08-09)
+# retired it from the default: its degenerate-repetition failure reproduced on the
+# 65-minute file (uniq8 0.569) while MAI-transcribe matched its hard-clip recall with
+# the panel's best long-file coverage and zero repetition. The audio-LLM remains
+# selectable (--asr openrouter) for its faint-speech sensitivity; when used, the
+# annotation pass is what keeps its inventions from being silently believed.
 #
 # Overridable by --asr or the user ASR config file, like any default collection. Use
 # --offline (or list local backends in --asr) to keep everything on the machine.
 ONLINE_PAID_ASR_SOURCES: tuple[AsrSource, ...] = (
     AsrSource("openrouter-stt", OPENROUTER_STT_MODEL, "net"),
     AsrSource("openrouter-stt", OPENROUTER_STT_SECOND_MODEL, "net"),
-    AsrSource("openrouter", OPENROUTER_ASR_MODEL, "net"),
+    AsrSource("openrouter-stt", OPENROUTER_STT_THIRD_MODEL, "net"),
 )
 
 # Overlap between adjacent CTC long-form windows (each side), merged at the

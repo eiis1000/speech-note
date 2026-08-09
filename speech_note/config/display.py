@@ -51,6 +51,7 @@ MODEL_SHORT_NAMES: dict[str, str] = {
     # hosted ASR (the openrouter-stt backend)
     "openai/whisper-large-v3-turbo": "whisper-turbo",
     "nvidia/parakeet-tdt-0.6b-v3": "parakeet-v3",
+    "microsoft/mai-transcribe-1.5": "mai",
     "openai/gpt-4o-mini-transcribe": "gpt4o-transcribe-mini",
     "openai/gpt-4o-transcribe": "gpt4o-transcribe",
     "qwen/qwen3-asr-flash-2026-02-10": "qwen3-asr",

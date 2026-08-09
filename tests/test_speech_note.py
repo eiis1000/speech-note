@@ -1910,25 +1910,29 @@ class OpenRouterSttTranscriberTests(unittest.TestCase):
 
 
 class OnlinePaidAsrTests(unittest.TestCase):
-    def test_online_paid_runs_whisper_and_parakeet_as_hosted_models(self) -> None:
+    def test_online_paid_runs_three_dedicated_hosted_recognizers(self) -> None:
         """--online-paid moves ASR off this machine, to dedicated hosted recognizers.
 
-        Not to the audio-LLM: that fabricates on unintelligible audio and degenerates
-        into a repeated word on long files (see config.catalog.OPENROUTER_ASR_MODEL).
+        None of them is the audio-LLM: it fabricates on unintelligible audio and its
+        degenerate repetition reproduced on a 65-minute file in ASR bakeoff round 2
+        (see config.catalog.OPENROUTER_ASR_MODEL / OPENROUTER_STT_THIRD_MODEL). It
+        stays selectable by name, never a default.
         """
         from speech_note import config as cfg
 
         config = make_config("--online-paid")
         backends = [s.backend for s in config.asr_sources]
-        self.assertEqual(backends, ["openrouter-stt", "openrouter-stt", "openrouter"])
+        self.assertEqual(backends, ["openrouter-stt", "openrouter-stt", "openrouter-stt"])
         models = [s.model for s in config.asr_sources]
         self.assertEqual(
             models,
-            [cfg.OPENROUTER_STT_MODEL, cfg.OPENROUTER_STT_SECOND_MODEL, cfg.OPENROUTER_ASR_MODEL],
+            [
+                cfg.OPENROUTER_STT_MODEL,
+                cfg.OPENROUTER_STT_SECOND_MODEL,
+                cfg.OPENROUTER_STT_THIRD_MODEL,
+            ],
         )
-        # The audio-LLM is last, so it is never the raw/fallback transcript — list order
-        # is the soft preference for that.
-        self.assertEqual(backends[-1], "openrouter")
+        self.assertNotIn(cfg.OPENROUTER_ASR_MODEL, models)
         self.assertEqual(config.organizer.provider, "openrouter")
 
     def test_hosted_asr_sources_each_get_their_own_scheduling_group(self) -> None:
