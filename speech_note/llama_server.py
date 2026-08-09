@@ -82,14 +82,61 @@ def ensure_default_cleanup_model(*, auto_yes: bool, interactive: bool | None = N
     except ModelInstallDeclined:
         return False
     try:
+        # huggingface_hub defaults both of these network operations to 10 seconds.
+        # That is too short for a large Xet-backed file on a slow or intermittent
+        # connection: even resolving the CDN redirect can exceed it.  The Hub
+        # downloader keeps an ``.incomplete`` file and resumes it on the next call,
+        # so combine generous per-request timeouts with retries of the whole fetch.
+        # Disable Xet for this single large file: its reconstruction buffer can hold
+        # downloaded data without advancing the partial file, which defeats reliable
+        # byte-range resume and progress detection on an intermittent connection.
+        os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
+        os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+        from huggingface_hub import constants as hub_constants
         from huggingface_hub import hf_hub_download
 
-        DEFAULT_GGUF_MODEL.parent.mkdir(parents=True, exist_ok=True)
-        hf_hub_download(
-            DEFAULT_GGUF_REPO,
-            DEFAULT_GGUF_FILE,
-            local_dir=str(DEFAULT_GGUF_MODEL.parent),
+        # The package may already have been imported while loading an ASR model,
+        # in which case changing the environment alone is too late.
+        hub_constants.HF_HUB_ETAG_TIMEOUT = max(
+            hub_constants.HF_HUB_ETAG_TIMEOUT, 60
         )
+        hub_constants.HF_HUB_DOWNLOAD_TIMEOUT = max(
+            hub_constants.HF_HUB_DOWNLOAD_TIMEOUT, 300
+        )
+        hub_constants.HF_HUB_DISABLE_XET = True
+
+        DEFAULT_GGUF_MODEL.parent.mkdir(parents=True, exist_ok=True)
+        stalled_failures = 0
+        while stalled_failures < 10:
+            partial_dir = DEFAULT_GGUF_MODEL.parent / ".cache/huggingface/download"
+            bytes_before = sum(
+                path.stat().st_size for path in partial_dir.glob("*.incomplete")
+            ) if partial_dir.exists() else 0
+            try:
+                hf_hub_download(
+                    DEFAULT_GGUF_REPO,
+                    DEFAULT_GGUF_FILE,
+                    local_dir=str(DEFAULT_GGUF_MODEL.parent),
+                )
+                break
+            except Exception:  # noqa: BLE001 — retry resumable network failures
+                bytes_after = sum(
+                    path.stat().st_size for path in partial_dir.glob("*.incomplete")
+                ) if partial_dir.exists() else 0
+                if bytes_after > bytes_before:
+                    stalled_failures = 0
+                else:
+                    stalled_failures += 1
+                if stalled_failures == 10:
+                    raise
+                delay = min(5 * max(stalled_failures, 1), 30)
+                print(
+                    f"note: cleanup-model download interrupted; resuming in {delay}s "
+                    f"({stalled_failures}/10 consecutive attempts made no progress)",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
     except Exception as exc:  # noqa: BLE001 — any fetch failure should fall back, not crash
         print(f"note: could not download cleanup model: {exc}", file=sys.stderr)
         return False

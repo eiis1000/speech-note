@@ -306,7 +306,7 @@ DEFAULT_GGUF_MODEL = Path.home() / ".cache/huggingface/gguf/gemma-4-E2B-it-UD-Q4
 # Only the default quant is fetchable — a user-supplied --organizer-gguf is not.
 DEFAULT_GGUF_REPO = "unsloth/gemma-4-E2B-it-GGUF"
 DEFAULT_GGUF_FILE = DEFAULT_GGUF_MODEL.name
-DEFAULT_GGUF_SIZE_HINT = "2.5 GB"
+DEFAULT_GGUF_SIZE_HINT = "3.2 GB"
 DEFAULT_ORGANIZER_CONTEXT_TOKENS = 65_536
 DEFAULT_ORGANIZER_MAX_OUTPUT_TOKENS = 16_384
 

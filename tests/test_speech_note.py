@@ -1206,10 +1206,72 @@ class ServerCommandTests(unittest.TestCase):
 
             fake_hub = types.ModuleType("huggingface_hub")
             fake_hub.hf_hub_download = fake_download  # type: ignore[attr-defined]
+            fake_hub.constants = types.SimpleNamespace(  # type: ignore[attr-defined]
+                HF_HUB_ETAG_TIMEOUT=10,
+                HF_HUB_DOWNLOAD_TIMEOUT=10,
+                HF_HUB_DISABLE_XET=False,
+            )
             with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
                 with mock.patch.dict("sys.modules", {"huggingface_hub": fake_hub}):
                     self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
             self.assertTrue(model.exists())
+
+    def test_ensure_default_cleanup_model_resumes_after_network_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "sub" / "cleanup.gguf"
+            attempts = 0
+
+            def flaky_download(repo: str, filename: str, *, local_dir: str) -> str:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise TimeoutError("interrupted")
+                model.parent.mkdir(parents=True, exist_ok=True)
+                model.write_text("downloaded")
+                return str(model)
+
+            fake_hub = types.ModuleType("huggingface_hub")
+            fake_hub.hf_hub_download = flaky_download  # type: ignore[attr-defined]
+            fake_hub.constants = types.SimpleNamespace(  # type: ignore[attr-defined]
+                HF_HUB_ETAG_TIMEOUT=10,
+                HF_HUB_DOWNLOAD_TIMEOUT=10,
+                HF_HUB_DISABLE_XET=False,
+            )
+            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
+                with mock.patch("speech_note.llama_server.time.sleep"):
+                    with mock.patch.dict("sys.modules", {"huggingface_hub": fake_hub}):
+                        self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
+            self.assertEqual(attempts, 2)
+
+    def test_cleanup_download_progress_resets_stalled_failure_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "sub" / "cleanup.gguf"
+            partial = model.parent / ".cache/huggingface/download/model.incomplete"
+            attempts = 0
+
+            def slowly_progressing_download(repo: str, filename: str, *, local_dir: str) -> str:
+                nonlocal attempts
+                attempts += 1
+                if attempts <= 12:
+                    partial.parent.mkdir(parents=True, exist_ok=True)
+                    with partial.open("ab") as handle:
+                        handle.write(b"progress")
+                    raise TimeoutError("interrupted after making progress")
+                model.write_text("downloaded")
+                return str(model)
+
+            fake_hub = types.ModuleType("huggingface_hub")
+            fake_hub.hf_hub_download = slowly_progressing_download  # type: ignore[attr-defined]
+            fake_hub.constants = types.SimpleNamespace(  # type: ignore[attr-defined]
+                HF_HUB_ETAG_TIMEOUT=10,
+                HF_HUB_DOWNLOAD_TIMEOUT=10,
+                HF_HUB_DISABLE_XET=False,
+            )
+            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
+                with mock.patch("speech_note.llama_server.time.sleep"):
+                    with mock.patch.dict("sys.modules", {"huggingface_hub": fake_hub}):
+                        self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
+            self.assertEqual(attempts, 13)
 
 
 class ArchiveTests(unittest.TestCase):
