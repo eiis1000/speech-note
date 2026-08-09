@@ -2161,17 +2161,22 @@ class UncertaintyAnnotationTests(unittest.TestCase):
 
     # --- applying the notes ----------------------------------------------------
 
-    def test_applies_markers_without_altering_the_transcript(self) -> None:
-        from speech_note.annotate import UncertaintyNote, apply_notes
+    def test_applies_anchors_without_altering_the_transcript(self) -> None:
+        from speech_note.annotate import NOTES_HEADING, UncertaintyNote, apply_notes
 
         text = "I arrived. She liked the letter. It was late."
         result = apply_notes(text, [UncertaintyNote("She liked the letter.", ("She liked the grid.",))])
         self.assertEqual(result.inline_count, 1)
         self.assertEqual(result.appended_count, 0)
-        self.assertIn("She liked the letter.", result.text)
-        self.assertIn('[unclear audio; also heard as "She liked the grid."]', result.text)
-        # Removing the marker restores the input exactly.
-        self.assertEqual(re.sub(r" \[unclear audio;[^\]]*\]", "", result.text), text)
+        # Body gets a bare [1] anchor; the detail lives in one trailing list. The
+        # earlier inline form spelled every alternative out mid-prose and became
+        # unreadable at realistic note density.
+        self.assertIn("She liked the letter.[1]", result.text)
+        self.assertIn(NOTES_HEADING, result.text)
+        self.assertIn('[1] "She liked the letter." — sources also heard: "She liked the grid."', result.text)
+        # Removing the anchors and the trailing list restores the input exactly.
+        body = result.text.split(f"\n\n{NOTES_HEADING}\n")[0]
+        self.assertEqual(re.sub(r"\[\d+\]", "", body), text)
 
     def test_matches_across_whitespace_differences(self) -> None:
         from speech_note.annotate import UncertaintyNote, apply_notes
@@ -2185,19 +2190,20 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         Attaching the marker to a guessed span would be worse than a separate list, but
         silently discarding the finding would be worse than either.
         """
-        from speech_note.annotate import APPENDIX_HEADING, UncertaintyNote, apply_notes
+        from speech_note.annotate import NOTES_HEADING, UncertaintyNote, apply_notes
 
         text = "Only this sentence exists."
         result = apply_notes(text, [UncertaintyNote("something never said", ("maybe this",))])
         self.assertEqual(result.inline_count, 0)
         self.assertEqual(result.appended_count, 1)
         self.assertTrue(result.text.startswith(text))
-        self.assertIn(APPENDIX_HEADING, result.text)
+        self.assertIn(NOTES_HEADING, result.text)
         self.assertIn('"something never said"', result.text)
         self.assertIn('"maybe this"', result.text)
+        self.assertIn("could not anchor", result.text)  # flagged as unanchored, not hidden
 
     def test_overlapping_notes_are_listed_rather_than_nested(self) -> None:
-        from speech_note.annotate import UncertaintyNote, apply_notes
+        from speech_note.annotate import NOTES_HEADING, UncertaintyNote, apply_notes
 
         result = apply_notes(
             "alpha beta gamma",
@@ -2205,18 +2211,24 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         )
         self.assertEqual(result.inline_count, 1)
         self.assertEqual(result.appended_count, 1)
-        self.assertEqual(result.text.count("[unclear audio;"), 1)
+        body = result.text.split(f"\n\n{NOTES_HEADING}\n")[0]
+        self.assertEqual(len(re.findall(r"\[\d+\]", body)), 1)  # one anchor, no nesting
+        self.assertIn('"y"', result.text)  # the demoted note is still reported
 
-    def test_multiple_notes_keep_their_positions(self) -> None:
-        from speech_note.annotate import UncertaintyNote, apply_notes
+    def test_notes_are_numbered_in_body_order(self) -> None:
+        from speech_note.annotate import NOTES_HEADING, UncertaintyNote, apply_notes
 
+        # Deliberately out of order: numbering must follow position in the text, not
+        # the order the model returned the notes in.
         result = apply_notes(
             "first claim here. second claim here.",
-            [UncertaintyNote("first claim", ("a",)), UncertaintyNote("second claim", ("b",))],
+            [UncertaintyNote("second claim", ("b",)), UncertaintyNote("first claim", ("a",))],
         )
         self.assertEqual(result.inline_count, 2)
-        self.assertLess(result.text.index('"a"'), result.text.index("second"))
-        self.assertLess(result.text.index("second"), result.text.index('"b"'))
+        self.assertIn("first claim[1]", result.text)
+        self.assertIn("second claim[2]", result.text)
+        listing = result.text.split(f"\n\n{NOTES_HEADING}\n")[1]
+        self.assertLess(listing.index('"a"'), listing.index('"b"'))
 
     # --- the organizer's use of it ---------------------------------------------
 
@@ -2235,7 +2247,7 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         self.assertEqual(outcome.annotation_count, 1)
         self.assertEqual(outcome.annotation_appendix_count, 0)
         self.assertEqual(outcome.text_before_annotation, "She liked the letter.")
-        self.assertIn("[unclear audio;", outcome.text)
+        self.assertIn("She liked the letter.[1]", outcome.text)
 
     def test_annotation_failure_leaves_the_transcript_untouched(self) -> None:
         organizer, client = self._annotating_organizer()

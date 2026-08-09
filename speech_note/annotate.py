@@ -7,11 +7,16 @@ does only cleanup, and this pass audits the result.
 
 Two properties make it safe to run over a finished transcript:
 
-  * It returns DATA, never prose. The reply is a JSON list of spans; the markers are
+  * It returns DATA, never prose. The reply is a JSON list of spans; the anchors are
     inserted by code here. The pass cannot rewrite, shorten, or reorder anything.
-  * It only ever ADDS. A span it cannot place in the transcript is reported in a trailing
-    section rather than dropped, and any failure at all leaves the transcript exactly as
-    cleanup produced it.
+  * It only ever ADDS. Every note lands in one numbered list at the end of the
+    transcript; located notes also get a [n] anchor in the body. A quote that cannot
+    be placed is still listed — never dropped — and any failure at all leaves the
+    transcript exactly as cleanup produced it.
+
+The rendering is footnote-style on purpose: an earlier inline form spelled out every
+alternative inside the prose, and at realistic density (7 notes on a 3-paragraph
+recording) the markers swamped the text they were annotating.
 
 The reply is constrained by a JSON schema (see config.catalog.ANNOTATION_MAX_NOTES for
 why that is a correctness measure and not a nicety).
@@ -172,16 +177,16 @@ class UncertaintyNote:
     quote: str
     alternatives: tuple[str, ...]
 
-    def inline_marker(self) -> str:
+    def listed(self, number: int, anchored: bool) -> str:
+        # "sources also heard", not "unclear audio": when one recognizer invented text
+        # the audio may have been perfectly clear, and the note must not blame the
+        # recording for a model's guess.
         joined = " / ".join(f'"{alt}"' for alt in self.alternatives)
-        return f" [unclear audio; also heard as {joined}]"
-
-    def listed(self) -> str:
-        joined = " / ".join(f'"{alt}"' for alt in self.alternatives)
-        return f'- "{self.quote}" — also heard as {joined}'
+        suffix = "" if anchored else " (could not anchor this in the text above)"
+        return f'[{number}] "{self.quote}" — sources also heard: {joined}{suffix}'
 
 
-APPENDIX_HEADING = "Uncertain passages (the recording does not clearly support these):"
+NOTES_HEADING = "Unclear passages:"
 
 
 @dataclasses.dataclass
@@ -285,12 +290,13 @@ def _locate(text: str, quote: str) -> tuple[int, int] | None:
 
 
 def apply_notes(text: str, notes: list[UncertaintyNote]) -> AnnotationResult:
-    """Insert markers after each located quote; list the rest in a trailing section.
+    """Anchor each located quote with [n]; list every note, anchored or not, at the end.
 
-    The transcript body is never altered — markers are only inserted — so this cannot
-    lose content even if the auditor misbehaves.
+    The transcript body is never altered — anchors are only inserted — so this cannot
+    lose content even if the auditor misbehaves. Numbers follow body order; notes that
+    could not be anchored take the numbers after the last anchored one.
     """
-    placed: list[tuple[int, int, str]] = []
+    located: list[tuple[int, int, UncertaintyNote]] = []
     unplaced: list[UncertaintyNote] = []
     for note in notes:
         span = _locate(text, note.quote)
@@ -298,21 +304,27 @@ def apply_notes(text: str, notes: list[UncertaintyNote]) -> AnnotationResult:
             unplaced.append(note)
             continue
         start, end = span
-        if any(start < other_end and other_start < end for other_start, other_end, _ in placed):
-            # Overlapping spans would nest markers inside each other; the first wins and
-            # the second is still reported, just in the appendix.
+        if any(start < other_end and other_start < end for other_start, other_end, _ in located):
+            # Overlapping spans would stack anchors mid-word; the first wins and the
+            # second is still reported in the list, just without a body anchor.
             unplaced.append(note)
             continue
-        placed.append((start, end, note.inline_marker()))
+        located.append((start, end, note))
 
+    located.sort(key=lambda item: item[0])
     annotated = text
-    for start, end, marker in sorted(placed, reverse=True):
-        annotated = annotated[:end] + marker + annotated[end:]
-    if unplaced:
-        listed = "\n".join(note.listed() for note in unplaced)
-        annotated = f"{annotated.rstrip()}\n\n{APPENDIX_HEADING}\n{listed}"
+    for number, (_start, end, _note) in reversed(list(enumerate(located, start=1))):
+        annotated = f"{annotated[:end]}[{number}]{annotated[end:]}"
+
+    lines = [note.listed(number, True) for number, (_, _, note) in enumerate(located, start=1)]
+    lines += [
+        note.listed(number, False)
+        for number, note in enumerate(unplaced, start=len(located) + 1)
+    ]
+    if lines:
+        annotated = f"{annotated.rstrip()}\n\n{NOTES_HEADING}\n" + "\n".join(lines)
     return AnnotationResult(
-        text=annotated, inline_count=len(placed), appended_count=len(unplaced)
+        text=annotated, inline_count=len(located), appended_count=len(unplaced)
     )
 
 

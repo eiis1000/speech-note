@@ -292,10 +292,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "After cleanup, run a second pass that marks the claims the ASR sources do "
-            "not agree on, as '[unclear audio; also heard as ...]'. Where the sources "
+            "not agree on: footnote anchors like [1] in the text, with one 'Unclear "
+            "passages' list at the end giving the competing readings. Where the sources "
             "disagree the audio was unintelligible and the cleanup picked one reading; "
             "this shows you that it did, and what the alternatives were. The pass only "
-            "inserts markers — it never rewrites the transcript — so the worst it can do "
+            "inserts anchors — it never rewrites the transcript — so the worst it can do "
             "is annotate nothing. It costs one extra request, roughly the size of the "
             "cleanup request. Defaults to ON for remote cleanup providers and OFF for the "
             "local one: the bundled gemma-E2B quant does now return well-formed answers "
