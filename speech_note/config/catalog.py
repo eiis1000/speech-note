@@ -360,16 +360,13 @@ OPENROUTER_FREE_MODELS = [
     "inclusionai/ling-3.0-flash:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
 ]
-# Paid leads with the cleanup bake-off winners (2026-06-15, reconciling whisper +
-# sherpa + phone on a hard journal): deepseek-v3.2 recovered the correct reading,
-# stayed near-verbatim, and is the cheapest (~pennies/file); gemini-3-flash-preview
-# also got it right and is fast. It then falls through to the free chain so a paid
-# outage still produces output. ASR: the dedicated OpenRouter transcription models
-# (whisper-large-v3, chirp, gpt-4o-transcribe, …) reject a long single request and
-# must be chunked, but an audio-LLM — Gemini 3 Flash — transcribes a whole 44-min
-# recording in one chat request (verified 2026-06-28). So --online-paid also leads
-# ASR with the "openrouter" Gemini source (see ONLINE_PAID_ASR_SOURCES); the local
-# whisper+sherpa remain as corroborating peers and offline fallback.
+# Paid leads with the cleanup bake-off winner, reconfirmed under pinned serving
+# (tools/cleanup_eval.py, 2026-08-09, n=3): deepseek-v3.2 keeps every labeled
+# phrase everywhere, resists the confabulation-promotion trap, stays near-verbatim,
+# and is the cheapest (~pennies/file); gemini-3-flash-preview is the fast second.
+# It then falls through to the free chain so a paid outage still produces output.
+# ASR under --online-paid is the dedicated-recognizer trio in ONLINE_PAID_ASR_SOURCES
+# (see the OPENROUTER_STT_* block above for the measurements that chose it).
 OPENROUTER_PAID_MODELS = [
     "deepseek/deepseek-v3.2",
     "google/gemini-3-flash-preview",

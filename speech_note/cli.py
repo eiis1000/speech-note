@@ -311,7 +311,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "local one: the bundled gemma-E2B quant does now return well-formed answers "
             "(the reply is schema-constrained), but its *judgements* are unreliable — "
             "measured, it offers alternatives lifted from an unrelated part of the "
-            "recording. Pass it explicitly to override either way."
+            "recording. The preferred local model (the QAT 26B, used automatically when "
+            "installed and fitting) measured audit-clean, so with it serving this is "
+            "worth turning on. Pass it explicitly to override either way."
         ),
     )
     parser.add_argument("--organizer-gpu-layers", default="auto")
@@ -330,10 +332,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Path to a local cleanup-LM GGUF, overriding the bundled gemma-4-E2B. Use a "
-            "stronger model if your hardware allows — required to clean up the looping that "
-            "--asr-model large-v3-turbo-q5_k tends to produce (gemma-E2B is too small for it). "
-            "Ignored when --organizer-server-command is given."
+            "Path to a local cleanup-LM GGUF, overriding the automatic choice (the QAT "
+            "26B when installed and fitting in RAM, else the bundled gemma-4-E2B). An "
+            "explicit path is always respected, with a warning if it looks too big for "
+            "free RAM. Ignored when --organizer-server-command is given."
         ),
     )
     parser.add_argument(
@@ -364,7 +366,7 @@ def resolve_asr_sources(
     """The ASR collection: --asr (CLI) > user config file > the given default.
 
     default_sources lets a connectivity preset supply its own default collection
-    (e.g. --online-paid leads with the OpenRouter Gemini source) while an explicit
+    (e.g. --online-paid swaps in the hosted openrouter-stt trio) while an explicit
     --asr or the user ASR config file still override it.
     """
     if args.asr:

@@ -5,35 +5,52 @@ A vibe-coded local-first system for high-quality microphone dictation and audio-
 The pipeline for every run:
 
 1. capture or load audio
-2. probe its duration once, then gain-normalize it
-3. transcribe with a collection of local ASR sources, running sources on
-   different devices concurrently (the default collection is whisper.cpp on the
-   GPU plus sherpa-onnx Parakeet on the CPU, which don't contend)
+2. probe its duration once, then level it with a slow time-varying gain ride
+   (a 3-minute quiet stretch gets boosted; a 5-second dip barely moves; peaks
+   are handled by a look-ahead compressor, never by cutting the overall gain)
+3. transcribe with a collection of ASR sources, running sources on different
+   devices concurrently (the default collection is whisper.cpp on the GPU plus
+   sherpa-onnx Parakeet on the CPU, which don't contend; `--online-paid` swaps
+   in three hosted recognizers)
 4. clean the transcript with an LM that sees every source named, with its
    model and any reliability note
-5. commit all artifacts once: `raw.latest`, `clean.latest`,
-   `recording.latest.wav` (live capture only), `diagnostics.latest.json`, and a
-   timestamped copy of each under `logs/`
+5. audit the cleaned transcript with a second LM pass that marks the passages
+   the sources do not jointly support — `[n]` anchors in the text, one
+   "Unclear passages" list at the end with the competing readings, each
+   verified verbatim against the source transcripts before it is shown
+6. commit all artifacts once: `raw.latest`, `clean.latest`, `clean.plain.latest`
+   (the pre-annotation prose, when the audit ran), `recording.latest.wav` (live
+   capture only), `diagnostics.latest.json`, and a timestamped copy of each
+   under `logs/`
 
 **A note for other users:** I highly recommend changing the settings to suit your
 hardware, and in particular if you have an OpenRouter API key and are not concerned
-with privacy **I recommend using the OpenRouter organizer path** rather than the 
-mildly-weak gemma-4-E2B default.
+with privacy **I recommend using the OpenRouter organizer path** (`-P`) rather than
+the mildly-weak gemma-4-E2B default. For a stronger *local* default, drop the QAT
+gemma-4-26B-A4B GGUF into `~/.cache/huggingface/gguf/` — it is picked up
+automatically when it fits in RAM (see [Cleanup LM](#cleanup-lm)).
 
 Code layout: the `speech_note/` package is the program (`cli` → `pipeline` /
-`capture` → `transcribers` / `asr` / `organizer`, with `session` holding
-the run record). Supporting modules: `config` (all defaults and the backend
-tables), `models` (consent-gated model download), `hardware` (GPU detection),
-`audio` / `devices` / `terminal` / `naming` / `textproc`. `tools/` has the
-whisper.cpp Vulkan probe and `tests/` the test suites.
+`capture` → `transcribers` / `asr` → `organizer` / `annotate`, with `session`
+holding the run record). Supporting modules: `config/` (all defaults, the
+backend tables, and the ASR-spec/env parsing), `chat` (the OpenAI-compatible
+HTTP transport and model fallback chain), `llama_server` (the optional local
+llama-server child process, its RAM guard, and GGUF install), `model` (the
+`Transcript` domain type), `models` (consent-gated model download), `hardware`
+(GPU detection), `audio` / `devices` / `terminal` / `naming` / `textproc`.
+`tools/` has the whisper.cpp Vulkan probe, the no-nix suite runner
+(`run_tests_uv.sh`), and the eval harnesses (see [Evals](#evals)); `tests/` the
+test suites; `evals/` the labeled eval cases.
 
 Extending it (where new code goes):
 
 - **an ASR backend** — add a `BackendSpec` to the `ASR_BACKENDS` registry in
-  `config.py`, then either a `*Transcriber` class in `transcribers.py` (in-process,
-  wired in `asr.build_transcriber`) or, for an external CLI, a command in
-  `asr.build_subprocess_command` (with `in_process=False` in the registry).
-- **a cleanup provider** — extend `organizer.py` (`build_organizer` / `ChatClient`).
+  `config/catalog.py`, then either a `*Transcriber` class in `transcribers.py`
+  (in-process, wired in `asr.build_transcriber`) or, for an external CLI, a
+  command in `asr.build_subprocess_command` (with `in_process=False` in the
+  registry).
+- **a cleanup provider** — extend `organizer.py` (`build_organizer`) and
+  `chat.py` (`ChatClient`).
 - **a model that needs downloading** — detect "missing", then route through
   `models.require_consent` / `models.load_or_install` so it shares the install UX.
 
@@ -65,7 +82,9 @@ the full policy, and [Cleanup LM](#cleanup-lm) for using a different one.
 
 Inside the shell, `speech-note` runs the Nix-store copy of the code — edits to
 the working tree are picked up by `python -m speech_note` (or by re-entering
-the shell). Tests: `python -m unittest discover -s tests` (fast logic suite).
+the shell). Tests: `python -m unittest discover -s tests` (fast logic suite);
+when the Nix cache is unreachable, `bash tools/run_tests_uv.sh` runs the same
+suite from PyPI wheels alone (live-capture tests self-skip without PortAudio).
 The full-stack no-mock suite — real Whisper, real Parakeet ASR, real local
 cleanup LM — runs on demand and self-skips any stage whose model *or* test
 fixture is missing. It needs two recordings you supply: `tests/fixtures/short.wav`
@@ -219,6 +238,21 @@ Available backends:
 | `onnx` | `nemo-parakeet-tdt-0.6b-v2` int8 | CPU |
 | `crispasr` | `parakeet-tdt-0.6b-v2-q4_k.gguf` | GPU (Vulkan) |
 | `pocketsphinx` | bundled en-us | CPU |
+| `openrouter-stt` | `openai/whisper-large-v3-turbo` | hosted (OpenRouter `/audio/transcriptions`; whole recording in one multipart request; needs `OPENROUTER_API_KEY`) |
+| `openrouter` | `google/gemini-3-flash-preview` | hosted (audio-LLM via chat `input_audio`; see the confabulation caveat below) |
+
+`--online-paid` swaps the default collection to three hosted `openrouter-stt`
+recognizers — whisper-large-v3-turbo, parakeet-tdt-0.6b-v3, and
+mai-transcribe-1.5 — larger checkpoints than fit locally, from three different
+vendors so their errors don't correlate, and a 65-minute recording transcribes
+in ~16 s for a few cents. Measured on a hard low-SNR recording, every working
+dedicated recognizer emitted visibly garbled text where the audio was
+unintelligible and *not one invented a narrative* — fluent confabulation is an
+audio-LLM behaviour. The `openrouter` audio-LLM backend stays selectable
+(`--asr openrouter`) for its faint-speech sensitivity, but it is no default:
+on long files it degenerates into repetition loops, and on hard audio it has
+replaced garble with fiction. The uncertainty-annotation pass is what makes
+using it survivable.
 
 Each source's model is fetched on first use (consent-gated; `--auto-download` to
 skip the prompt). Other knobs: `--whisper-cpp-model /path/model.bin` points
@@ -278,13 +312,18 @@ transcript through.
 
 | flag | cleanup | notes |
 |---|---|---|
-| `--offline` | local GGUF | nothing leaves the machine |
-| `--online-free` | OpenRouter, free models | long provider-diverse fallback chain (free tiers flap); free endpoints may log/train on inputs |
-| `--online-paid` | OpenRouter, paid models | deepseek-v3.2 → gemini-3-flash, then falls back to the free chain; paid endpoints aren't logged; needs `OPENROUTER_API_KEY` |
+| `-O` / `--offline` | local GGUF | nothing leaves the machine |
+| `-F` / `--online-free` | OpenRouter, free models | long provider-diverse fallback chain (free tiers flap); free endpoints may log/train on inputs |
+| `-P` / `--online-paid` | OpenRouter, paid models | deepseek-v3.2 → gemini-3-flash, then falls back to the free chain; paid endpoints aren't logged; needs `OPENROUTER_API_KEY`. Also swaps ASR to the hosted recognizer trio (see [ASR](#asr)) |
 
-ASR is local (whisper + sherpa) in every mode — no OpenRouter ASR has been set up for
-this: the transcription models (`gpt-4o-mini-transcribe`, `whisper-large-v3`)
-reject chat audio input, and the audio-LLMs that accept it truncate long audio.
+ASR stays local (whisper + sherpa) under `--offline` and `--online-free`;
+`--online-paid` runs it hosted. On OpenRouter runs the uncertainty audit uses
+its own model chain (claude-haiku-4.5 → gemma-4-26b-a4b, then the cleanup
+chain) — the auditor sweep found the best cleaners are not the best judges,
+and a separate auditor means the cleanup model no longer grades its own work.
+When a request carries a response schema, the client also sets
+`provider.require_parameters` so OpenRouter never routes it to a provider that
+would silently ignore the schema.
 
 `OPENROUTER_API_KEY` is read from the environment, or from
 `~/.config/speech-note/env` (a `KEY=value` file, chmod 600) when the env var is
@@ -292,21 +331,30 @@ unset — so the key travels with the tool regardless of which directory you run
 it from. A shell export always wins.
 
 **Local (default):** launches the bundled Vulkan `llama-server` on
-`127.0.0.1:8011` with the GGUF configured in `speech_note/config.py`
-(`DEFAULT_GGUF_MODEL`, gemma-4-E2B). It is fetched from `DEFAULT_GGUF_REPO` on
-first use like the other models (consent-gated; `--auto-download` to skip the
-prompt) — or place a GGUF at that path yourself. To run a **stronger local
-cleanup model** without touching the config or hand-writing a launch command, point
-`--organizer-gguf /path/to/model.gguf` at any chat GGUF; speech-note serves it
-with the same flags. (A bigger model is worth it if your hardware allows — and is
-effectively required to clean up the looping that `--asr
-whisper-cpp:large-v3-turbo-q5_k` produces, which gemma-E2B can't.) For full control
-over the server invocation, use `--organizer-server-command` instead.
-Run uses full layer offload and KV-cache offload to the GPU
+`127.0.0.1:8011` with the best installed GGUF that fits in RAM. Two models are
+known to the config (`speech_note/config/catalog.py`): the bundled
+**gemma-4-E2B** (`DEFAULT_GGUF_MODEL`, 3.2 GB, auto-installed on first use,
+consent-gated) and the preferred **gemma-4-26B-A4B QAT** (`PREFERRED_GGUF_MODEL`,
+14.2 GB, place it in `~/.cache/huggingface/gguf/` yourself). When the preferred
+file is present and the RAM guard says it fits at the configured context, it is
+selected automatically — measured on the labeled evals it annotates at the
+hosted panel's level and keeps every labeled phrase in cleanup, where E2B finds
+no annotations and loses content on every case. A **RAM guard** protects both
+paths: the iGPU allocates from system RAM, so an oversized model doesn't fail
+cleanly — it swap-thrashes. The default path refuses (loudly) to launch a model
+that doesn't fit; an explicit `--organizer-gguf /path/to/model.gguf` is always
+respected, with a warning. For full control over the server invocation, use
+`--organizer-server-command` instead.
+
+The server runs with full layer offload and KV-cache offload to the GPU
 (~1.5x faster generation — measured 37 vs 24 tok/s on a 3.9k-token prompt). The
 old Gemma-4-GGUF/Vulkan slot-init hang that forced KV onto the CPU is fixed in
 the current llama.cpp; `--no-organizer-kv-offload` restores the workaround for
-older stacks. The model the server *says* it served is what gets recorded.
+older stacks. One 890M-specific note for the 26B: `--organizer-gpu-layers auto`
+(the default) spills its expert tensors to the CPU at the 64k default context
+(~8.5 tok/s); at `--organizer-context-tokens 32768` or less, `--organizer-gpu-layers
+999` fits fully on the iGPU and runs ~20 tok/s. The model the server *says* it
+served is what gets recorded.
 
 **OpenRouter (better accuracy at faster speed):**
 
@@ -329,6 +377,66 @@ output and diagnostics.
 
 For arbitrary prompts against the same local server, keep it running yourself
 and use `curl http://127.0.0.1:8011/v1/chat/completions`.
+
+## Uncertainty annotation
+
+On a hard recording the cleaned transcript is uniformly fluent prose whether
+the audio was pristine or unintelligible, so the reader has no way to tell
+which sentences to trust. A second LM pass audits the finished transcript
+against every source and marks the passages the sources do not jointly
+support: a bare `[n]` anchor in the text, and one numbered **"Unclear
+passages:"** list at the end giving the competing readings ("sources also
+heard: …"). Where the sources disagree, the audio was hard and cleanup picked
+one reading — the note shows that it did, and what the alternatives were.
+
+Design properties, in order of importance:
+
+- **The pass cannot rewrite anything.** It returns JSON spans (constrained by
+  an actual JSON schema — grammar-enforced on the local server); code inserts
+  the anchors. The worst it can do is annotate nothing.
+- **Alternatives are citations.** Each one names its source and quotes it
+  verbatim; `verify_notes` looks every citation up as a contiguous word
+  sequence in the actual sources and drops what it cannot find — a mechanical
+  containment check, no linguistic judgement in code. Fabricated "alternatives"
+  never reach the reader, and a display text that isn't a faithful reduction of
+  its verified quote is replaced by the quote itself.
+- **Placement is context-pinned.** Notes carry before/after context so the
+  right instance of a repeated phrase gets the anchor; unanchorable notes join
+  the same list, marked as such, instead of being dropped.
+- **Judgement lives in the prompt, not the code.** The prompt teaches with a
+  worked example (a real user/assistant message pair) and names the base rate;
+  the majority rule says agreement between two sources is evidence about a
+  third, not proof.
+
+Defaults: ON for remote cleanup providers, OFF for local (the bundled E2B's
+judgements are unreliable; with the preferred QAT 26B installed it measures
+audit-clean and `--annotate-uncertainty` is worth passing).
+`--no-annotate-uncertainty` disables it anywhere. When the pass runs,
+`clean.plain.latest` keeps the pre-annotation prose for TTS/pasting.
+
+## Evals
+
+The prompts and model choices above are all backed by labeled evals that run
+the *shipped* machinery (imported from the product modules, so eval and product
+cannot drift):
+
+- `tools/annotation_eval.py` — the audit pass: recall over expected divergence
+  regions, spurious/displaced/forbidden notes, citation rejections.
+- `tools/cleanup_eval.py` — the cleanup pass: must-keep coverage, wrong-reading
+  promotion, length band, disfluency residue.
+- `tools/asr_eval.py` — hosted recognizers on real clips: labeled-anchor
+  recall, degeneration (unique-8-gram ratio), invented proper nouns.
+- `tools/make_eval_case.py` — turns any `--export-sources` directory into a
+  new labeled case skeleton in two minutes.
+
+Committed cases under `evals/cases/` are synthetic traps for observed failure
+classes (confabulation promotion, displaced citations, second-instance
+anchoring); real-recording cases live under `evals/local/`, which is gitignored
+so nothing from a real recording can enter history. All tools take `--repeats`
+(free routes vary wildly run to run) and pin OpenRouter serving to
+bf16/fp16/fp8 quantizations, reporting the provider that actually answered.
+`--api-base` points the same evals at a local llama-server, which is how local
+models get numbers instead of reputations. See `evals/README.md`.
 
 ## Hardware notes and other GPUs
 
@@ -389,10 +497,12 @@ GPU.
 jq '.timings, .asr, .cleanup, .errors, .skips' diagnostics.latest.json
 ```
 
-The diagnostics file records the resolved config, the input duration, every
-transcript with its provenance (label, producing model, kind), per-pass timing
-*and realtime factor*, the normalization gain actually applied, cleanup
-telemetry (served model, finish reason, token estimates), and an event timeline
+The diagnostics file (schema 5) records the resolved config, the input
+duration, every transcript with its provenance (label, producing model, kind),
+per-pass timing *and realtime factor*, the leveling gain actually applied,
+cleanup telemetry (served model, finish reason, token estimates), the
+annotation pass's applied notes as structured data (quote / alternatives /
+anchored) with its rejected-citation count and timing, and an event timeline
 stamped in seconds since run start. Errors and skips are separate lists;
 `audio_levels.measured` says whether level data exists rather than reporting
 zeros for file runs.
