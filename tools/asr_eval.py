@@ -66,7 +66,7 @@ def load_env_key() -> str:
     if env_file.exists():
         for line in env_file.read_text().splitlines():
             if line.startswith("OPENROUTER_API_KEY="):
-                return line.split("=", 1)[1].strip().strip('"')
+                return line.split("=", 1)[1].strip().strip("'\"")
     raise SystemExit("OPENROUTER_API_KEY not set and not found in .env")
 
 
