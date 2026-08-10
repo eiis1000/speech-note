@@ -1171,6 +1171,45 @@ class ServerCommandTests(unittest.TestCase):
                     assert command is not None
                     self.assertIn(str(stronger), command)
 
+    def test_default_server_command_prefers_the_stronger_installed_model(self) -> None:
+        """The preferred (bigger) GGUF wins when installed and fitting; when RAM is
+        short it falls back to the bundled default with a note; an explicit
+        --organizer-gguf is never second-guessed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            default = Path(tmp) / "e2b.gguf"
+            default.write_bytes(b"x" * 1024)
+            preferred = Path(tmp) / "qat-26b.gguf"
+            preferred.write_bytes(b"x" * 2048)
+            with mock.patch("speech_note.llama_server.shutil.which", return_value="/bin/llama-server"):
+                with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", default):
+                    with mock.patch("speech_note.llama_server.PREFERRED_GGUF_MODEL", preferred):
+                        with mock.patch(
+                            "speech_note.llama_server.available_ram_bytes",
+                            return_value=32 * 1024**3,
+                        ):
+                            command = default_server_command(context_tokens=4096)
+                            assert command is not None
+                            self.assertIn(str(preferred), command)
+
+                            explicit = default_server_command(
+                                context_tokens=4096, model_path=default
+                            )
+                            assert explicit is not None
+                            self.assertIn(str(default), explicit)
+
+                        err = io.StringIO()
+                        with mock.patch(
+                            "speech_note.llama_server.model_ram_shortfall",
+                            side_effect=lambda path, ctx: (
+                                5 * 1024**3 if path == preferred else None
+                            ),
+                        ):
+                            with redirect_stderr(err):
+                                command = default_server_command(context_tokens=4096)
+                        assert command is not None
+                        self.assertIn(str(default), command)
+                        self.assertIn(preferred.name, err.getvalue())
+
     def test_cli_organizer_gguf_flag(self) -> None:
         config = make_config("--organizer-gguf", "/models/big.gguf")
         self.assertEqual(config.organizer.gguf, Path("/models/big.gguf"))

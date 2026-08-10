@@ -24,6 +24,7 @@ from .config import (
     DEFAULT_GGUF_MODEL,
     DEFAULT_GGUF_REPO,
     DEFAULT_GGUF_SIZE_HINT,
+    PREFERRED_GGUF_MODEL,
 )
 
 
@@ -67,7 +68,21 @@ def default_server_command(
     model_path: Path | None = None,
 ) -> list[str] | None:
     explicit = model_path is not None
-    model_path = model_path or DEFAULT_GGUF_MODEL
+    if model_path is None:
+        # Best installed model that fits wins. The preferred quant beat the bundled
+        # E2B decisively on both roles (cleanup keeps and annotation recall, measured
+        # in evals/); E2B remains the fallback because it always fits and auto-installs.
+        model_path = DEFAULT_GGUF_MODEL
+        if PREFERRED_GGUF_MODEL.exists():
+            if model_ram_shortfall(PREFERRED_GGUF_MODEL, context_tokens) is None:
+                model_path = PREFERRED_GGUF_MODEL
+            else:
+                print(
+                    f"NOTE: {PREFERRED_GGUF_MODEL.name} is installed but does not fit "
+                    f"in free RAM at {context_tokens} context tokens; using "
+                    f"{DEFAULT_GGUF_MODEL.name} instead.",
+                    file=sys.stderr,
+                )
     llama_server = shutil.which("llama-server")
     if not llama_server or not model_path.exists():
         return None

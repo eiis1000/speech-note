@@ -31,6 +31,7 @@ __all__ = [
     "DEFAULT_ORGANIZER_MODE", "DEFAULT_ORGANIZER_PROVIDER", "DEFAULT_LOCAL_API_BASE",
     "DEFAULT_LOCAL_MODEL_LABEL", "DEFAULT_GGUF_MODEL", "DEFAULT_GGUF_REPO", "DEFAULT_GGUF_FILE",
     "DEFAULT_GGUF_SIZE_HINT", "DEFAULT_ORGANIZER_CONTEXT_TOKENS", "DEFAULT_ORGANIZER_MAX_OUTPUT_TOKENS",
+    "PREFERRED_GGUF_MODEL", "PREFERRED_GGUF_REPO", "PREFERRED_GGUF_FILE", "PREFERRED_GGUF_SIZE_HINT",
     "DEFAULT_OPENROUTER_API_BASE", "OPENROUTER_FREE_MODELS", "OPENROUTER_PAID_MODELS",
     "OPENROUTER_ANNOTATION_MODELS",
     "OPENROUTER_ASR_MP3_SAMPLE_RATE", "DEFAULT_OPENROUTER_ASR_MAX_OUTPUT_TOKENS",
@@ -316,6 +317,20 @@ DEFAULT_GGUF_MODEL = Path.home() / ".cache/huggingface/gguf/gemma-4-E2B-it-UD-Q4
 DEFAULT_GGUF_REPO = "unsloth/gemma-4-E2B-it-GGUF"
 DEFAULT_GGUF_FILE = DEFAULT_GGUF_MODEL.name
 DEFAULT_GGUF_SIZE_HINT = "3.2 GB"
+# Preferred upgrade over the bundled E2B, used automatically when the file is
+# installed and the RAM guard says it fits at the configured context. The QAT
+# 26B MoE (4B active) measured at the hosted frontier's level on the annotation
+# evals (zero spurious/displaced notes across nine runs) where E2B finds nothing,
+# and its cleanups kept every labeled phrase. Speed on the 890M iGPU: ~8.5 tok/s
+# generation under --organizer-gpu-layers auto (experts spill to CPU), ~20 tok/s
+# fully offloaded (999) at ctx <= 32k; full offload at the 64k default context
+# does not fit the GTT window, so auto stays the default.
+PREFERRED_GGUF_MODEL = (
+    Path.home() / ".cache/huggingface/gguf/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"
+)
+PREFERRED_GGUF_REPO = "unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+PREFERRED_GGUF_FILE = PREFERRED_GGUF_MODEL.name
+PREFERRED_GGUF_SIZE_HINT = "14.2 GB"
 DEFAULT_ORGANIZER_CONTEXT_TOKENS = 65_536
 DEFAULT_ORGANIZER_MAX_OUTPUT_TOKENS = 16_384
 
