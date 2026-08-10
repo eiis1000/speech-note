@@ -2791,3 +2791,7 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         self.assertFalse(
             make_config("--online-paid", "--no-annotate-uncertainty").organizer.annotate
         )
+        # The short pair: -u forces the audit on, -U off, from either default.
+        with mock.patch("speech_note.cli.preferred_model_selected", return_value=False):
+            self.assertTrue(make_config("-u").organizer.annotate)
+        self.assertFalse(make_config("--online-paid", "-U").organizer.annotate)

@@ -297,7 +297,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--organizer-context-tokens", type=int, default=None)
     parser.add_argument("--organizer-max-output-tokens", type=int, default=None)
     parser.add_argument(
-        "--annotate-uncertainty",
+        "-u", "--annotate-uncertainty",
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
@@ -317,6 +317,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "explicit --organizer-gguf/--organizer-server-command/--organizer-api-base "
             "means an unknown model. Pass this flag explicitly to override either way."
         ),
+    )
+    parser.add_argument(
+        "-U",
+        dest="annotate_uncertainty",
+        action="store_false",
+        default=argparse.SUPPRESS,  # contribute no default; -u/--annotate-uncertainty owns it
+        help="Short for --no-annotate-uncertainty.",
     )
     parser.add_argument("--organizer-gpu-layers", default="auto")
     parser.add_argument(

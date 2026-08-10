@@ -413,9 +413,9 @@ the preferred QAT 26B (it measured audit-clean on the labeled evals), OFF
 otherwise — the bundled E2B's judgements are unreliable, and an explicit
 `--organizer-gguf` / `--organizer-server-command` / `--organizer-api-base`
 means an unknown model, which doesn't get judgement duties by default.
-`--annotate-uncertainty` / `--no-annotate-uncertainty` override either way.
-When the pass runs, `clean.plain.latest` keeps the pre-annotation prose for
-TTS/pasting.
+`-u` / `--annotate-uncertainty` forces it on, `-U` / `--no-annotate-uncertainty`
+off. When the pass runs, `clean.plain.latest` keeps the pre-annotation prose
+for TTS/pasting.
 
 ## Evals
 
