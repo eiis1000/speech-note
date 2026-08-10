@@ -227,7 +227,7 @@ def score_case(case: Case, notes) -> dict:
 
 def ask(
     key: str, model: str, messages: list[dict], fmt: dict, out_file: Path, url: str,
-    any_quant: bool = False,
+    any_quant: bool = False, timeout: int = 300,
 ) -> tuple[list, str, str]:
     body: dict = {
         "model": model,
@@ -250,7 +250,7 @@ def ask(
             url,
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             json=body,
-            timeout=300,
+            timeout=timeout,
         )
         if response.status_code == 429:
             time.sleep(30 * (attempt + 1))
@@ -318,6 +318,12 @@ def main() -> None:
         action="store_true",
         help="do not pin OpenRouter serving to bf16/fp16/fp8 (see the ask() comment)",
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="per-request read timeout in seconds; raise for slow local servers",
+    )
     args = parser.parse_args()
 
     key = load_env_key(args.api_base)
@@ -341,7 +347,7 @@ def main() -> None:
             notes, error, served_by = ask(
                 key, model, messages, fmt,
                 out_root / case.name / f"{slug}.{repeat}.json", args.api_base,
-                any_quant=args.any_quant,
+                any_quant=args.any_quant, timeout=args.timeout,
             )
             return model, repeat, notes, error, served_by
 
