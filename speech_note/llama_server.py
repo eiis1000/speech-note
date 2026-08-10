@@ -60,6 +60,20 @@ def model_ram_shortfall(model_path: Path, context_tokens: int) -> int | None:
     return None if need <= available else need - available
 
 
+def preferred_model_selected(context_tokens: int) -> bool:
+    """Would the automatic GGUF choice be the preferred (stronger) model?
+
+    Shared with the CLI, whose local annotation default follows this answer: the
+    preferred quant measured audit-clean on the labeled evals, the bundled E2B did
+    not. The check runs again at server launch; if free RAM shrinks in between and
+    the launch falls back to E2B, an enabled audit stays harmless — E2B's failure
+    mode is finding nothing, not inventing (measured, v5 prompt machinery)."""
+    return (
+        PREFERRED_GGUF_MODEL.exists()
+        and model_ram_shortfall(PREFERRED_GGUF_MODEL, context_tokens) is None
+    )
+
+
 def default_server_command(
     *,
     context_tokens: int,
@@ -73,16 +87,15 @@ def default_server_command(
         # E2B decisively on both roles (cleanup keeps and annotation recall, measured
         # in evals/); E2B remains the fallback because it always fits and auto-installs.
         model_path = DEFAULT_GGUF_MODEL
-        if PREFERRED_GGUF_MODEL.exists():
-            if model_ram_shortfall(PREFERRED_GGUF_MODEL, context_tokens) is None:
-                model_path = PREFERRED_GGUF_MODEL
-            else:
-                print(
-                    f"NOTE: {PREFERRED_GGUF_MODEL.name} is installed but does not fit "
-                    f"in free RAM at {context_tokens} context tokens; using "
-                    f"{DEFAULT_GGUF_MODEL.name} instead.",
-                    file=sys.stderr,
-                )
+        if preferred_model_selected(context_tokens):
+            model_path = PREFERRED_GGUF_MODEL
+        elif PREFERRED_GGUF_MODEL.exists():
+            print(
+                f"NOTE: {PREFERRED_GGUF_MODEL.name} is installed but does not fit "
+                f"in free RAM at {context_tokens} context tokens; using "
+                f"{DEFAULT_GGUF_MODEL.name} instead.",
+                file=sys.stderr,
+            )
     llama_server = shutil.which("llama-server")
     if not llama_server or not model_path.exists():
         return None

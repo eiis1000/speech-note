@@ -408,11 +408,14 @@ Design properties, in order of importance:
   the majority rule says agreement between two sources is evidence about a
   third, not proof.
 
-Defaults: ON for remote cleanup providers, OFF for local (the bundled E2B's
-judgements are unreliable; with the preferred QAT 26B installed it measures
-audit-clean and `--annotate-uncertainty` is worth passing).
-`--no-annotate-uncertainty` disables it anywhere. When the pass runs,
-`clean.plain.latest` keeps the pre-annotation prose for TTS/pasting.
+Defaults: ON for remote cleanup providers, ON for local runs that will serve
+the preferred QAT 26B (it measured audit-clean on the labeled evals), OFF
+otherwise — the bundled E2B's judgements are unreliable, and an explicit
+`--organizer-gguf` / `--organizer-server-command` / `--organizer-api-base`
+means an unknown model, which doesn't get judgement duties by default.
+`--annotate-uncertainty` / `--no-annotate-uncertainty` override either way.
+When the pass runs, `clean.plain.latest` keeps the pre-annotation prose for
+TTS/pasting.
 
 ## Evals
 

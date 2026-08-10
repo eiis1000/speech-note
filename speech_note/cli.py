@@ -21,6 +21,7 @@ from . import __version__
 from . import config as defaults
 from .config import AsrSource
 from .devices import coerce_input_device, print_input_devices, select_input_device
+from .llama_server import preferred_model_selected
 from .terminal import read_single_choice
 
 
@@ -307,13 +308,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "this shows you that it did, and what the alternatives were. The pass only "
             "inserts anchors — it never rewrites the transcript — so the worst it can do "
             "is annotate nothing. It costs one extra request, roughly the size of the "
-            "cleanup request. Defaults to ON for remote cleanup providers and OFF for the "
-            "local one: the bundled gemma-E2B quant does now return well-formed answers "
-            "(the reply is schema-constrained), but its *judgements* are unreliable — "
-            "measured, it offers alternatives lifted from an unrelated part of the "
-            "recording. The preferred local model (the QAT 26B, used automatically when "
-            "installed and fitting) measured audit-clean, so with it serving this is "
-            "worth turning on. Pass it explicitly to override either way."
+            "cleanup request. Defaults to ON for remote cleanup providers, ON for local "
+            "runs that will serve the preferred QAT 26B (installed and fitting in RAM — "
+            "it measured audit-clean on the labeled evals), and OFF otherwise: the "
+            "bundled gemma-E2B quant returns well-formed answers (the reply is "
+            "schema-constrained) but its *judgements* are unreliable — measured, it "
+            "offers alternatives lifted from an unrelated part of the recording — and an "
+            "explicit --organizer-gguf/--organizer-server-command/--organizer-api-base "
+            "means an unknown model. Pass this flag explicitly to override either way."
         ),
     )
     parser.add_argument("--organizer-gpu-layers", default="auto")
@@ -518,13 +520,25 @@ def resolve_config(args: argparse.Namespace) -> Config:
                 else None
             ),
             prewarm=args.organizer_prewarm,
-            # None = "user didn't say". On for remote providers; off for the bundled local
-            # quant, whose answers are well-formed but whose judgements are not (see the
-            # flag's help). Not a format problem any more — a capability one.
+            # None = "user didn't say". On for remote providers, and for local runs
+            # that will serve the preferred GGUF (it measured audit-clean on the
+            # labeled evals); off for the bundled E2B quant, whose answers are
+            # well-formed but whose judgements are not (see the flag's help). The
+            # local default only applies when the automatic model choice is in
+            # effect — an explicit GGUF, server command, or api_base means an
+            # unknown model, and unknown models don't get judgement duties.
             annotate=(
                 args.annotate_uncertainty
                 if args.annotate_uncertainty is not None
-                else args.organizer_provider == "openrouter"
+                else (
+                    args.organizer_provider == "openrouter"
+                    or (
+                        args.organizer_gguf is None
+                        and args.organizer_server_command is None
+                        and args.organizer_api_base is None
+                        and preferred_model_selected(context_tokens)
+                    )
+                )
             ),
         ),
     )

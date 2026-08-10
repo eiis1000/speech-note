@@ -1210,6 +1210,25 @@ class ServerCommandTests(unittest.TestCase):
                         self.assertIn(str(default), command)
                         self.assertIn(preferred.name, err.getvalue())
 
+    def test_preferred_model_selected_tracks_install_and_fit(self) -> None:
+        from speech_note.llama_server import preferred_model_selected
+
+        with tempfile.TemporaryDirectory() as tmp:
+            preferred = Path(tmp) / "qat-26b.gguf"
+            with mock.patch("speech_note.llama_server.PREFERRED_GGUF_MODEL", preferred):
+                self.assertFalse(preferred_model_selected(4096))  # not installed
+                preferred.write_bytes(b"x" * 2048)
+                with mock.patch(
+                    "speech_note.llama_server.available_ram_bytes",
+                    return_value=32 * 1024**3,
+                ):
+                    self.assertTrue(preferred_model_selected(4096))
+                with mock.patch(
+                    "speech_note.llama_server.available_ram_bytes",
+                    return_value=1 * 1024**3,
+                ):
+                    self.assertFalse(preferred_model_selected(65_536))  # too big
+
     def test_cli_organizer_gguf_flag(self) -> None:
         config = make_config("--organizer-gguf", "/models/big.gguf")
         self.assertEqual(config.organizer.gguf, Path("/models/big.gguf"))
@@ -2743,11 +2762,29 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         self.assertEqual(client.chat.call_count, 1)
 
     def test_annotation_default_follows_the_cleanup_provider(self) -> None:
-        """On for remote models; off for the bundled local quant."""
-        self.assertFalse(make_config().organizer.annotate)  # local default
-        self.assertFalse(make_config("--offline").organizer.annotate)
-        self.assertTrue(make_config("--online-paid").organizer.annotate)
-        self.assertTrue(make_config("--online-free").organizer.annotate)
+        """On for remote models and for the audit-clean preferred local quant;
+        off for the bundled E2B and for any explicitly-chosen unknown model."""
+        with mock.patch("speech_note.cli.preferred_model_selected", return_value=False):
+            self.assertFalse(make_config().organizer.annotate)  # bundled E2B
+            self.assertFalse(make_config("--offline").organizer.annotate)
+            self.assertTrue(make_config("--online-paid").organizer.annotate)
+            self.assertTrue(make_config("--online-free").organizer.annotate)
+        with mock.patch("speech_note.cli.preferred_model_selected", return_value=True):
+            self.assertTrue(make_config().organizer.annotate)  # QAT will serve
+            self.assertTrue(make_config("--offline").organizer.annotate)
+            # An explicit model, server command, or endpoint means an unknown
+            # model, and unknown models don't get judgement duties by default.
+            self.assertFalse(
+                make_config("--organizer-gguf", "/m.gguf").organizer.annotate
+            )
+            self.assertFalse(
+                make_config("--organizer-server-command", "srv").organizer.annotate
+            )
+            self.assertFalse(
+                make_config(
+                    "--organizer-api-base", "http://127.0.0.1:9/v1/chat/completions"
+                ).organizer.annotate
+            )
 
     def test_annotation_flag_overrides_the_provider_default(self) -> None:
         self.assertTrue(make_config("--annotate-uncertainty").organizer.annotate)
