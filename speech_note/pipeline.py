@@ -194,6 +194,8 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
             organizer.status_note_callback = display.note
             try:
                 session.cleanup = organizer.cleanup(sources, plan)
+                if session.cleanup.error:
+                    display.mark_failed()
             finally:
                 organizer.status_label_callback = None
                 organizer.status_note_callback = None

@@ -59,6 +59,7 @@ class StatusTask:
 
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 SPINNER_DONE = "✓"
+SPINNER_FAILED = "✗"
 
 
 def render_status_line(
@@ -127,6 +128,7 @@ class StatusDisplay:
         self._lock = threading.RLock()
         self._phase: str | None = None
         self._phase_started = 0.0
+        self._phase_error = False
         self._tasks: dict[str, StatusTask] = {}
         self._last_width = 0
         self._frame = 0
@@ -137,6 +139,7 @@ class StatusDisplay:
         with self._lock:
             self._phase = label
             self._phase_started = time.monotonic()
+            self._phase_error = False
             self._tasks = {}
             self._is_tty = bool(getattr(sys.stderr, "isatty", lambda: False)())
             if self._is_tty:
@@ -148,15 +151,27 @@ class StatusDisplay:
             if self._phase is None:
                 return
             now = time.monotonic()
+            for task in self._tasks.values():
+                if task.done_at is None:
+                    task.done_at = now
+                    task.error = task.error or self._phase_error
             if self._is_tty:
-                self._paint(now, done=True)  # leave the resolved (✓) snapshot in scrollback
+                self._paint(now, done=True)  # leave the resolved ✓/✗ snapshot in scrollback
                 sys.stderr.write("\n")
                 self._last_width = 0
             else:
                 sys.stderr.write(self._summary(now) + "\n")
             sys.stderr.flush()
             self._phase = None
+            self._phase_error = False
             self._tasks = {}
+
+    def mark_failed(self) -> None:
+        """Mark the active phase as failed even when its work returned an error value."""
+        with self._lock:
+            self._phase_error = True
+            if self._is_tty:
+                self._paint()
 
     def start_task(self, name: str) -> None:
         with self._lock:
@@ -213,7 +228,10 @@ class StatusDisplay:
         if self._phase is None:
             return
         now = time.monotonic() if now is None else now
-        spinner = SPINNER_DONE if done else SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]
+        failed = self._phase_error or any(task.error for task in self._tasks.values())
+        spinner = (
+            SPINNER_FAILED if failed else SPINNER_DONE
+        ) if done else SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]
         width = shutil.get_terminal_size((80, 24)).columns
         line = render_status_line(
             self._phase,
@@ -231,13 +249,15 @@ class StatusDisplay:
     def _summary(self, now: float) -> str:
         phase_elapsed = format_elapsed(now - self._phase_started)
         tasks = list(self._tasks.values())
+        failed = self._phase_error or any(task.error for task in tasks)
+        resolved = SPINNER_FAILED if failed else SPINNER_DONE
         if not tasks:
-            return f"{SPINNER_DONE} {self._phase}  {phase_elapsed}"
+            return f"{resolved} {self._phase}  {phase_elapsed}"
         items = [
             f"{t.name} {format_elapsed(t.elapsed(now))}" + (" (failed)" if t.error else "")
             for t in tasks
         ]
-        return f"{SPINNER_DONE} {self._phase}  " + ", ".join(items) + f"  ({phase_elapsed})"
+        return f"{resolved} {self._phase}  " + ", ".join(items) + f"  ({phase_elapsed})"
 
 
 # One process-wide display owns the stderr status line, so concurrent tasks never
@@ -257,6 +277,9 @@ def status_phase(label: str) -> Generator[StatusDisplay]:
     _display.begin_phase(label)
     try:
         yield _display
+    except BaseException:
+        _display.mark_failed()
+        raise
     finally:
         _display.end_phase()
 

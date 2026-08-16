@@ -1156,7 +1156,8 @@ class ServerCommandTests(unittest.TestCase):
                     self.assertIn("--no-kv-offload", command)
 
     def test_default_server_command_missing_model(self) -> None:
-        with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", Path("/nonexistent.gguf")):
+        with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", Path("/nonexistent.gguf")), \
+             mock.patch("speech_note.llama_server.PREFERRED_GGUF_MODEL", Path("/also-missing.gguf")):
             self.assertIsNone(default_server_command(context_tokens=4096))
 
     def test_default_server_command_model_path_override(self) -> None:
@@ -2229,6 +2230,20 @@ class StatusDisplayTests(unittest.TestCase):
         self.assertIn("whisper", out)
         self.assertIn("sherpa", out)
         self.assertIn("(failed)", out)  # the errored task is flagged in the summary
+        self.assertTrue(out.startswith("✗ ASR"))
+
+    def test_non_tty_phase_marked_failed_resolves_with_cross(self) -> None:
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            display = StatusDisplay()
+            display.begin_phase("Cleanup")
+            display.replace_task("deepseek")
+            display.mark_failed()
+            display.end_phase()
+        out = buf.getvalue()
+        self.assertTrue(out.startswith("✗ Cleanup"))
+        self.assertIn("deepseek", out)
+        self.assertIn("(failed)", out)
 
 
 class ShortOptionTests(unittest.TestCase):
