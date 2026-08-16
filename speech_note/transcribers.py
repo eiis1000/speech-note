@@ -713,6 +713,9 @@ class OpenRouterSttTranscriber(Transcriber):
     and its peers still run.
     """
 
+    MAX_UPLOAD_BYTES = 25_000_000
+    MP3_BITRATES_KBPS = (8, 16, 24, 32)
+
     def __init__(
         self,
         *,
@@ -757,20 +760,40 @@ class OpenRouterSttTranscriber(Transcriber):
         timeout = self._effective_timeout(duration_seconds)
         with tempfile.TemporaryDirectory(prefix="speech-note-or-stt-") as tmp_dir:
             mp3_path = Path(tmp_dir) / "audio.mp3"
-            encode_to_mp3(path, mp3_path, sample_rate=self.mp3_sample_rate)
             data: dict[str, str] = {
                 "model": self.model_name,
                 "response_format": self.response_format,
             }
             if language and language.lower() not in {"auto", "und"}:
                 data["language"] = language
-            with mp3_path.open("rb") as handle:
-                response = requests.post(
-                    self.api_base,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    files={"file": ("audio.mp3", handle, "audio/mpeg")},
-                    data=data,
-                    timeout=timeout,
+            response = None
+            upload_bytes = 0
+            for bitrate in [None, *reversed(self.MP3_BITRATES_KBPS)]:
+                encode_to_mp3(
+                    path,
+                    mp3_path,
+                    sample_rate=self.mp3_sample_rate,
+                    bitrate_kbps=bitrate,
+                )
+                upload_bytes = mp3_path.stat().st_size
+                if upload_bytes > self.MAX_UPLOAD_BYTES:
+                    continue
+                with mp3_path.open("rb") as handle:
+                    response = requests.post(
+                        self.api_base,
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        files={"file": ("audio.mp3", handle, "audio/mpeg")},
+                        data=data,
+                        timeout=timeout,
+                    )
+                if response.status_code != 413:
+                    break
+            if response is None:
+                raise RuntimeError(
+                    "OpenRouter STT cannot transcribe this recording as one file: "
+                    f"even the 8 kbps encoded audio is {upload_bytes / 1_000_000:.1f} MB, "
+                    "exceeding OpenRouter's 25 MB multipart upload limit. Split the "
+                    "recording into smaller files or select a local ASR backend."
                 )
         if not response.ok:
             detail = " ".join(response.text.split())[:400]

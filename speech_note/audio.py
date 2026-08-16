@@ -115,19 +115,26 @@ def convert_to_pcm_wav(source: Path, target: Path, *, sample_rate: int) -> None:
     )
 
 
-def encode_to_mp3(source: Path, target: Path, *, sample_rate: int) -> None:
+def encode_to_mp3(
+    source: Path,
+    target: Path,
+    *,
+    sample_rate: int,
+    bitrate_kbps: int | None = None,
+) -> None:
     """Transcode to a compact mono mp3 for upload to a remote ASR API.
 
     A long recording as 16 kHz mono wav is tens of MB — too large to base64 into a
     JSON request body — so the network ASR backend sends mp3 instead.
     """
+    quality = ["-b:a", f"{bitrate_kbps}k"] if bitrate_kbps else ["-q:a", "4"]
     _run_ffmpeg(
         [
             "ffmpeg", "-nostdin", "-y",
             "-i", str(source),
             "-ac", str(CHANNELS),
             "-ar", str(sample_rate),
-            "-c:a", "libmp3lame", "-q:a", "4",
+            "-c:a", "libmp3lame", *quality,
             str(target),
         ],
         action="mp3 encode",

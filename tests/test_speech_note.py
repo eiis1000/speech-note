@@ -1922,8 +1922,9 @@ class OpenRouterSttTranscriberTests(unittest.TestCase):
             captured["body"] = kwargs["files"]["file"][1].read()
             return response
 
-        def fake_encode(source, target, *, sample_rate) -> None:
+        def fake_encode(source, target, *, sample_rate, bitrate_kbps=None) -> None:
             Path(target).write_bytes(b"FAKEAUDIO")
+            captured["bitrate_kbps"] = bitrate_kbps
 
         with mock.patch("requests.post", fake_post), \
              mock.patch("speech_note.audio.encode_to_mp3", fake_encode), \
@@ -1943,12 +1944,81 @@ class OpenRouterSttTranscriberTests(unittest.TestCase):
         self.assertEqual(captured["data"]["response_format"], "json")
         self.assertEqual(captured["data"]["language"], "en")
         self.assertGreaterEqual(captured["timeout"], 120.0)
+        self.assertIsNone(captured["bitrate_kbps"])
+
+    def test_long_upload_keeps_normal_quality_when_it_actually_fits(self) -> None:
+        response = mock.Mock(ok=True, status_code=200)
+        response.json.return_value = {"text": "transcript"}
+        _text, captured = self._run(self._transcriber(), response, duration=9_801.735)
+        self.assertIsNone(captured["bitrate_kbps"])
+
+    def test_upload_reduces_bitrate_until_actual_file_fits(self) -> None:
+        transcriber = self._transcriber()
+        attempted: list[int | None] = []
+
+        def fake_encode(source, target, *, sample_rate, bitrate_kbps=None) -> None:
+            attempted.append(bitrate_kbps)
+            size = 20_000_000 if bitrate_kbps == 24 else 26_000_000
+            with Path(target).open("wb") as handle:
+                handle.truncate(size)
+
+        response = mock.Mock(ok=True, status_code=200)
+        response.json.return_value = {"text": "transcript"}
+        with mock.patch("requests.post", return_value=response), \
+             mock.patch("speech_note.audio.encode_to_mp3", fake_encode), \
+             mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}, clear=True):
+            text = transcriber.transcribe_file(
+                Path("/tmp/x.wav"), "en", duration_seconds=240.0
+            )
+
+        self.assertEqual(text, "transcript")
+        self.assertEqual(attempted, [None, 32, 24])
+
+    def test_provider_413_retries_at_lower_bitrate(self) -> None:
+        transcriber = self._transcriber()
+        attempted: list[int | None] = []
+
+        def fake_encode(source, target, *, sample_rate, bitrate_kbps=None) -> None:
+            attempted.append(bitrate_kbps)
+            Path(target).write_bytes(b"audio")
+
+        too_large = mock.Mock(ok=False, status_code=413, text="provider limit")
+        success = mock.Mock(ok=True, status_code=200)
+        success.json.return_value = {"text": "transcript"}
+        with mock.patch("requests.post", side_effect=[too_large, success]), \
+             mock.patch("speech_note.audio.encode_to_mp3", fake_encode), \
+             mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}, clear=True):
+            text = transcriber.transcribe_file(Path("/tmp/x.wav"), "en")
+
+        self.assertEqual(text, "transcript")
+        self.assertEqual(attempted, [None, 32])
 
     def test_http_error_raises_so_the_source_fails_not_the_run(self) -> None:
         response = mock.Mock(ok=False, status_code=402, text='{"error":"insufficient balance"}')
         with self.assertRaises(RuntimeError) as caught:
             self._run(self._transcriber(), response)
         self.assertIn("402", str(caught.exception))
+
+    def test_oversized_upload_fails_locally_with_actionable_error(self) -> None:
+        transcriber = self._transcriber()
+
+        def fake_encode(source, target, *, sample_rate, bitrate_kbps=None) -> None:
+            with Path(target).open("wb") as handle:
+                handle.truncate(transcriber.MAX_UPLOAD_BYTES + 1)
+
+        with mock.patch("requests.post") as post, \
+             mock.patch("speech_note.audio.encode_to_mp3", fake_encode), \
+             mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}, clear=True):
+            with self.assertRaises(RuntimeError) as caught:
+                transcriber.transcribe_file(
+                    Path("/tmp/x.wav"), "en", duration_seconds=9_801.0
+                )
+
+        post.assert_not_called()
+        message = str(caught.exception)
+        self.assertIn("25 MB multipart upload limit", message)
+        self.assertIn("Split the recording", message)
+        self.assertIn("local ASR", message)
 
     def test_ok_response_without_transcript_is_an_error_not_silence(self) -> None:
         """Returning "" here would be reported as 'no speech detected', which is wrong."""

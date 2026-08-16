@@ -412,6 +412,10 @@ def report(config: "Config", session: Session) -> None:
             print(f"note: uncertainty annotation: {cleanup.annotation_error}", file=err)
         if "exported_sources" in session.paths:
             print(f"exported sources: {session.paths['exported_sources']}", file=err)
+        if session.errors:
+            print("errors:", file=err)
+            for message in session.errors[-8:]:
+                print(f"- {message}", file=err)
         if "error_diagnostics" in session.paths:
             print(f"error diagnostics: {session.paths['error_diagnostics']}", file=err)
         return
