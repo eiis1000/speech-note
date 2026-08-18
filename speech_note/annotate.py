@@ -58,31 +58,44 @@ if TYPE_CHECKING:
 #     instead of the schema (bare entries, no envelope); an assistant turn is the
 #     strongest format anchor there is. The example is invented, so no real
 #     transcript text ships in any prompt.
-#   * The calibration names the base rate ("a difficult recording usually yields
-#     several entries"). The previous closing line praised the empty list, and most
-#     models under it returned zero notes on recordings with half a dozen genuine
-#     divergences.
+#   * Calibration is semantic, not numerical. Giving the model a target number of
+#     entries makes lexical noise look like evidence on difficult recordings.
 SYSTEM_PROMPT = (
     "You are a transcript auditor. You receive several machine transcripts (sources) of "
-    "one recording, plus a cleaned transcript built from them. Find the places where the "
-    "cleaned transcript says something the sources do not jointly support, and report "
-    "them as JSON data. You never rewrite the transcript.\n\n"
+    "one recording, plus a cleaned transcript built from them. Find places where a source "
+    "offers a coherent, plausible meaning that materially contradicts the meaning chosen "
+    "by the cleaned transcript, and report them as JSON data. You never rewrite the "
+    "transcript.\n\n"
     "All transcripts cover the same recording from beginning to end, in order. A "
     "disagreement is therefore LOCAL: it happens at one moment, and the competing "
     "readings are what different recognizers produced at that same moment. Find the "
     "moment by the words around it. Text from a different part of the recording is never "
     "an alternative, no matter how similar it sounds.\n\n"
-    "Report an entry when the sources give different, mutually incompatible text for "
-    "the same stretch of speech. The audio was hard there and each recognizer guessed; "
-    "the cleaned transcript picked one guess, and the reader deserves the others. "
-    "Garble is a reading too: when one source has a fluent, specific claim and another "
-    "has garbled text at that same moment, the garble is the competing reading — cite "
-    "it as the alternative.\n\n"
+    "Report an entry only when the sources give different, mutually incompatible "
+    "MEANINGS for the same stretch of speech. An alternative must itself be a coherent, "
+    "plausible interpretation of that moment, such as a different name, number, date, "
+    "action, object, or negation. Different words are not an alternative when they "
+    "express the same meaning.\n\n"
+    "Garble, fragments, omissions, repetitions, filler words, false starts, and other "
+    "disfluencies are not interpretations. They contribute nothing and must never be "
+    "reported as alternatives. If one source gives a fluent specific reading while "
+    "another is garbled, silent, or merely less complete, there is no disagreement. If "
+    "two differently worded readings are equivalent after removing filler and "
+    "disfluencies, there is no disagreement.\n\n"
+    "For EACH proposed alternative, first remove filler, repetitions, and false starts, "
+    "then ask: (1) does this source state a complete intelligible claim, and (2) would "
+    "accepting it change what the passage means? If either answer is no, omit it. Never "
+    "paste confusing source words merely because they differ from the cleaned words. A "
+    "valid alternative's readable text must stand on its own as grammatical English. If "
+    "you cannot state its meaning fluently without guessing words absent from the source, "
+    "the source is garbled and the alternative does not exist.\n\n"
     "Do NOT report:\n"
     "- Text present in one source and merely absent from the others. Recognizers differ "
     "in sensitivity; a quiet passage only one heard is normally real.\n"
-    "- Wording, spelling, or punctuation differences.\n"
-    "- Disfluencies the cleanup removed.\n\n"
+    "- Paraphrases, wording, spelling, or punctuation differences that preserve meaning.\n"
+    "- Filler, repetition, false starts, or other disfluencies the cleanup removed.\n"
+    "- Garbled or incomplete source text that does not state a coherent competing "
+    "meaning.\n\n"
     "Answer with exactly this JSON shape:\n"
     '{"uncertain": [{"quote": "...", "before": "...", "after": "...", '
     '"alternatives": [{"text": "...", "source": 1, "verbatim": "..."}]}]}\n'
@@ -94,40 +107,45 @@ SYSTEM_PROMPT = (
     'same words appear more than once; use "" only at the very start or end.\n'
     '- Each alternative cites its source: "verbatim" is the competing text COPIED '
     'EXACTLY from one source at that same moment, "source" is that source\'s number, '
-    'and "text" is a lightly cleaned readable form of it (or "" to display the '
-    "verbatim as is). An alternative you cannot copy out of a source does not exist — "
+    'and "text" is the shortest fluent, filler-free phrase that states ONLY the '
+    'changed meaning, without shared surrounding content. If removing meaning shared '
+    'with the quote leaves no distinct claim, omit the alternative. Use "" only when '
+    'the verbatim is already that minimal fluent phrase. '
+    "An alternative you cannot copy out of a source does not exist — "
     "leave it out. A source that is silent at that moment contributes nothing: give "
     f"fewer alternatives (at most {ANNOTATION_MAX_ALTERNATIVES}) rather than reach "
     "elsewhere in the recording.\n"
-    "- Skip an entry whose alternatives all mean the same thing as the quote.\n"
+    "- Skip an entry unless at least one alternative states a coherent, materially "
+    "different meaning from the quote.\n"
     "- Order entries as they appear in the cleaned transcript.\n\n"
-    "Calibration: a clean, well-heard recording yields an empty list; a difficult "
-    "recording usually yields several entries. Report every place the sources visibly "
-    "diverge — withholding a real divergence misleads the reader exactly as much as "
-    "inventing one.\n\n"
-    "Corroboration means agreement on the words, not a vote count: when two sources "
-    "agree and a third carries incompatible substance at that same moment, that is "
-    "still a divergence — report it, with the odd reading out as the alternative. A "
-    "majority of fallible recognizers is evidence, not proof."
+    "Calibration: report every semantic divergence, but do not aim for any particular "
+    "number of entries. A difficult recording may still yield an empty list when its "
+    "differences are only garble, omissions, filler, or equivalent wording.\n\n"
+    "Corroboration is semantic, not literal: differently worded sources corroborate one "
+    "another when they express the same meaning. When two sources support one meaning "
+    "and a third coherently states an incompatible meaning at that same moment, report "
+    "the incompatible reading. A majority of fallible recognizers is evidence, not proof."
 )
 
-_ASK = "Report the passages the sources do not jointly support."
+_ASK = "Report only coherent, materially incompatible source meanings."
 
 # The worked example (synthetic on purpose). It demonstrates: several entries from one
 # recording, clause-sized quotes, alternatives read off the same moment, a garbled
-# source contributing nothing (recognizer-b trails off where "grilled" is disputed),
+# source contributing nothing (recognizer-b trails off where "grilled" is disputed), a
+# fluent reading corroborated only by omission and garble ("cousin Dana") not reported,
 # and agreed text ("for everyone") not reported.
 EXAMPLE_USER = (
     "Source 1 — recognizer-a:\n"
     "so we drove out to the lake house on friday and my brother grilled uh grilled fish "
-    "for everyone\n\n"
+    "for everyone then my cousin dana called from the airport\n\n"
     "Source 2 — recognizer-b:\n"
     "so we drove to the lake house on sunday and my brother uh for everyone\n\n"
     "Source 3 — recognizer-c:\n"
     "so we drove out to the lake house on friday and my brother um brought fish for "
-    "everyone\n\n"
+    "everyone then my cousin down at the air something\n\n"
     "CLEANED TRANSCRIPT:\n"
-    "We drove out to the lake house on Friday, and my brother grilled fish for everyone.\n\n"
+    "We drove out to the lake house on Friday, and my brother grilled fish for everyone. "
+    "Then my cousin Dana called from the airport.\n\n"
     f"{_ASK}"
 )
 
@@ -167,12 +185,22 @@ def response_schema(max_notes: int = ANNOTATION_MAX_NOTES) -> dict[str, Any]:
                         "type": "array",
                         "minItems": 1,
                         "maxItems": ANNOTATION_MAX_ALTERNATIVES,
+                        "description": (
+                            "Only coherent source readings whose meanings materially "
+                            "contradict the cleaned quote; never garble, filler, repetition, "
+                            "or equivalent wording."
+                        ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "text": {
                                     "type": "string",
                                     "maxLength": ANNOTATION_MAX_QUOTE_CHARS,
+                                    "description": (
+                                        "Shortest standalone grammatical, filler-free phrase "
+                                        "stating only the meaning that differs from the quote; "
+                                        "omit shared semantic content."
+                                    ),
                                 },
                                 "source": {"type": "integer", "minimum": 0},
                                 "verbatim": {

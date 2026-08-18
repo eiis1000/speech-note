@@ -373,16 +373,16 @@ OPENROUTER_PAID_MODELS = [
     *OPENROUTER_FREE_MODELS,
 ]
 
-# The uncertainty-annotation pass gets its own model chain: the auditor sweep
-# (2026-08-09, pinned serving, n=3 per case) found claude-haiku-4.5 and
-# gemma-4-26b-a4b the only models with zero spurious/displaced alternatives across
-# every run, both beating the cleanup lead at the audit — and a separate auditor
-# also means the cleanup model no longer grades its own work. Falls through to the
-# cleanup chain so an outage degrades quality, not availability.
+# The uncertainty-annotation pass gets its own model chain. In the real-input semantic
+# regression (2026-08-18), GPT-5.4 mini emitted no filler/equivalent alternatives and
+# still found every substantive synthetic disagreement. Haiku emitted filler-heavy
+# paraphrases; Gemma 4 26B promoted garbled fragments even with an explicit negative
+# worked example. Fable and Opus also passed the filler/equivalence criterion and are
+# retained as provider-diverse fallbacks. These models require/support low reasoning.
 OPENROUTER_ANNOTATION_MODELS = [
-    "anthropic/claude-haiku-4.5",
-    "google/gemma-4-26b-a4b-it",
-    *OPENROUTER_PAID_MODELS,
+    "openai/gpt-5.4-mini",
+    "anthropic/claude-fable-5",
+    "anthropic/claude-opus-4.6",
 ]
 
 # OpenRouter ASR request shaping (the "openrouter" backend). The whole recording is

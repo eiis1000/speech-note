@@ -523,7 +523,7 @@ def build_organizer(config: "Config") -> Organizer:
             models=tuple(OPENROUTER_ANNOTATION_MODELS),
             timeout=config.organizer.timeout,
             auth_env=config.organizer.auth_env,
-            reasoning_effort="none",
+            reasoning_effort="low",
         )
     annotate = config.organizer.annotate
     supervisor: LocalServerSupervisor | None = None

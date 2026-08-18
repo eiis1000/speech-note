@@ -57,9 +57,15 @@ DEFAULT_MODELS = [
     "nvidia/nemotron-nano-9b-v2:free",
 ]
 
-# gpt-oss rejects reasoning:{effort:"none"} ("Reasoning is mandatory"); give it low
-# effort and room for the hidden tokens instead.
-REASONING_MANDATORY = {"openai/gpt-oss-20b:free"}
+# These endpoints reject reasoning:{effort:"none"}; give them low effort and room for
+# hidden tokens instead. Keep this in sync with live candidate failures so the eval
+# measures their judgement rather than a request-shaping error.
+REASONING_MANDATORY = {
+    "openai/gpt-oss-20b:free",
+    "openai/gpt-5.4-mini",
+    "google/gemini-2.5-pro",
+    "anthropic/claude-fable-5",
+}
 
 
 def load_env_key(api_base: str) -> str:

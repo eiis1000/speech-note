@@ -3,7 +3,7 @@
     "Synthetic case; every failure class the annotation pass has actually shown:",
     "millers - 2-vs-1 split on a proper name (b heard ordinary words; majority is not agreement)",
     "ladder  - direct 1-vs-1 verb split (a: borrowed, b: brought, c garbled there)",
-    "dana    - fluent, specific claim in one source where another attempted the moment and got garble",
+    "dana    - forbidden: one fluent reading, one omission, and one garbled fragment are not competing meanings",
     "tired2  - divergence at the SECOND instance of a repeated phrase (c: 'we were all fine');",
     "          the anchor carries context so a note placed on the first instance scores as a miss",
     "gate    - forbidden: quiet sentence only source a heard, others skip the whole stretch - never flag",
@@ -12,15 +12,14 @@
   "expected": {
     "millers": ["Miller's Point"],
     "ladder": ["she borrowed the ladder"],
-    "dana": ["cousin Dana called from the airport"],
     "tired2": ["exit twice and we were all tired"]
   },
   "optional": [
     "tightened the lines",
-    "set up the chairs",
-    "around four"
+    "set up the chairs"
   ],
   "forbidden": [
+    "cousin Dana called from the airport",
     "locked the back gate",
     "The tent kept leaning"
   ]

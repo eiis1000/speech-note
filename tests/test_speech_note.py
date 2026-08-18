@@ -2316,6 +2316,19 @@ class UncertaintyAnnotationTests(unittest.TestCase):
 
     # --- the response contract -------------------------------------------------
 
+    def test_auditor_contract_rejects_lexical_noise_as_alternatives(self) -> None:
+        """The auditor compares meanings, not raw ASR token streams."""
+        from speech_note import annotate
+
+        prompt = annotate.SYSTEM_PROMPT.lower()
+        self.assertIn("mutually incompatible meanings", prompt)
+        self.assertIn("different words are not an alternative", prompt)
+        self.assertIn("they contribute nothing", prompt)
+        self.assertIn("corroboration is semantic, not literal", prompt)
+        self.assertNotIn("garble is a reading too", prompt)
+        self.assertNotIn("agreement on the words", prompt)
+        self.assertNotIn("visibly diverge", prompt)
+
     def test_response_schema_bounds_the_reply(self) -> None:
         """The schema is a correctness measure, not decoration: it is what makes a
         truncated reply impossible, so every string and array must be bounded — and
@@ -2399,6 +2412,15 @@ class UncertaintyAnnotationTests(unittest.TestCase):
                 organizer.annotation_client.configured_models,
                 list(OPENROUTER_ANNOTATION_MODELS),
             )
+            self.assertNotIn(
+                "google/gemma-4-26b-a4b-it",
+                organizer.annotation_client.configured_models,
+            )
+            self.assertEqual(
+                organizer.annotation_client.configured_models[0],
+                "openai/gpt-5.4-mini",
+            )
+            self.assertEqual(organizer.annotation_client.reasoning_effort, "low")
         finally:
             organizer.close()
 
@@ -2422,6 +2444,9 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         self.assertEqual(messages[1]["content"], EXAMPLE_USER)
         self.assertEqual(messages[2]["content"], EXAMPLE_ASSISTANT)
         json.loads(EXAMPLE_ASSISTANT)  # the demonstrated reply must itself be valid JSON
+        self.assertIn("cousin dana called", EXAMPLE_USER.lower())
+        self.assertIn("cousin down at the air something", EXAMPLE_USER.lower())
+        self.assertNotIn("dana", EXAMPLE_ASSISTANT.lower())  # garble is not an alternative
         self.assertIn("she liked the grid", messages[3]["content"])  # real data, last turn
 
     def test_parses_well_formed_response(self) -> None:
