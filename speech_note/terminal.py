@@ -260,9 +260,36 @@ class StatusDisplay:
         return f"{resolved} {self._phase}  " + ", ".join(items) + f"  ({phase_elapsed})"
 
 
-# One process-wide display owns the stderr status line, so concurrent tasks never
-# collide on it. Call sites use the context managers below rather than touching it.
+# One process-wide display owns the stderr status line. Concurrent work within one
+# pipeline shares it; independent batch pipelines suppress it and print milestones.
 _display = StatusDisplay()
+_status_context = threading.local()
+
+
+class _SilentStatusDisplay:
+    """No-op phase sink used by concurrent batch workers.
+
+    The process-wide live status line cannot represent several unrelated pipelines at
+    once. The batch runner prints one start/completion milestone per item instead.
+    """
+
+    def mark_failed(self) -> None:
+        pass
+
+    def start_task(self, name: str) -> None:
+        pass
+
+    def finish_task(self, name: str, *, error: bool = False) -> None:
+        pass
+
+    def replace_task(self, name: str) -> None:
+        pass
+
+    def note(self, message: str) -> None:
+        print(message, file=sys.stderr, flush=True)
+
+
+_silent_display = _SilentStatusDisplay()
 
 
 def status_display() -> StatusDisplay:
@@ -270,10 +297,24 @@ def status_display() -> StatusDisplay:
 
 
 @contextlib.contextmanager
-def status_phase(label: str) -> Generator[StatusDisplay]:
+def suppress_status_phases() -> Generator[None]:
+    """Suppress the shared live phase renderer in this worker thread only."""
+    previous = getattr(_status_context, "suppressed", False)
+    _status_context.suppressed = True
+    try:
+        yield
+    finally:
+        _status_context.suppressed = previous
+
+
+@contextlib.contextmanager
+def status_phase(label: str) -> Generator[StatusDisplay | _SilentStatusDisplay]:
     """Run a phase: a labelled stretch of work that owns the status line. Tasks
     opened inside it (start_task/finish_task on the yielded display) show as
     concurrent entries on that one line."""
+    if getattr(_status_context, "suppressed", False):
+        yield _silent_display
+        return
     _display.begin_phase(label)
     try:
         yield _display

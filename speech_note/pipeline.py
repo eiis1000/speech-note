@@ -7,6 +7,7 @@ computes.
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import dataclasses
 import re
@@ -37,6 +38,7 @@ from .terminal import (
     read_single_choice,
     short_label,
     status_phase,
+    suppress_status_phases,
 )
 from .transcribers import WhisperCppTranscriber
 
@@ -614,7 +616,13 @@ def run_archive_pipeline(config: "Config") -> Session:
         return run_file_pipeline(run_config)
 
 
-# --- directory batch (undocumented) ---
+# --- independent input batches ---
+
+
+@dataclasses.dataclass(frozen=True)
+class BatchEntry:
+    path: Path
+    output_dir: Path
 
 
 def discover_directory_inputs(directory: Path) -> list[Path]:
@@ -633,20 +641,49 @@ def discover_directory_inputs(directory: Path) -> list[Path]:
     )
 
 
-def _batch_item_config(config: "Config", entry: Path) -> "Config":
+def discover_batch_inputs(inputs: tuple[Path, ...]) -> list[BatchEntry]:
+    """Flatten explicit files and directories into one de-duplicated input snapshot."""
+    entries: list[BatchEntry] = []
+    seen: set[Path] = set()
+    for value in inputs:
+        candidates = discover_directory_inputs(value) if value.is_dir() else [value]
+        for path in candidates:
+            key = path.resolve()
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(BatchEntry(path=path, output_dir=path.parent))
+    return entries
+
+
+def _batch_item_config(
+    config: "Config",
+    entry: Path,
+    *,
+    output_dir: Path | None = None,
+    index: int = 1,
+) -> "Config":
     """A per-file config for one directory entry: process just `entry`, and write
     its auto-named output into the batch directory instead of the cwd."""
-    directory = config.input_dir
-    assert directory is not None
+    directory = output_dir or config.input_dir or entry.parent
+    item_slug = f"{index:04d}-{sanitize_filename_stem(entry.stem)}"
+    item_artifacts = config.artifacts_dir / item_slug
+    item_export = (
+        config.export_sources / item_slug if config.export_sources is not None else None
+    )
     item = dataclasses.replace(
         config,
         input_dir=None,
+        input_batch=(),
         input_file=None,
         input_archive=None,
         output=None,
+        export_sources=item_export,
+        artifacts_dir=item_artifacts,
+        archive_dir=item_artifacts / "logs",
         full_auto_output_dir=directory,
     )
-    if entry.suffix.lower() == ".zip":
+    if entry.suffix.lower() == ".zip" or (entry.exists() and zipfile.is_zipfile(entry)):
         # Archives self-name post-extraction (with_archive_contents), honouring
         # full_auto_output_dir; leave output unset.
         return dataclasses.replace(item, input_archive=entry)
@@ -656,37 +693,73 @@ def _batch_item_config(config: "Config", entry: Path) -> "Config":
     return dataclasses.replace(item, output=full_auto_output_path(item, directory))
 
 
-def run_directory_pipeline(config: "Config") -> Session:
-    """Batch mode: process every top-level audio/zip in config.input_dir as its own
-    independent full-auto run, writing each clean transcript into that directory. One
-    file's failure is reported and skipped, never aborting the rest."""
-    assert config.input_dir is not None
-    directory = config.input_dir
-    entries = discover_directory_inputs(directory)
+def _run_batch(config: "Config", entries: list[BatchEntry]) -> Session:
+    """Run an already-discovered batch, concurrently when configured."""
     if not entries:
-        raise SystemExit(f"no audio or archive files to process in {directory}")
-    print(f"batch: {len(entries)} file(s) in {directory}", file=sys.stderr)
-    failures = 0
-    for index, entry in enumerate(entries, start=1):
-        print(f"\n[{index}/{len(entries)}] {entry.name}", file=sys.stderr)
-        item = _batch_item_config(config, entry)
+        raise SystemExit("no audio or archive files to process")
+    mode = "parallel" if config.parallel and len(entries) > 1 else "sequential"
+    print(f"batch: {len(entries)} file(s), {mode}", file=sys.stderr)
+
+    def process(numbered: tuple[int, BatchEntry]) -> bool:
+        index, batch_entry = numbered
+        entry = batch_entry.path
+        started = time.monotonic()
+        print(f"[{index}/{len(entries)}] starting {entry.name}", file=sys.stderr)
+        item = _batch_item_config(
+            config,
+            entry,
+            output_dir=batch_entry.output_dir,
+            index=index,
+        )
         try:
-            if item.input_archive is not None:
-                session = run_archive_pipeline(item)
-            else:
-                session = run_file_pipeline(item)
-            failed = session.run_failed
+            status_context = (
+                suppress_status_phases()
+                if mode == "parallel"
+                else contextlib.nullcontext()
+            )
+            with status_context:
+                if item.input_archive is not None:
+                    session = run_archive_pipeline(item)
+                else:
+                    session = run_file_pipeline(item)
+                failed = session.run_failed
         except SystemExit as exc:
             print(f"skipped {entry.name}: {exc}", file=sys.stderr)
             failed = True
         except Exception as exc:  # noqa: BLE001 — one file's crash must not stop the batch
             print(f"failed {entry.name}: {exc}", file=sys.stderr)
             failed = True
-        failures += failed
+        mark = "failed" if failed else "done"
+        elapsed = time.monotonic() - started
+        print(f"[{index}/{len(entries)}] {mark} {entry.name} ({elapsed:.1f}s)", file=sys.stderr)
+        return failed
+
+    numbered = list(enumerate(entries, start=1))
+    if mode == "parallel":
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(entries)) as executor:
+            failures = sum(executor.map(process, numbered))
+    else:
+        failures = sum(process(item) for item in numbered)
     print(f"\nbatch done: {len(entries) - failures} ok, {failures} failed", file=sys.stderr)
     batch = Session(config)
     batch.run_failed = failures > 0
     return batch
+
+
+def run_directory_pipeline(config: "Config") -> Session:
+    """Process every supported top-level file in one directory as an independent run."""
+    assert config.input_dir is not None
+    entries = [
+        BatchEntry(path=path, output_dir=config.input_dir)
+        for path in discover_directory_inputs(config.input_dir)
+    ]
+    return _run_batch(config, entries)
+
+
+def run_input_batch_pipeline(config: "Config") -> Session:
+    """Process multiple explicit files/directories as independent full-auto runs."""
+    assert config.input_batch
+    return _run_batch(config, discover_batch_inputs(config.input_batch))
 
 
 def run_transcript_pipeline(config: "Config") -> Session:

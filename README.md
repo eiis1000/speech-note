@@ -148,6 +148,22 @@ succeeded (failed, empty, or truncated cleanup writes nothing and the process
 exits nonzero), keeps the usual artifacts in a temporary directory, and on any
 error drops a matching `<input>-clean-diagnostics.json` next to the output.
 
+Pass several inputs after one `--input` (or repeat the flag), or pass a directory
+to process each top-level audio/zip as an independent full-auto job. Batch outputs
+land beside their inputs; subdirectories and previous `.txt`/`.json` outputs are
+not ingested:
+
+```sh
+speech-note -fPi first.zip second.m4a
+speech-note -fPi /path/to/inbox
+speech-note -fFi /path/to/inbox --parallel
+```
+
+`-P` includes `--parallel` in its preset. Every other mode is sequential by
+default—even if its current backends happen to be remote—and must opt in with
+`--parallel`. `--no-parallel` overrides `-P`. Failures remain per-item: the rest
+of the batch completes, and the command exits nonzero if any item failed.
+
 Add external transcripts (Google Recorder etc.) as extra sources for cleanup —
 `.srt`/`.vtt` files are parsed down to their text, `.txt` and `.json` are
 passed through:
@@ -314,13 +330,12 @@ transcript through.
 |---|---|---|
 | `-O` / `--offline` | local GGUF | nothing leaves the machine |
 | `-F` / `--online-free` | OpenRouter, free models | long provider-diverse fallback chain (free tiers flap); free endpoints may log/train on inputs |
-| `-P` / `--online-paid` | OpenRouter, paid models | deepseek-v3.2 → gemini-3-flash, then falls back to the free chain; paid endpoints aren't logged; needs `OPENROUTER_API_KEY`. Also swaps ASR to the hosted recognizer trio (see [ASR](#asr)) |
+| `-P` / `--online-paid` | OpenRouter, paid models | deepseek-v3.2 → gemini-3-flash, then falls back to the free chain; paid endpoints aren't logged; needs `OPENROUTER_API_KEY`. Also swaps ASR to the hosted recognizer trio and enables parallel batch processing by default (see [ASR](#asr)) |
 
 ASR stays local (whisper + sherpa) under `--offline` and `--online-free`;
 `--online-paid` runs it hosted. On OpenRouter runs the uncertainty audit uses
-its own model chain (claude-haiku-4.5 → gemma-4-26b-a4b, then the cleanup
-chain) — the auditor sweep found the best cleaners are not the best judges,
-and a separate auditor means the cleanup model no longer grades its own work.
+its own semantic-judge chain (GPT-5.4 mini → Claude Fable 5 → Claude Opus 4.6),
+so the cleanup model does not grade its own work.
 When a request carries a response schema, the client also sets
 `provider.require_parameters` so OpenRouter never routes it to a provider that
 would silently ignore the schema.

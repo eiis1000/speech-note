@@ -14,6 +14,7 @@ import shutil
 import re
 import struct
 import tempfile
+import threading
 import types
 import unittest
 import wave
@@ -40,11 +41,13 @@ from speech_note.pipeline import (
     _batch_item_config,
     cleanup_sources,
     discover_archive_inputs,
+    discover_batch_inputs,
     discover_directory_inputs,
     extract_subtitle_text,
     extract_zip_safely,
     review_panels,
     run_dry_text_pipeline,
+    run_input_batch_pipeline,
     run_transcript_pipeline,
     start_organizer_prewarm,
 )
@@ -425,6 +428,22 @@ class ConfigResolutionTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parse_args(["--offline", "--online-paid"])
 
+    def test_online_paid_preset_includes_parallel(self) -> None:
+        inputs = ("-i", "a.wav", "b.wav", "--organizer-mode", "llama")
+        self.assertTrue(make_config("--online-paid", *inputs).parallel)
+        self.assertFalse(make_config("--online-free", *inputs).parallel)
+        self.assertFalse(make_config("--offline", *inputs).parallel)
+        self.assertFalse(make_config("--online-free", "--no-asr", *inputs).parallel)
+        self.assertFalse(
+            make_config("--online-free", "--asr", "openrouter-stt", *inputs).parallel
+        )
+        self.assertFalse(make_config("--organizer-provider", "openrouter", *inputs).parallel)
+
+    def test_parallel_flags_override_automatic_choice(self) -> None:
+        inputs = ("-i", "a.wav", "b.wav", "--organizer-mode", "llama")
+        self.assertTrue(make_config("--offline", "--parallel", *inputs).parallel)
+        self.assertFalse(make_config("--online-paid", "--no-parallel", *inputs).parallel)
+
     def test_load_user_env_sets_default_without_override(self) -> None:
         from speech_note import config as cfg
         with tempfile.TemporaryDirectory() as d:
@@ -518,6 +537,11 @@ class DirectoryBatchTests(unittest.TestCase):
             validate(make_config("--input", str(tmp)))
         validate(make_config("--full-auto", "--input", str(tmp)))  # ok
 
+    def test_batch_rejects_single_output_path(self) -> None:
+        tmp = self._dir()
+        with self.assertRaisesRegex(SystemExit, "cannot be used with a batch"):
+            validate(make_config("-f", "-i", str(tmp), "-o", "one.txt"))
+
     def test_batch_item_config_routes_and_names_into_dir(self) -> None:
         tmp = self._dir()
         base = make_config("--full-auto", "--input", str(tmp))
@@ -537,6 +561,40 @@ class DirectoryBatchTests(unittest.TestCase):
         assert wav_item.output is not None
         self.assertEqual(wav_item.output.parent, tmp)  # named into the directory
         self.assertEqual(wav_item.output.name, "a-clean.txt")
+
+    def test_multiple_inputs_and_directories_are_flattened_once(self) -> None:
+        first = self._dir()
+        second = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, second, ignore_errors=True)
+        direct = second / "direct.m4a"
+        direct.write_bytes(b"")
+        entries = discover_batch_inputs((first, direct, first / "a.wav"))
+        self.assertEqual(
+            [entry.path.name for entry in entries],
+            ["a.wav", "b.zip", "direct.m4a"],
+        )
+        self.assertEqual(entries[0].output_dir, first)
+        self.assertEqual(entries[-1].output_dir, second)
+
+    def test_parallel_batch_really_overlaps_items(self) -> None:
+        directory = self._dir()
+        config = make_config(
+            "--full-auto",
+            "--parallel",
+            "--input",
+            str(directory / "a.wav"),
+            str(directory / "other.wav"),
+        )
+        barrier = threading.Barrier(2)
+
+        def fake_run(item: Config) -> Session:
+            barrier.wait(timeout=2)
+            return Session(item)
+
+        with mock.patch("speech_note.pipeline.run_file_pipeline", side_effect=fake_run):
+            with redirect_stderr(io.StringIO()):
+                result = run_input_batch_pipeline(config)
+        self.assertFalse(result.run_failed)
 
 
 class AsrSourceTests(unittest.TestCase):
@@ -2132,6 +2190,16 @@ class UnifiedInputTests(unittest.TestCase):
         self.assertIsNone(args.input_file)
         self.assertIsNone(args.input_archive)
 
+    def test_multiple_input_values_route_to_batch(self) -> None:
+        config = make_config("--full-auto", "-i", "one.wav", "two.zip")
+        self.assertEqual(config.input_batch, (Path("one.wav"), Path("two.zip")))
+        self.assertIsNone(config.input_file)
+        self.assertIsNone(config.input_archive)
+
+    def test_input_flag_can_be_repeated(self) -> None:
+        config = make_config("--full-auto", "-i", "one.wav", "-i", "two.wav")
+        self.assertEqual(config.input_batch, (Path("one.wav"), Path("two.wav")))
+
 
 class NoAsrTranscriptTests(unittest.TestCase):
     """--no-asr replaces the old primary/secondary-transcript flags: all transcripts
@@ -2251,7 +2319,7 @@ class ShortOptionTests(unittest.TestCase):
         args = parse_args(["-f", "-o", "out.txt", "-i", "rec.m4a", "-l", "es", "-a", "sherpa"])
         self.assertTrue(args.full_auto)
         self.assertEqual(args.output, Path("out.txt"))
-        self.assertEqual(args.input, Path("rec.m4a"))
+        self.assertEqual(args.input, [Path("rec.m4a")])
         self.assertEqual(args.language, "es")
         self.assertEqual(args.asr, ["sherpa"])
 

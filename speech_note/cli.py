@@ -62,9 +62,10 @@ class Config:
     # inputs
     input_file: Path | None
     input_archive: Path | None
-    # Undocumented batch mode: a directory whose top-level audio/zip files are each
-    # processed as an independent full-auto run (see run_directory_pipeline).
+    # Batch modes: one directory, or multiple explicit files/directories. Directory
+    # members are snapshotted before any output is written.
     input_dir: Path | None
+    input_batch: tuple[Path, ...]
     replay_input_file: Path | None
     dry_run_text: str | None
     extra_transcripts: tuple[Path, ...]
@@ -75,6 +76,8 @@ class Config:
     artifacts_dir: Path
     archive_dir: Path
     full_auto: bool
+    # Concurrent independent batch items. Has no effect on a single input.
+    parallel: bool
     # Directory the auto-named full-auto output is written into (default: cwd). Set
     # per item by the batch pipeline so outputs land in the input directory.
     full_auto_output_dir: Path | None
@@ -141,11 +144,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-i", "--input",
         dest="input",
         type=Path,
+        nargs="+",
+        action="extend",
         default=None,
         help=(
-            "Audio file (m4a/mp3/wav/...) OR an archive zip (recording + transcript "
-            "file(s)) to process. The kind is detected from the file, so one flag covers "
-            "both."
+            "One or more audio files, archive zips, or directories to process. Directories "
+            "contribute their top-level audio/zip files. Multiple inputs and directories "
+            "require --full-auto. May be repeated."
         ),
     )
     parser.add_argument(
@@ -209,8 +214,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Non-interactive: write only an auto-named cleaned transcript to the current "
-            "directory (plus a diagnostics file on errors); keep other artifacts in a "
-            "temporary directory."
+            "directory, or beside each input in batch mode (plus a diagnostics file on "
+            "errors); keep other artifacts in a temporary directory."
+        ),
+    )
+    parser.add_argument(
+        "--parallel",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Process independent batch inputs concurrently. Included by default in the "
+            "--online-paid preset; every other mode is sequential unless this flag is "
+            "passed explicitly. --no-parallel overrides the paid preset."
         ),
     )
     # ASR collection
@@ -267,8 +282,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-P", "--online-paid", dest="connectivity", action="store_const", const="online-paid",
         help="OpenRouter cleanup with paid models (deepseek-v3.2 lead, not logged), AND "
              "run ASR remotely: hosted Whisper + Parakeet + MAI (larger checkpoints than "
-             "fit locally, and a long recording transcribes in seconds). Needs "
-             "OPENROUTER_API_KEY.",
+             "fit locally, and a long recording transcribes in seconds). Batch inputs "
+             "run in parallel by default. Needs OPENROUTER_API_KEY.",
     )
     parser.set_defaults(connectivity=None)
     # organizer
@@ -398,22 +413,24 @@ def _looks_like_archive(path: Path) -> bool:
 
 
 def fold_unified_input(args: argparse.Namespace) -> None:
-    """Split the unified -i/--input into the internal input_file / input_archive /
-    input_dir by detected type. These are an implementation detail of the pipeline
-    dispatch, not CLI flags, so they are derived here rather than parsed. A directory
-    is the undocumented batch mode (each file inside processed independently)."""
-    chosen = getattr(args, "input", None)
+    """Split unified -i/--input values into the internal single/batch dispatch fields."""
+    chosen = tuple(getattr(args, "input", None) or ())
     args.input_file = None
     args.input_archive = None
     args.input_dir = None
-    if chosen is None:
+    args.input_batch = ()
+    if not chosen:
         return
-    if chosen.is_dir():
-        args.input_dir = chosen
-    elif _looks_like_archive(chosen):
-        args.input_archive = chosen
+    if len(chosen) > 1:
+        args.input_batch = chosen
+        return
+    only = chosen[0]
+    if only.is_dir():
+        args.input_dir = only
+    elif _looks_like_archive(only):
+        args.input_archive = only
     else:
-        args.input_file = chosen
+        args.input_file = only
 
 
 def _organizer_model_list(explicit: str | None, default: list[str]) -> tuple[str, ...]:
@@ -469,6 +486,10 @@ def resolve_config(args: argparse.Namespace) -> Config:
             args.organizer_max_output_tokens or defaults.DEFAULT_ORGANIZER_MAX_OUTPUT_TOKENS
         )
 
+    # Parallel execution is a preset choice, not inferred from current backends: -P
+    # includes it, while every other mode requires an explicit --parallel.
+    parallel = args.parallel if args.parallel is not None else connectivity == "online-paid"
+
     artifacts_dir: Path = args.artifacts_dir
     output: Path | None = args.output
     if args.full_auto:
@@ -489,6 +510,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         input_file=args.input_file,
         input_archive=args.input_archive,
         input_dir=args.input_dir,
+        input_batch=tuple(args.input_batch),
         replay_input_file=args.replay_input_file,
         dry_run_text=args.dry_run_text,
         extra_transcripts=tuple(args.extra_transcript),
@@ -498,6 +520,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         artifacts_dir=artifacts_dir,
         archive_dir=artifacts_dir / "logs",
         full_auto=args.full_auto,
+        parallel=parallel,
         full_auto_output_dir=None,
         asr_sources=asr_sources,
         asr_compute_type=args.asr_compute_type,
@@ -554,7 +577,8 @@ def resolve_config(args: argparse.Namespace) -> Config:
         config.full_auto
         and config.output is None
         and config.input_archive is None
-        and config.input_dir is None  # batch names each item into the directory itself
+        and config.input_dir is None
+        and not config.input_batch  # batches name each item beside its input
     ):
         from .naming import full_auto_output_path
 
@@ -569,6 +593,7 @@ def validate(config: Config) -> None:
         config.input_file,
         config.input_archive,
         config.input_dir,
+        config.input_batch or None,
         config.replay_input_file,
         config.dry_run_text,
     ]
@@ -576,13 +601,15 @@ def validate(config: Config) -> None:
         raise SystemExit(
             "--input, --replay-input-file and --input-text are mutually exclusive"
         )
-    if config.input_dir is not None and not config.full_auto:
+    if (config.input_dir is not None or config.input_batch) and not config.full_auto:
         # Batch mode runs each file non-interactively; without --full-auto every
         # file would stop for a per-file copy prompt and clobber the same
         # raw.latest/clean.latest artifacts in turn.
         raise SystemExit(
-            "a directory input batch-processes each file and requires --full-auto (-f)"
+            "multiple inputs or a directory require --full-auto (-f)"
         )
+    if (config.input_dir is not None or config.input_batch) and config.output is not None:
+        raise SystemExit("--output names one file and cannot be used with a batch")
     if (
         config.no_asr
         and config.input_file is not None
@@ -666,7 +693,8 @@ def main(argv: list[str] | None = None) -> int:
     warn_on_unsupported_gpu()
 
     capture_mode = (
-        all(getattr(args, name) is None for name in ("input", "replay_input_file", "dry_run_text"))
+        not args.input
+        and all(getattr(args, name) is None for name in ("replay_input_file", "dry_run_text"))
         and not args.extra_transcript  # transcript-only run, not a mic capture
     )
     if capture_mode and args.input_device is None and not args.full_auto:
@@ -677,7 +705,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import pipeline
 
-    if config.input_dir is not None:
+    if config.input_batch:
+        session = pipeline.run_input_batch_pipeline(config)
+    elif config.input_dir is not None:
         session = pipeline.run_directory_pipeline(config)
     elif config.input_archive is not None:
         session = pipeline.run_archive_pipeline(config)
