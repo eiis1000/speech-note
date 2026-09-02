@@ -136,20 +136,23 @@ def ask(
         # high-precision serving so repeats compare the same thing.
         body["provider"] = {"quantizations": ["bf16", "fp16", "fp8"]}
     unpinned = False
-    for _attempt in range(2):
-        response = requests.post(
+
+    def post() -> requests.Response:
+        return requests.post(
             url,
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             json=body,
             timeout=600,
         )
-        if response.status_code == 404 and "quantization" in response.text and "provider" in body:
-            # Closed-weight models expose no quantization metadata; retry unpinned
-            # and say so in the provider column.
-            body.pop("provider")
-            unpinned = True
-            continue
-        break
+
+    response = post()
+    if response.status_code == 404 and "quantization" in response.text and "provider" in body:
+        # Closed-weight models expose no quantization metadata, so the precision
+        # filter excludes every endpoint. Retry unpinned and say so in the provider
+        # column, so mixed-precision serving stays visible.
+        body.pop("provider")
+        unpinned = True
+        response = post()
     if not response.ok:
         return "", f"HTTP {response.status_code} {' '.join(response.text.split())[:90]}", ""
     payload = response.json()

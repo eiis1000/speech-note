@@ -49,8 +49,10 @@ if TYPE_CHECKING:
     from .model import Transcript
 
 
-# Prompt architecture (settled by a bake-off across seven hosted models, 2026-08-04;
-# the run scripts and scores are in AUDIT.md's follow-up):
+# Prompt architecture (settled by a bake-off across seven hosted models, 2026-08-04).
+# The bake-off is reproducible: tools/annotation_eval.py imports everything below and
+# scores it against the labeled cases in evals/, so a prompt change gets a number
+# before it ships. Three findings, all of which cost recall when ignored:
 #   * The whole contract lives HERE, in the system prompt; the user turns carry data
 #     only. Small models keep a contract better when it is not interleaved with data.
 #   * A synthetic worked example rides along as a real user/assistant message pair.
@@ -169,57 +171,52 @@ EXAMPLE_ASSISTANT = (
 def response_schema(max_notes: int = ANNOTATION_MAX_NOTES) -> dict[str, Any]:
     """The reply schema, with the note cap scaled to the transcript being audited
     (an hour of unclear audio legitimately carries more divergences than a memo)."""
-    return {
-    "type": "object",
-    "properties": {
-        "uncertain": {
-            "type": "array",
-            "maxItems": max_notes,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "quote": {"type": "string", "maxLength": ANNOTATION_MAX_QUOTE_CHARS},
-                    "before": {"type": "string", "maxLength": ANNOTATION_MAX_CONTEXT_CHARS},
-                    "after": {"type": "string", "maxLength": ANNOTATION_MAX_CONTEXT_CHARS},
-                    "alternatives": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": ANNOTATION_MAX_ALTERNATIVES,
-                        "description": (
-                            "Only coherent source readings whose meanings materially "
-                            "contradict the cleaned quote; never garble, filler, repetition, "
-                            "or equivalent wording."
-                        ),
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "text": {
-                                    "type": "string",
-                                    "maxLength": ANNOTATION_MAX_QUOTE_CHARS,
-                                    "description": (
-                                        "Shortest standalone grammatical, filler-free phrase "
-                                        "stating only the meaning that differs from the quote; "
-                                        "omit shared semantic content."
-                                    ),
-                                },
-                                "source": {"type": "integer", "minimum": 0},
-                                "verbatim": {
-                                    "type": "string",
-                                    "maxLength": ANNOTATION_MAX_VERBATIM_CHARS,
-                                },
-                            },
-                            "required": ["text", "source", "verbatim"],
-                            "additionalProperties": False,
-                        },
-                    },
-                },
-                "required": ["quote", "before", "after", "alternatives"],
-                "additionalProperties": False,
+    citation = {
+        "type": "object",
+        "properties": {
+            "text": {
+                "type": "string",
+                "maxLength": ANNOTATION_MAX_QUOTE_CHARS,
+                "description": (
+                    "Shortest standalone grammatical, filler-free phrase stating only "
+                    "the meaning that differs from the quote; omit shared semantic "
+                    "content."
+                ),
             },
-        }
-    },
-    "required": ["uncertain"],
-    "additionalProperties": False,
+            "source": {"type": "integer", "minimum": 0},
+            "verbatim": {"type": "string", "maxLength": ANNOTATION_MAX_VERBATIM_CHARS},
+        },
+        "required": ["text", "source", "verbatim"],
+        "additionalProperties": False,
+    }
+    entry = {
+        "type": "object",
+        "properties": {
+            "quote": {"type": "string", "maxLength": ANNOTATION_MAX_QUOTE_CHARS},
+            "before": {"type": "string", "maxLength": ANNOTATION_MAX_CONTEXT_CHARS},
+            "after": {"type": "string", "maxLength": ANNOTATION_MAX_CONTEXT_CHARS},
+            "alternatives": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": ANNOTATION_MAX_ALTERNATIVES,
+                "description": (
+                    "Only coherent source readings whose meanings materially "
+                    "contradict the cleaned quote; never garble, filler, repetition, "
+                    "or equivalent wording."
+                ),
+                "items": citation,
+            },
+        },
+        "required": ["quote", "before", "after", "alternatives"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "uncertain": {"type": "array", "maxItems": max_notes, "items": entry}
+        },
+        "required": ["uncertain"],
+        "additionalProperties": False,
     }
 
 

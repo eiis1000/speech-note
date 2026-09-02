@@ -132,7 +132,6 @@ class StatusDisplay:
         self._tasks: dict[str, StatusTask] = {}
         self._last_width = 0
         self._frame = 0
-        self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def begin_phase(self, label: str) -> None:
@@ -208,16 +207,17 @@ class StatusDisplay:
                 sys.stderr.write(message + "\n")
             sys.stderr.flush()
 
-    def close(self) -> None:
-        self._stop.set()
-
     def _ensure_thread(self) -> None:
         if self._thread is None:
             self._thread = threading.Thread(target=self._worker, daemon=True)
             self._thread.start()
 
     def _worker(self) -> None:
-        while not self._stop.wait(self._tick):
+        # One daemon repainter per process, started on the first TTY phase and ended
+        # by process exit. It idles between phases (there is nothing to paint) rather
+        # than being torn down and restarted for each one.
+        while True:
+            time.sleep(self._tick)
             with self._lock:
                 if self._phase is not None and self._is_tty:
                     self._frame += 1  # advance the spinner (time-based, not per-event)

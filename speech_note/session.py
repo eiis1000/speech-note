@@ -50,7 +50,6 @@ class Session:
         self.recording_sample_rate = config.sample_rate
         self.input_duration_seconds: float | None = None
         self.selected_input_device: dict[str, object] | None = None
-        self.available_input_devices: list[dict[str, object]] = []
         self.stream_status_counts: dict[str, int] = {}
         self.audio_queue_high_watermark = 0
         self.audio_queue_full_count = 0
@@ -245,10 +244,11 @@ class ArtifactStore:
         config = session.config
         cleanup = session.cleanup
         return {
-            # schema 5: annotation records structured notes, rejected-citation count,
-            # and its own timing (schema 4 added the annotation fields; 3 and earlier
-            # predate the annotation pass).
-            "schema": 5,
+            # schema 6: input.available_input_devices is gone — nothing ever wrote it,
+            # so every run reported an empty list (5 added structured annotation notes,
+            # the rejected-citation count and the pass timing; 4 added the annotation
+            # fields; 3 and earlier predate the annotation pass).
+            "schema": 6,
             "version": __version__,
             "started_at": session.started_at.isoformat(),
             "duration_seconds": round(session.elapsed(), 3),
@@ -256,7 +256,6 @@ class ArtifactStore:
             "input": {
                 "duration_seconds": session.input_duration_seconds,
                 "selected_input_device": session.selected_input_device,
-                "available_input_devices": session.available_input_devices,
                 "recording_sample_rate": session.recording_sample_rate,
             },
             "transcripts": [

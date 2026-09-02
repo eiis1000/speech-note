@@ -480,10 +480,11 @@ def _tail_snippet(text: str, words: int = 6) -> str:
 
 
 def _dedupe_sources(sources: list[Transcript]) -> list[Transcript]:
-    """Drop sources whose text duplicates an earlier one (provenance is kept
+    """Drop sources whose text duplicates an earlier one.
 
-    in the session transcript list; the prompt doesn't need the same text
-    twice)."""
+    Provenance is kept in the session transcript list; the prompt does not need the
+    same text twice.
+    """
     seen: set[str] = set()
     unique: list[Transcript] = []
     for source in sources:

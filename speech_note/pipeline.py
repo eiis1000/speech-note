@@ -27,7 +27,7 @@ from .config import (
     ARCHIVE_TRANSCRIPT_EXTENSIONS,
     short_model_name,
 )
-from .model import Transcript
+from .model import CleanupOutcome, Transcript
 from .naming import full_auto_output_path, unique_directory_path, unique_output_path
 from .textproc import sanitize_filename_stem
 from .organizer import Organizer, build_organizer, cleanup_messages, cleanup_request_plan
@@ -45,7 +45,6 @@ from .transcribers import WhisperCppTranscriber
 if TYPE_CHECKING:
     from .cli import Config
     from .config import AsrSource
-    from .model import CleanupOutcome
     from .transcribers import Transcriber
 
 
@@ -220,9 +219,7 @@ def organizer_cleanup_skipped(
     error: str,
     estimated_prompt_tokens: int,
     requested_output_tokens: int,
-) -> "CleanupOutcome":
-    from .model import CleanupOutcome
-
+) -> CleanupOutcome:
     return CleanupOutcome(
         method="skipped-too-large",
         error=error,
@@ -390,6 +387,39 @@ def choose_and_copy(session: Session, panels: list[tuple[str, str]]) -> None:
     print(f"clipboard: {session.clipboard_status}", file=sys.stderr)
 
 
+def print_cleanup_notes(session: Session, *, full_auto: bool) -> None:
+    """The cleanup/audit lines both report modes owe the reader.
+
+    A flagged-but-kept cleanup (short, or cut off mid-sentence) is still written, so
+    the warning has to be printed or the file looks clean. A skipped audit likewise:
+    silence would be indistinguishable from a clean bill of health. Only the audit
+    skip differs between modes — the interactive path already prints it in the skips
+    tail, which full-auto returns before reaching.
+    """
+    cleanup = session.cleanup
+    if cleanup is None:
+        return
+    err = sys.stderr
+    if cleanup.warning:
+        print(f"warning: {cleanup.warning}", file=err)
+    if cleanup.annotation_count:
+        print(
+            f"marked {cleanup.annotation_count} uncertain passage(s) where the ASR "
+            "sources disagreed",
+            file=err,
+        )
+    if full_auto and cleanup.annotation_error:
+        print(f"note: uncertainty annotation: {cleanup.annotation_error}", file=err)
+
+
+def print_errors(session: Session) -> None:
+    if not session.errors:
+        return
+    print("errors:", file=sys.stderr)
+    for message in session.errors[-8:]:
+        print(f"- {message}", file=sys.stderr)
+
+
 def report(config: "Config", session: Session) -> None:
     err = sys.stderr
     if not session.produced_output:
@@ -399,27 +429,10 @@ def report(config: "Config", session: Session) -> None:
             print(f"saved clean: {session.paths['output']}", file=err)
         else:
             print("no clean output", file=err)
-        # A flagged-but-kept cleanup (short / cut off mid-sentence) is still written; the
-        # warning must surface here or full-auto returns before the warning print below.
-        cleanup = session.cleanup
-        if cleanup is not None and cleanup.warning:
-            print(f"warning: {cleanup.warning}", file=err)
-        if cleanup is not None and cleanup.annotation_count:
-            print(
-                f"marked {cleanup.annotation_count} uncertain passage(s) where the ASR "
-                "sources disagreed",
-                file=err,
-            )
-        if cleanup is not None and cleanup.annotation_error:
-            # The non-full-auto path prints this via the skips tail; full-auto returns
-            # here, and a silently skipped audit pass looks identical to a clean bill.
-            print(f"note: uncertainty annotation: {cleanup.annotation_error}", file=err)
+        print_cleanup_notes(session, full_auto=True)
         if "exported_sources" in session.paths:
             print(f"exported sources: {session.paths['exported_sources']}", file=err)
-        if session.errors:
-            print("errors:", file=err)
-            for message in session.errors[-8:]:
-                print(f"- {message}", file=err)
+        print_errors(session)
         if "error_diagnostics" in session.paths:
             print(f"error diagnostics: {session.paths['error_diagnostics']}", file=err)
         return
@@ -440,22 +453,11 @@ def report(config: "Config", session: Session) -> None:
     level_warning = session.audio_level_warning()
     if level_warning is not None:
         print(level_warning, file=err)
-    cleanup = session.cleanup
-    if cleanup is not None and cleanup.warning:
-        print(f"warning: {cleanup.warning}", file=err)
-    if cleanup is not None and cleanup.annotation_count:
-        print(
-            f"marked {cleanup.annotation_count} uncertain passage(s) where the ASR "
-            "sources disagreed",
-            file=err,
-        )
+    print_cleanup_notes(session, full_auto=False)
     if session.skips:
         for message in session.skips[-4:]:
             print(f"note: {message}", file=err)
-    if session.errors:
-        print("errors:", file=err)
-        for message in session.errors[-8:]:
-            print(f"- {message}", file=err)
+    print_errors(session)
     if not session.produced_output:
         return
     panels = review_panels(session)

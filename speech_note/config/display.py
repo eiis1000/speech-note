@@ -63,7 +63,7 @@ MODEL_SHORT_NAMES: dict[str, str] = {
     "anthropic/claude-opus-4.6": "opus",
     "google/gemma-4-26b-a4b-it": "gemma-26b",
     "nvidia/nemotron-3-super-120b-a12b:free": "nemotron-super",
-    "google/gemma-4-31b-it:free": "gemma-4",
+    "google/gemma-4-31b-it:free": "gemma-31b",
     "openai/gpt-oss-20b:free": "gpt-oss",
     "nvidia/nemotron-nano-9b-v2:free": "nemotron-nano",
     "inclusionai/ling-3.0-flash:free": "ling-flash",

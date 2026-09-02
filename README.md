@@ -515,7 +515,7 @@ GPU.
 jq '.timings, .asr, .cleanup, .errors, .skips' diagnostics.latest.json
 ```
 
-The diagnostics file (schema 5) records the resolved config, the input
+The diagnostics file (schema 6) records the resolved config, the input
 duration, every transcript with its provenance (label, producing model, kind),
 per-pass timing *and realtime factor*, the leveling gain actually applied,
 cleanup telemetry (served model, finish reason, token estimates), the

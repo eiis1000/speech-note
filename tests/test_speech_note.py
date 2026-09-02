@@ -1656,7 +1656,7 @@ class PipelineEndToEndTests(unittest.TestCase):
             tmp = Path(tmp_dir)
             self.run_dry(tmp)
             payload = json.loads((tmp / "diagnostics.latest.json").read_text())
-            self.assertEqual(payload["schema"], 5)
+            self.assertEqual(payload["schema"], 6)
             self.assertEqual(payload["cleanup"]["method"], "heuristic")
             self.assertFalse(payload["audio_levels"]["measured"])
             self.assertEqual(payload["transcripts"][0]["label"], "user")
