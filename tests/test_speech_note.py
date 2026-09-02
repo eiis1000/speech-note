@@ -2329,6 +2329,43 @@ class OnlinePaidAsrTests(unittest.TestCase):
                 validate(config)  # no raise
 
 
+class PrivacyNoticeTests(unittest.TestCase):
+    """What leaves the machine has to be said out loud, exactly once."""
+
+    def setUp(self) -> None:
+        from speech_note import pipeline
+
+        pipeline._announced.clear()
+        self.addCleanup(pipeline._announced.clear)
+
+    def _notice(self, *argv: str) -> str:
+        from speech_note.pipeline import announce_network_asr
+
+        err = io.StringIO()
+        with redirect_stderr(err):
+            announce_network_asr(make_config(*argv))
+        return err.getvalue()
+
+    def test_hosted_asr_says_the_audio_is_being_uploaded(self) -> None:
+        """The cleanup notice covers the transcript. Under -P the recording itself
+        goes to OpenRouter, which is the larger disclosure and was made silently."""
+        notice = self._notice("--online-paid")
+        self.assertIn("uploading the recording itself", notice)
+        self.assertIn("whisper-turbo", notice)  # names which recognizers
+        self.assertIn("--offline", notice)  # and how to opt out
+
+    def test_local_asr_says_nothing(self) -> None:
+        self.assertEqual(self._notice(), "")
+        self.assertEqual(self._notice("--online-free"), "")  # -F keeps ASR local
+
+    def test_notice_is_printed_once_per_process_not_once_per_batch_item(self) -> None:
+        """Thirty files send their audio to the same place; saying so thirty times
+        only teaches the reader to skip the line."""
+        first = self._notice("--online-paid")
+        self.assertTrue(first)
+        self.assertEqual(self._notice("--online-paid"), "")
+
+
 class UnifiedInputTests(unittest.TestCase):
     def test_audio_path_routes_to_input_file(self) -> None:
         config = make_config("--input", "/tmp/rec.m4a")

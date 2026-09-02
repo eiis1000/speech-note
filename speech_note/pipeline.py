@@ -48,6 +48,43 @@ if TYPE_CHECKING:
     from .transcribers import Transcriber
 
 
+# --- privacy notices ---
+
+# Both notices are per *process*, not per item: a batch of 30 files sends its audio to
+# the same place 30 times, and repeating the warning 30 times only trains the reader to
+# skip it. The lock is for parallel batch workers.
+_announced: set[str] = set()
+_announce_lock = threading.Lock()
+
+
+def announce_once(message: str) -> None:
+    with _announce_lock:
+        if message in _announced:
+            return
+        _announced.add(message)
+    print(message, file=sys.stderr, flush=True)
+
+
+NETWORK_ASR_BACKENDS = {"openrouter", "openrouter-stt"}
+
+
+def announce_network_asr(config: "Config") -> None:
+    """Say so when the *audio* is about to leave the machine.
+
+    The cleanup notice covers the transcript; under --online-paid (or any --asr naming
+    a hosted backend) the recording itself is uploaded, which is the larger disclosure
+    and used to be made silently.
+    """
+    hosted = [s for s in config.asr_sources if s.backend in NETWORK_ASR_BACKENDS]
+    if not hosted:
+        return
+    models = ", ".join(dict.fromkeys(short_model_name(s.model) for s in hosted))
+    announce_once(
+        f"note: uploading the recording itself to OpenRouter for transcription ({models}); "
+        "use --offline or a local --asr backend to keep the audio on this machine"
+    )
+
+
 # --- building blocks ---
 
 
@@ -59,6 +96,7 @@ def run_final_asr(
     built: list[tuple["AsrSource", "Transcriber | None"]],
 ) -> None:
     """Probe, prepare models, normalize, then run the ASR collection."""
+    announce_network_asr(config)
     try:
         session.input_duration_seconds = round(probe_duration_seconds(final_audio_path), 3)
     except Exception as exc:
@@ -177,9 +215,8 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
             caveat = "free remote endpoints may log or train on inputs"
         else:
             caveat = "paid models; if they all fail, free fallbacks may log or train on inputs"
-        print(
-            f"note: sending transcripts to {config.organizer.provider} for cleanup; {caveat}",
-            file=sys.stderr,
+        announce_once(
+            f"note: sending transcripts to {config.organizer.provider} for cleanup; {caveat}"
         )
     phase_label = {
         "llama": "Cleanup",

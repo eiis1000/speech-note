@@ -349,6 +349,11 @@ When a request carries a response schema, the client also sets
 `provider.require_parameters` so OpenRouter never routes it to a provider that
 would silently ignore the schema.
 
+A run says what leaves the machine before it leaves: one line when transcripts
+go out for cleanup (naming the free-tier logging caveat when it applies), and a
+separate line when a hosted ASR backend means the **recording itself** is
+uploaded. Each is printed once per process, not once per batch item.
+
 `OPENROUTER_API_KEY` is read from the environment, or from
 `~/.config/speech-note/env` (a `KEY=value` file, chmod 600) when the env var is
 unset — so the key travels with the tool regardless of which directory you run
