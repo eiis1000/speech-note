@@ -35,7 +35,6 @@ def request_timeout_seconds(
     )
 
 
-
 @dataclasses.dataclass
 class ChatResponse:
     content: str
@@ -46,7 +45,18 @@ class ChatResponse:
 class ChatClient:
     """OpenAI-compatible chat client with model fallback."""
 
-    TRANSIENT_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+    # The chain exists because models differ — in availability, in capacity, and in
+    # which request parameters they support. So an HTTP error advances to the next
+    # model by default, and only a *credential* failure fails fast: a rejected key is
+    # the one thing another model cannot fix, and retrying it six times only delays a
+    # clear error. Everything else has been observed to be model-specific, including
+    # the ones that look global: 400 (a provider rejecting response_format, or
+    # reasoning.effort "none" — which gpt-oss rejects and the shipped free chain
+    # sends), 402 (out of credit, which is exactly when the free fallbacks matter),
+    # 404 (the model left the catalog since our check), and 413 (context limits are
+    # per model). Every failure is accumulated, so the raised error still names them
+    # all rather than hiding the first one behind the last.
+    FATAL_STATUS = {401, 403}
 
     def __init__(
         self,
@@ -107,12 +117,9 @@ class ChatClient:
         self._available_models = available or self.configured_models
         return self._available_models
 
-    def _is_transient(self, response: requests.Response) -> bool:
-        return response.status_code in self.TRANSIENT_STATUS or (
-            # Model-specific 404s mean the model vanished from the catalog
-            # between our check and the request; fall through to the next.
-            self.auth_env is not None and response.status_code == 404
-        )
+    def _worth_another_model(self, response: requests.Response) -> bool:
+        """Could a different model in the chain succeed after this failure?"""
+        return response.status_code not in self.FATAL_STATUS
 
     def _advance_or_raise(
         self,
@@ -181,9 +188,9 @@ class ChatClient:
                 if not response.ok:
                     body = " ".join(response.text.split())[:500]
                     failures.append(f"{model}: HTTP {response.status_code} {body}")
-                    # A non-transient error (e.g. 400 malformed request) won't be fixed
-                    # by another model; fail fast. Transient errors fall through.
-                    if not self._is_transient(response):
+                    # A bad credential is the only failure another model cannot fix
+                    # (see FATAL_STATUS); everything else falls through the chain.
+                    if not self._worth_another_model(response):
                         raise RuntimeError("; ".join(failures))
                     self._advance_or_raise(
                         failures, index=index, models=models, on_model_failure=on_model_failure

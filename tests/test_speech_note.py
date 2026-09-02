@@ -1013,6 +1013,66 @@ class OrganizerLlmTests(unittest.TestCase):
         self.assertEqual(calls, ["stale:free", "working:free"])
         self.assertTrue(outcome.ok)
 
+    def test_model_specific_http_errors_fall_through(self) -> None:
+        """A 400/402/413 is a fact about one model, not about the request. gpt-oss
+        rejects reasoning.effort "none" — which the shipped free chain sends — so
+        failing the whole chain on its 400 would kill runs the chain exists to save.
+        402 is out-of-credit, which is exactly when the free fallbacks matter."""
+        for status, body in (
+            (400, {"error": {"message": "reasoning.effort 'none' is not supported"}}),
+            (402, {"error": {"message": "insufficient credit"}}),
+            (413, {"error": {"message": "context length exceeded"}}),
+        ):
+            organizer = make_llm_organizer("first,second")
+            calls: list[str] = []
+
+            def fake_post(_url, *, data, _status=status, _body=body, **_kwargs):
+                model = json.loads(data)["model"]
+                calls.append(model)
+                if model == "first":
+                    return fake_response(_status, _body)
+                return fake_response(200, self.chat_payload("clean " * 90, model="second"))
+
+            sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
+            with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
+                outcome = organizer.cleanup(sources)
+            self.assertEqual(calls, ["first", "second"], msg=f"HTTP {status}")
+            self.assertTrue(outcome.ok, msg=f"HTTP {status}")
+
+    def test_rejected_credential_fails_fast_without_retrying_the_chain(self) -> None:
+        """A bad key is the one failure another model cannot fix; hammering six
+        models with it only delays a clear error."""
+        organizer = make_llm_organizer("first,second")
+        calls: list[str] = []
+
+        def fake_post(_url, *, data, **_kwargs):
+            calls.append(json.loads(data)["model"])
+            return fake_response(401, {"error": {"message": "invalid api key"}})
+
+        sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
+        with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
+            outcome = organizer.cleanup(sources)
+        self.assertEqual(calls, ["first"])
+        self.assertFalse(outcome.ok)
+        assert outcome.error is not None
+        self.assertIn("401", outcome.error)
+
+    def test_last_model_error_names_every_failure(self) -> None:
+        """The accumulated report is what makes fall-through debuggable: the final
+        error must not hide the earlier models behind the last one."""
+        organizer = make_llm_organizer("first,second")
+
+        def fake_post(_url, *, data, **_kwargs):
+            model = json.loads(data)["model"]
+            return fake_response(400, {"error": {"message": f"{model} said no"}})
+
+        sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
+        with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
+            outcome = organizer.cleanup(sources)
+        assert outcome.error is not None
+        self.assertIn("first said no", outcome.error)
+        self.assertIn("second said no", outcome.error)
+
     def test_http_200_error_body_falls_through_to_next_model(self) -> None:
         # OpenRouter can return HTTP 200 with an {"error": ...} body and no choices
         # (upstream rate limit / outage). That must fall through, not crash on
