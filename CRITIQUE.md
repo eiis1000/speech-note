@@ -7,6 +7,13 @@
 > repaints, note interleaving, interactive copy prompt). One extra bug was
 > found *by* the smoke run and fixed (item 9).
 
+> Later note: this is a dated record. Two things it explicitly deferred as "pure
+> churn" have since been done anyway, for reasons this pass could not see —
+> `config.py` was split into `catalog` / `parsing` / `display` when it grew past
+> 400 lines, and `ChatClient.chat`'s error handling was reworked when a fail-fast
+> branch turned out to abort chains that should have fallen through. The
+> observations stand; the verdicts on those two do not.
+
 Full-package read (all 17 modules, ~5,400 lines) after the flat-ASR-collection,
 status-display, and cleanup-union rework. Overall shape is good: the layering
 (config → cli/resolve → pipeline → asr/organizer → session/artifacts) is real,

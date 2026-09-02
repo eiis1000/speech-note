@@ -6,7 +6,30 @@ Test corpus: one 132 s low-SNR spoken-journal recording supplied by the user, pl
 app-generated transcript, run through the real `-fP` pipeline. Deliberately no transcript
 text, audio, or input filenames are reproduced in this file.
 
-Nothing in this document has been implemented. Items are ordered by severity.
+Items are ordered by severity.
+
+> **Status (read this first).** This is a dated record, not a plan, and it was written
+> in rounds: the body below describes the state on 2026-08-02, when nothing in it had
+> been implemented yet, and the appendices layer on later measurements, reversals, and
+> an implementation log. Three of its conclusions have since been overtaken by the
+> code, so do not act on them from here:
+>
+> - **A3.3 put the Gemini audio-LLM back in the paid ASR default.** ASR bake-off
+>   round 2 (2026-08-09) took it out again for good: its degenerate-repetition failure
+>   reproduced on the 65-minute file (unique-8-gram ratio 0.569 — 43% of the output was
+>   loops), while `microsoft/mai-transcribe-1.5` matched its hard-clip recall with the
+>   panel's best long-file coverage and no repetition. `--asr openrouter` still selects
+>   the audio-LLM; nothing defaults to it. See `config.catalog.OPENROUTER_STT_THIRD_MODEL`.
+> - **The two "still open" items in the closing line are closed.**
+>   `--organizer-timeout` defaults to the 45 s floor and its help says why lower values
+>   are inert, and the `-P` notice distinguishes paid models from the free fallbacks
+>   they end in.
+> - **Part 3's ASR model recommendations are superseded** by the dedicated-STT results
+>   in the first appendix and by bake-off round 2 after that.
+>
+> For live numbers, run the harnesses in `tools/` against the cases in `evals/` rather
+> than reading any of the figures below. Every model list in `config/catalog.py` carries
+> the measurement that chose it, and that is the copy kept current.
 
 ---
 

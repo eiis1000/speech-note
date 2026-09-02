@@ -36,7 +36,7 @@ holding the run record). Supporting modules: `config/` (all defaults, the
 backend tables, and the ASR-spec/env parsing), `chat` (the OpenAI-compatible
 HTTP transport and model fallback chain), `llama_server` (the optional local
 llama-server child process, its RAM guard, and GGUF install), `model` (the
-`Transcript` domain type), `models` (consent-gated model download), `hardware`
+`Transcript` domain type), `install` (consent-gated model download), `hardware`
 (GPU detection), `audio` / `devices` / `terminal` / `naming` / `textproc`.
 `tools/` has the whisper.cpp Vulkan probe, the no-nix suite runner
 (`run_tests_uv.sh`), and the eval harnesses (see [Evals](#evals)); `tests/` the
@@ -52,7 +52,7 @@ Extending it (where new code goes):
 - **a cleanup provider** — extend `organizer.py` (`build_organizer`) and
   `chat.py` (`ChatClient`).
 - **a model that needs downloading** — detect "missing", then route through
-  `models.require_consent` / `models.load_or_install` so it shares the install UX.
+  `install.require_consent` / `install.load_or_install` so it shares the install UX.
 
 ## Installation
 
@@ -82,9 +82,11 @@ the full policy, and [Cleanup LM](#cleanup-lm) for using a different one.
 
 Inside the shell, `speech-note` runs the Nix-store copy of the code — edits to
 the working tree are picked up by `python -m speech_note` (or by re-entering
-the shell). Tests: `python -m unittest discover -s tests` (fast logic suite);
-when the Nix cache is unreachable, `bash tools/run_tests_uv.sh` runs the same
-suite from PyPI wheels alone (live-capture tests self-skip without PortAudio).
+the shell). Tests: `python -m unittest discover -s tests` (fast logic suite), or
+`python tests/test_speech_note.py` for that file alone. When the Nix cache is
+unreachable, `bash tools/run_tests_uv.sh` runs the same suite from PyPI wheels —
+it needs only `numpy` and `requests`, because `sounddevice`/PortAudio and
+`webrtcvad` are imported lazily and the few tests that need them self-skip.
 The full-stack no-mock suite — real Whisper, real Parakeet ASR, real local
 cleanup LM — runs on demand and self-skips any stage whose model *or* test
 fixture is missing. It needs two recordings you supply: `tests/fixtures/short.wav`
@@ -334,8 +336,11 @@ transcript through.
 
 ASR stays local (whisper + sherpa) under `--offline` and `--online-free`;
 `--online-paid` runs it hosted. On OpenRouter runs the uncertainty audit uses
-its own semantic-judge chain (GPT-5.4 mini → Claude Fable 5 → Claude Opus 4.6),
-so the cleanup model does not grade its own work.
+its own semantic-judge chain, so the cleanup model does not grade its own work:
+GPT-5.4 mini → Claude Fable 5 → Claude Opus 4.6 when the run is already paying,
+and gemma-4-31b → nemotron-3-super when the cleanup chain is entirely free — a
+free-preset run should not be billed for its audit, nor have its transcript sent
+to endpoints its own privacy notice never named.
 When a request carries a response schema, the client also sets
 `provider.require_parameters` so OpenRouter never routes it to a provider that
 would silently ignore the schema.
@@ -387,8 +392,11 @@ the run prints a notice when that's about to happen.
 Robustness details: the request timeout scales with the estimated work; a
 response with `finish_reason == "length"` is reported as a truncated (failed)
 cleanup rather than passed off as complete; output that is suspiciously short
-relative to the shortest source is kept but flagged with a warning in the
-output and diagnostics.
+relative to the *mean* source length — the mean, so one filler-heavy source
+cannot demand a bloated transcript — is kept but flagged with a warning in the
+output and diagnostics. An HTTP error advances to the next model in the chain;
+only a rejected credential fails the run outright, since that is the one failure
+another model cannot fix.
 
 For arbitrary prompts against the same local server, keep it running yourself
 and use `curl http://127.0.0.1:8011/v1/chat/completions`.
