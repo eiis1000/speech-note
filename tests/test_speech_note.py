@@ -270,6 +270,27 @@ class AudioTests(unittest.TestCase):
                     checked += 1
             self.assertGreater(checked, 100)
 
+    def test_limiter_does_not_reach_around_the_end_of_the_recording(self) -> None:
+        """A transient in the last blocks must not attenuate the first ones.
+
+        The neighbour minimum used to be built with np.roll, which wraps: a bang at
+        the end of a recording quietly ducked its opening two blocks (32 ms), for no
+        reason audible anywhere near the bang.
+        """
+        import numpy as np
+
+        block = audio._BLOCK
+        quiet = np.full(block * 10, 1000.0)
+        loud = np.full(block, 32000.0)  # over the -2 dBFS ceiling
+        limited, engaged = audio._limit(np.concatenate([quiet, loud]))
+        self.assertGreater(engaged, 0, "the loud tail should engage the limiter")
+        # The opening is untouched...
+        self.assertEqual(limited[0], 1000.0)
+        self.assertEqual(limited[block], 1000.0)
+        # ...and the tail actually got pulled under the ceiling.
+        ceiling = audio.INT16_FULL_SCALE * 10 ** (audio.NORMALIZE_PEAK_CEILING_DBFS / 20.0)
+        self.assertLessEqual(abs(limited[-1]), ceiling + 1e-6)
+
     def test_normalize_compresses_peaks_instead_of_dropping_the_gain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             samples = self._tone(400, 30)
@@ -431,7 +452,7 @@ class ConfigResolutionTests(unittest.TestCase):
         self.assertEqual(config.organizer.models, ("custom/model",))
 
     def test_connectivity_modes_are_mutually_exclusive(self) -> None:
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             parse_args(["--offline", "--online-paid"])
 
     def test_online_paid_preset_includes_parallel(self) -> None:
@@ -670,6 +691,30 @@ class AsrBackendTests(unittest.TestCase):
         self.assertEqual(
             transcriber.model_name, "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
         )
+
+    def test_sherpa_publishes_the_recognizer_only_when_fully_loaded(self) -> None:
+        """recognizer doubles as the "already loaded" flag, so a VAD-config failure
+        must not leave an object that skips the retry and then AttributeErrors."""
+        transcriber = build_transcriber(make_config(), parse_asr_source("sherpa"))
+        assert isinstance(transcriber, SherpaTranscriber)
+        self.assertIsNone(transcriber.recognizer)
+        self.assertIsNone(transcriber._vad_config)
+
+        fake = types.ModuleType("sherpa_onnx")
+        fake.VadModelConfig = mock.Mock(side_effect=RuntimeError("no VAD model"))  # type: ignore[attr-defined]
+        fake.OfflineRecognizer = mock.Mock()  # type: ignore[attr-defined]
+        with mock.patch.dict("sys.modules", {"sherpa_onnx": fake}), \
+             mock.patch.object(
+                 transcriber, "_resolve_model_files",
+                 return_value=("e", "d", "j", "t", "v"),
+             ):
+            with self.assertRaises(RuntimeError):
+                transcriber.ensure_loaded()
+            # Still unloaded, so a second attempt really retries instead of
+            # reporting success and failing later on a missing _vad_config.
+            self.assertIsNone(transcriber.recognizer)
+            with self.assertRaises(RuntimeError):
+                transcriber.ensure_loaded()
 
     def test_onnx_command(self) -> None:
         command = build_subprocess_command(

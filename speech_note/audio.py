@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import subprocess
+import tempfile
 import wave
 from pathlib import Path
 
@@ -363,6 +364,23 @@ def _compress_peaks(samples: np.ndarray) -> tuple[np.ndarray, float]:
     return samples * gain, float(held.max())
 
 
+def _shift(values: np.ndarray, offset: int, fill: float) -> np.ndarray:
+    """``values`` shifted by ``offset`` blocks, with ``fill`` past the edges.
+
+    Not np.roll: rolling wraps, which for a gain curve means the end of the
+    recording reaches around and attenuates the beginning of it. The edges have no
+    neighbour, so they get the neutral value instead of the far end's.
+    """
+    out = np.full_like(values, fill)
+    if offset > 0:
+        out[offset:] = values[:-offset]
+    elif offset < 0:
+        out[:offset] = values[-offset:]
+    else:
+        out[:] = values
+    return out
+
+
 def _limit(samples: np.ndarray) -> tuple[np.ndarray, int]:
     """Final safety limiter. With the compressor in front, it should barely engage."""
     ceiling = INT16_FULL_SCALE * 10 ** (NORMALIZE_PEAK_CEILING_DBFS / 20.0)
@@ -371,7 +389,9 @@ def _limit(samples: np.ndarray) -> tuple[np.ndarray, int]:
         return np.clip(samples, -ceiling, ceiling), 0
     blocks = samples[:usable].reshape(-1, _BLOCK)
     reduce = np.minimum(1.0, ceiling / np.maximum(np.abs(blocks).max(axis=1), 1e-9))
-    reduce = np.minimum.reduce([reduce, *(np.roll(reduce, s) for s in (-2, -1, 1, 2))])
+    # Each block also obeys its neighbours', so the reduction eases in and out
+    # rather than stepping at a block edge. 1.0 past the ends: no neighbour there.
+    reduce = np.minimum.reduce([reduce, *(_shift(reduce, s, 1.0) for s in (-2, -1, 1, 2))])
     limited = (blocks * reduce[:, None]).reshape(-1)
     if usable < len(samples):
         limited = np.concatenate([limited, samples[usable:] * reduce[-1]])
@@ -449,8 +469,6 @@ def normalize_pcm_wav(source: Path, target: Path) -> NormalizationResult:
 
 def normalize_audio_for_asr(source: Path, target: Path, *, sample_rate: int) -> NormalizationResult:
     """Decode any input to mono PCM at the pipeline rate, then gain-normalize."""
-    import tempfile
-
     with tempfile.TemporaryDirectory(prefix="speech-note-normalize-") as tmp_dir:
         decoded = Path(tmp_dir) / "decoded.wav"
         convert_to_pcm_wav(source, decoded, sample_rate=sample_rate)

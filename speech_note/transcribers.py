@@ -424,9 +424,9 @@ class SherpaTranscriber(Transcriber):
         self.num_threads = max(1, int(num_threads))
         self.auto_download = auto_download
         self.recognizer: Any = None
-        self.vad: Any = None
         self.load_seconds: float | None = None
         self._model_files: tuple[str, str, str, str, str] | None = None
+        self._vad_config: Any = None
 
     def _provider(self) -> str:
         text = self.device.strip().lower()
@@ -486,7 +486,13 @@ class SherpaTranscriber(Transcriber):
         import sherpa_onnx
 
         encoder, decoder, joiner, tokens, vad_path = self._resolve_model_files()
-        self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
+        vad_config = sherpa_onnx.VadModelConfig()
+        vad_config.silero_vad.model = vad_path
+        vad_config.silero_vad.threshold = 0.5
+        vad_config.silero_vad.min_silence_duration = 0.1
+        vad_config.silero_vad.max_speech_duration = float(SHERPA_MAX_SEGMENT_SECONDS)
+        vad_config.sample_rate = 16_000
+        recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
             encoder=encoder,
             decoder=decoder,
             joiner=joiner,
@@ -496,13 +502,11 @@ class SherpaTranscriber(Transcriber):
             decoding_method="greedy_search",
             provider=self._provider(),
         )
-        vad_config = sherpa_onnx.VadModelConfig()
-        vad_config.silero_vad.model = vad_path
-        vad_config.silero_vad.threshold = 0.5
-        vad_config.silero_vad.min_silence_duration = 0.1
-        vad_config.silero_vad.max_speech_duration = float(SHERPA_MAX_SEGMENT_SECONDS)
-        vad_config.sample_rate = 16_000
+        # self.recognizer last: it is the "already loaded" flag, so publishing it
+        # before the VAD config would let a VAD failure leave a half-loaded object
+        # that skips the retry and then AttributeErrors on the next transcribe.
         self._vad_config = vad_config
+        self.recognizer = recognizer
         self.load_seconds = round(time.monotonic() - started, 3)
         debug_log(f"sherpa recognizer ready model={self.model_name} provider={self._provider()}")
 
