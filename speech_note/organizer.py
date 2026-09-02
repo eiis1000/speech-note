@@ -29,6 +29,7 @@ from .config import (
     CLEANUP_TARGET_LENGTH_RATIO,
     DEFAULT_GGUF_MODEL,
     OPENROUTER_ANNOTATION_MODELS,
+    OPENROUTER_FREE_ANNOTATION_MODELS,
     ORGANIZER_CONTEXT_SAFETY,
     ORGANIZER_MIN_OUTPUT_TOKENS,
 )
@@ -494,6 +495,18 @@ def _dedupe_sources(sources: list[Transcript]) -> list[Transcript]:
     return unique
 
 
+def annotation_models(cleanup_models: "tuple[str, ...]") -> tuple[str, ...]:
+    """The auditor chain for a cleanup chain: free judges for an all-free run.
+
+    Read off the cleanup chain rather than off the connectivity preset, so an
+    explicit --organizer-model list of free endpoints gets the same treatment as
+    --online-free. See the two catalog lists for what is in each chain and why.
+    """
+    if cleanup_models and all(model.endswith(":free") for model in cleanup_models):
+        return tuple(OPENROUTER_FREE_ANNOTATION_MODELS)
+    return tuple(OPENROUTER_ANNOTATION_MODELS)
+
+
 def build_organizer(config: "Config") -> Organizer:
     """Wire up the organizer stack for the resolved config.
 
@@ -518,9 +531,14 @@ def build_organizer(config: "Config") -> Organizer:
     if config.organizer.provider == "openrouter":
         # A dedicated auditor chain (see OPENROUTER_ANNOTATION_MODELS for the
         # measurements behind it). Local stays on the one loaded model.
+        #
+        # A run whose cleanup chain is entirely free audits on free models too. The
+        # paid chain is the better judge, but billing a free-preset run for the audit
+        # — and sending the transcript to endpoints its own privacy notice never
+        # named — is not the preset's bargain.
         annotation_client = ChatClient(
             api_base=config.organizer.api_base,
-            models=tuple(OPENROUTER_ANNOTATION_MODELS),
+            models=annotation_models(config.organizer.models),
             timeout=config.organizer.timeout,
             auth_env=config.organizer.auth_env,
             reasoning_effort="low",

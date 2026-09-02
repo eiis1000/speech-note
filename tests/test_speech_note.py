@@ -2492,6 +2492,38 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         finally:
             organizer.close()
 
+    def test_free_preset_audits_on_free_models(self) -> None:
+        """--online-free must not bill the audit to the paid judges (nor send the
+        transcript to endpoints its own privacy notice never named)."""
+        from speech_note.config import OPENROUTER_FREE_ANNOTATION_MODELS
+        from speech_note.organizer import annotation_models, build_organizer
+
+        config = make_config("--organizer-mode", "llama", "--online-free", "--input-text", "x")
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}):
+            organizer = build_organizer(config)
+        try:
+            assert organizer.annotation_client is not None
+            self.assertEqual(
+                organizer.annotation_client.configured_models,
+                list(OPENROUTER_FREE_ANNOTATION_MODELS),
+            )
+            self.assertTrue(
+                all(m.endswith(":free") for m in organizer.annotation_client.configured_models)
+            )
+        finally:
+            organizer.close()
+        # The chain is read off the cleanup models, not the preset, so an explicit
+        # all-free --organizer-model list gets the same treatment.
+        self.assertEqual(
+            annotation_models(("a/b:free", "c/d:free")),
+            tuple(OPENROUTER_FREE_ANNOTATION_MODELS),
+        )
+        # One paid entry anywhere means the run is already paying: use the best judges.
+        self.assertNotEqual(
+            annotation_models(("paid/model", "c/d:free")),
+            tuple(OPENROUTER_FREE_ANNOTATION_MODELS),
+        )
+
     def test_annotation_request_carries_the_worked_example(self) -> None:
         """The synthetic example rides as a real user/assistant pair — an assistant turn
         anchors the output format far harder than prose in the system prompt (models

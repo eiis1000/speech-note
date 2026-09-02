@@ -33,7 +33,7 @@ __all__ = [
     "DEFAULT_GGUF_SIZE_HINT", "DEFAULT_ORGANIZER_CONTEXT_TOKENS", "DEFAULT_ORGANIZER_MAX_OUTPUT_TOKENS",
     "PREFERRED_GGUF_MODEL", "PREFERRED_GGUF_REPO", "PREFERRED_GGUF_FILE", "PREFERRED_GGUF_SIZE_HINT",
     "DEFAULT_OPENROUTER_API_BASE", "OPENROUTER_FREE_MODELS", "OPENROUTER_PAID_MODELS",
-    "OPENROUTER_ANNOTATION_MODELS",
+    "OPENROUTER_ANNOTATION_MODELS", "OPENROUTER_FREE_ANNOTATION_MODELS",
     "OPENROUTER_ASR_MP3_SAMPLE_RATE", "DEFAULT_OPENROUTER_ASR_MAX_OUTPUT_TOKENS",
     "OPENROUTER_ASR_MIN_TIMEOUT", "OPENROUTER_PREFERRED_MODELS", "OPENROUTER_API_KEY_ENV",
     "DEFAULT_OPENROUTER_CONTEXT_TOKENS", "DEFAULT_OPENROUTER_MAX_OUTPUT_TOKENS",
@@ -383,6 +383,19 @@ OPENROUTER_ANNOTATION_MODELS = [
     "openai/gpt-5.4-mini",
     "anthropic/claude-fable-5",
     "anthropic/claude-opus-4.6",
+]
+
+# The auditor chain for a run whose cleanup chain is entirely free (--online-free).
+# The paid chain above is the measured-best judge, but sending the audit there would
+# bill a run that asked for free models and would send the transcript to endpoints the
+# run's own privacy notice never mentioned. So free runs audit on free models: gemma-31b
+# leads (best measured annotation judgement of the free catalog), nemotron-super second
+# (it enforces structured outputs, so a schema is honoured rather than ignored). Free
+# judgement is weaker than the paid chain's — that is the price of the preset, and the
+# citation check in annotate.verify_notes is what keeps a weaker judge from inventing.
+OPENROUTER_FREE_ANNOTATION_MODELS = [
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
 ]
 
 # OpenRouter ASR request shaping (the "openrouter" backend). The whole recording is
