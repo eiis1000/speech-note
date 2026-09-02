@@ -349,10 +349,19 @@ When a request carries a response schema, the client also sets
 `provider.require_parameters` so OpenRouter never routes it to a provider that
 would silently ignore the schema.
 
-A run says what leaves the machine before it leaves: one line when transcripts
-go out for cleanup (naming the free-tier logging caveat when it applies), and a
-separate line when a hosted ASR backend means the **recording itself** is
-uploaded. Each is printed once per process, not once per batch item.
+A run says what leaves the machine before it leaves — but only when that is
+news. Asking for the remote path suppresses its own notice: `-P`, `-F`,
+`--organizer-provider openrouter`, `--asr` naming a hosted backend, and the
+interactive provider prompt are all informed decisions, and warning you about
+the thing you just typed is the noise that teaches people to skip warnings.
+What still announces itself is the path you did not ask for on this command
+line — most usefully a hosted backend left in `~/.config/speech-note/asr`
+months ago, where a run really can upload audio you were not thinking about.
+Notices are printed once per process, not once per batch item.
+
+`--no-privacy-notices` silences both regardless; `--privacy-notices` forces
+both on. To turn them off for good, put `SPEECH_NOTE_NO_PRIVACY_NOTICES=1` in
+the environment or in `~/.config/speech-note/env`.
 
 `OPENROUTER_API_KEY` is read from the environment, or from
 `~/.config/speech-note/env` (a `KEY=value` file, chmod 600) when the env var is

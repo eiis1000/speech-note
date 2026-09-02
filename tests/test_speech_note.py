@@ -864,9 +864,10 @@ class AsrPrepareTests(unittest.TestCase):
         prepared = prepare_sources([(source, _Boom())])
         self.assertEqual(prepared[0].error, "download declined")
         session = Session(make_config())
-        run_asr_collection(
-            make_config(), session, Path("/tmp/none.wav"), prepared=prepared, duration=1.0
-        )
+        with redirect_stderr(io.StringIO()):  # the ASR status phase is real output
+            run_asr_collection(
+                make_config(), session, Path("/tmp/none.wav"), prepared=prepared, duration=1.0
+            )
         self.assertEqual(len(session.asr_outcomes), 1)
         self.assertFalse(session.asr_outcomes[0].ok)
         self.assertIn("download declined", session.asr_outcomes[0].error or "")
@@ -2379,7 +2380,12 @@ class OnlinePaidAsrTests(unittest.TestCase):
 
 
 class PrivacyNoticeTests(unittest.TestCase):
-    """What leaves the machine has to be said out loud, exactly once."""
+    """What leaves the machine has to be said out loud — but only when it is news.
+
+    A warning about the thing you just asked for is noise, and noise is what teaches
+    people to skip warnings. So the notices announce the *unrequested* remote path and
+    stay quiet about the requested one.
+    """
 
     def setUp(self) -> None:
         from speech_note import pipeline
@@ -2387,32 +2393,116 @@ class PrivacyNoticeTests(unittest.TestCase):
         pipeline._announced.clear()
         self.addCleanup(pipeline._announced.clear)
 
-    def _notice(self, *argv: str) -> str:
+    def _asr_notice(self, *argv: str, config: Config | None = None) -> str:
         from speech_note.pipeline import announce_network_asr
 
         err = io.StringIO()
         with redirect_stderr(err):
-            announce_network_asr(make_config(*argv))
+            announce_network_asr(config or make_config(*argv))
         return err.getvalue()
 
-    def test_hosted_asr_says_the_audio_is_being_uploaded(self) -> None:
-        """The cleanup notice covers the transcript. Under -P the recording itself
-        goes to OpenRouter, which is the larger disclosure and was made silently."""
-        notice = self._notice("--online-paid")
+    def _sticky_config(self, *argv: str) -> Config:
+        """A hosted ASR backend inherited from the user config file rather than typed
+        on this command line — the case the notice exists for."""
+        from speech_note.config import AsrSource
+
+        with mock.patch(
+            "speech_note.cli.defaults.load_user_asr_sources",
+            return_value=(AsrSource("openrouter-stt", "openai/whisper-large-v3-turbo", "net"),),
+        ):
+            return make_config(*argv)
+
+    # --- what is worth saying ---------------------------------------------------
+
+    def test_unrequested_hosted_asr_announces_the_upload(self) -> None:
+        config = self._sticky_config()
+        self.assertTrue(config.announce_remote_asr)
+        notice = self._asr_notice(config=config)
         self.assertIn("uploading the recording itself", notice)
-        self.assertIn("whisper-turbo", notice)  # names which recognizers
+        self.assertIn("whisper-turbo", notice)  # names which recognizer
         self.assertIn("--offline", notice)  # and how to opt out
 
     def test_local_asr_says_nothing(self) -> None:
-        self.assertEqual(self._notice(), "")
-        self.assertEqual(self._notice("--online-free"), "")  # -F keeps ASR local
+        self.assertEqual(self._asr_notice(), "")
+
+    # --- what is not ------------------------------------------------------------
+
+    def test_asking_for_hosted_asr_suppresses_its_own_notice(self) -> None:
+        # -P advertises hosted ASR in its own help text, and --asr names the backend
+        # outright. Either way the user has already been told.
+        self.assertEqual(self._asr_notice("--online-paid"), "")
+        self.assertEqual(self._asr_notice("--asr", "openrouter-stt"), "")
+        # ...and a typed --asr suppresses it even when the preset did not.
+        self.assertEqual(self._asr_notice("--offline", "--asr", "openrouter-stt"), "")
+
+    def test_asking_for_remote_cleanup_suppresses_its_own_notice(self) -> None:
+        for argv in (("--online-paid",), ("--online-free",), ("-P",), ("-F",),
+                     ("--organizer-provider", "openrouter")):
+            self.assertFalse(
+                make_config(*argv).announce_remote_cleanup, msg=f"{argv} should be silent"
+            )
+        # The interactive prompt is a decision too: it sets organizer_provider before
+        # resolve_config, exactly like the flag.
+        args = parse_args(["--organizer-mode", "llama"])
+        with mock.patch("speech_note.cli.select_input_device", return_value=0), \
+                mock.patch("speech_note.cli.sys.stdin") as stdin, \
+                mock.patch("speech_note.cli.read_single_choice", return_value="2"), \
+                redirect_stdout(io.StringIO()):
+            stdin.isatty.return_value = True
+            _interactive_capture_setup(args)
+        self.assertFalse(resolve_config(args).announce_remote_cleanup)
+
+    def test_free_preset_does_not_re_warn_about_its_own_free_tier(self) -> None:
+        """-F's own help already says free endpoints may log or train on inputs."""
+        config = make_config("--online-free", "--input-text", "x", "--organizer-mode", "llama")
+        session = Session(config)
+        session.add_transcript(Transcript("user", "dry-run-text", "user", "hello"))
+        organizer = Organizer(
+            mode="llama", client=mock.Mock(timeout=12.0), supervisor=None,
+            context_tokens=65_536, max_output_tokens=16_384,
+        )
+        from speech_note.model import CleanupOutcome
+        from speech_note.pipeline import run_cleanup_stage
+
+        err = io.StringIO()
+        with redirect_stderr(err), mock.patch.object(
+            organizer, "cleanup", return_value=CleanupOutcome(text="Hello.", method="llama")
+        ):
+            run_cleanup_stage(config, session, organizer)
+        self.assertNotIn("may log or train", err.getvalue())
+
+    # --- the override -----------------------------------------------------------
+
+    def test_flag_forces_the_notices_either_way(self) -> None:
+        forced_on = make_config("--online-paid", "--privacy-notices")
+        self.assertTrue(forced_on.announce_remote_cleanup)
+        self.assertTrue(forced_on.announce_remote_asr)
+        self.assertIn("uploading the recording itself", self._asr_notice(config=forced_on))
+
+        silenced = self._sticky_config("--no-privacy-notices")
+        self.assertFalse(silenced.announce_remote_asr)
+        self.assertFalse(silenced.announce_remote_cleanup)
+        self.assertEqual(self._asr_notice(config=silenced), "")
+
+    def test_env_var_silences_them_permanently(self) -> None:
+        """The people who want this off want it off for good, and
+        ~/.config/speech-note/env is already loaded at startup."""
+        from speech_note.cli import PRIVACY_NOTICE_ENV
+
+        with mock.patch.dict(os.environ, {PRIVACY_NOTICE_ENV: "1"}):
+            config = self._sticky_config()
+        self.assertFalse(config.announce_remote_asr)
+        self.assertEqual(self._asr_notice(config=config), "")
+        # An explicit flag still beats the environment.
+        with mock.patch.dict(os.environ, {PRIVACY_NOTICE_ENV: "1"}):
+            self.assertTrue(self._sticky_config("--privacy-notices").announce_remote_asr)
 
     def test_notice_is_printed_once_per_process_not_once_per_batch_item(self) -> None:
         """Thirty files send their audio to the same place; saying so thirty times
         only teaches the reader to skip the line."""
-        first = self._notice("--online-paid")
-        self.assertTrue(first)
-        self.assertEqual(self._notice("--online-paid"), "")
+        config = self._sticky_config()
+        self.assertTrue(self._asr_notice(config=config))
+        self.assertEqual(self._asr_notice(config=config), "")
 
 
 class UnifiedInputTests(unittest.TestCase):

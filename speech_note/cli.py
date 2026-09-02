@@ -24,6 +24,12 @@ from .devices import coerce_input_device, print_input_devices, select_input_devi
 from .llama_server import preferred_model_selected
 from .terminal import read_single_choice
 
+# Silences both privacy notices for good, the way SPEECH_NOTE_NO_GPU_WARNING silences
+# the GPU pointer. Worth having as an environment variable and not only a flag: the
+# people who want it off want it off permanently, and ~/.config/speech-note/env is
+# already loaded at startup, so one line there covers every future run.
+PRIVACY_NOTICE_ENV = "SPEECH_NOTE_NO_PRIVACY_NOTICES"
+
 
 @dataclasses.dataclass(frozen=True)
 class OrganizerConfig:
@@ -81,6 +87,15 @@ class Config:
     # Ceiling on those concurrent items (see DEFAULT_PARALLEL_WORKERS for why there
     # is one). Ignored when parallel is False.
     parallel_workers: int
+    # Print the "this leaves the machine" notices. Resolved per notice, because the
+    # point of one is the case where the user did NOT ask for the remote path: typing
+    # -P, -F, --organizer-provider openrouter or --asr openrouter-stt (or choosing
+    # OpenRouter at the interactive prompt) is already an informed decision, and a
+    # warning about it is noise that teaches people to skip warnings. What survives is
+    # the sticky case — a remote backend left in ~/.config/speech-note/asr months ago,
+    # where a run really can upload audio you did not think about.
+    announce_remote_cleanup: bool
+    announce_remote_asr: bool
     # Directory the auto-named full-auto output is written into (default: cwd). Set
     # per item by the batch pipeline so outputs land in the input directory.
     full_auto_output_dir: Path | None
@@ -229,6 +244,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Process independent batch inputs concurrently. Included by default in the "
             "--online-paid preset; every other mode is sequential unless this flag is "
             "passed explicitly. --no-parallel overrides the paid preset."
+        ),
+    )
+    parser.add_argument(
+        "--privacy-notices",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Print the notices naming what leaves the machine — transcripts going out "
+            "for cleanup, and the recording itself going out to a hosted ASR backend. "
+            "Defaults to printing only what you did not ask for on this command line: "
+            "-P, -F, --organizer-provider openrouter, --asr with a hosted backend, and "
+            "the interactive provider prompt all suppress their own notice, since they "
+            "are the decision. A hosted backend inherited from "
+            f"{defaults.USER_ASR_FILE} still announces itself. "
+            "--no-privacy-notices silences both regardless; so does "
+            f"{PRIVACY_NOTICE_ENV}=1 in the environment or "
+            f"{defaults.USER_ENV_FILE}."
         ),
     )
     parser.add_argument(
@@ -462,6 +494,11 @@ def resolve_config(args: argparse.Namespace) -> Config:
     # branch). --offline and --online-free keep the local whisper+sherpa ASR default;
     # --online-paid moves ASR to the hosted equivalents (see below).
     connectivity = getattr(args, "connectivity", None)
+    # Captured before the preset overwrites it: "did the user ask for a remote
+    # provider?" is the question, and after the assignment below every preset run
+    # looks like it did. The interactive prompt sets this too, which is correct —
+    # picking OpenRouter from a menu is asking for it.
+    provider_requested = args.organizer_provider == "openrouter"
     if connectivity == "offline":
         args.organizer_provider = "local"
     elif connectivity in ("online-free", "online-paid"):
@@ -504,6 +541,16 @@ def resolve_config(args: argparse.Namespace) -> Config:
     # Parallel execution is a preset choice, not inferred from current backends: -P
     # includes it, while every other mode requires an explicit --parallel.
     parallel = args.parallel if args.parallel is not None else connectivity == "online-paid"
+    # Explicit flag > environment > auto (announce only the unrequested path).
+    notices: bool | None = args.privacy_notices
+    if notices is None and os.environ.get(PRIVACY_NOTICE_ENV) == "1":
+        notices = False
+    asr_requested = bool(args.asr) or connectivity == "online-paid"
+    announce_remote_cleanup = (
+        notices if notices is not None else not (provider_requested or connectivity is not None)
+    )
+    announce_remote_asr = notices if notices is not None else not asr_requested
+
     # `is None`, not `or`: an explicit --parallel-workers 0 must reach validate and be
     # rejected, not silently become the default.
     parallel_workers = (
@@ -544,6 +591,8 @@ def resolve_config(args: argparse.Namespace) -> Config:
         full_auto=args.full_auto,
         parallel=parallel,
         parallel_workers=parallel_workers,
+        announce_remote_cleanup=announce_remote_cleanup,
+        announce_remote_asr=announce_remote_asr,
         full_auto_output_dir=None,
         asr_sources=asr_sources,
         asr_compute_type=args.asr_compute_type,

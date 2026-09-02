@@ -69,12 +69,15 @@ NETWORK_ASR_BACKENDS = {"openrouter", "openrouter-stt"}
 
 
 def announce_network_asr(config: "Config") -> None:
-    """Say so when the *audio* is about to leave the machine.
+    """Say so when the *audio* is about to leave the machine, if that is news.
 
-    The cleanup notice covers the transcript; under --online-paid (or any --asr naming
-    a hosted backend) the recording itself is uploaded, which is the larger disclosure
-    and used to be made silently.
+    The cleanup notice covers the transcript; a hosted ASR backend uploads the
+    recording itself, which is the larger disclosure. Whether it is worth printing is
+    decided at config time — see Config.announce_remote_asr — because a run that was
+    asked for hosted ASR does not need to be told it has hosted ASR.
     """
+    if not config.announce_remote_asr:
+        return
     hosted = [s for s in config.asr_sources if s.backend in NETWORK_ASR_BACKENDS]
     if not hosted:
         return
@@ -207,7 +210,11 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
             session.add_error(f"cleanup: {error}")
             write_sources_export(config, session, directory=export_dir)
             return
-    if config.organizer.provider != "local" and organizer.mode == "llama":
+    if (
+        config.announce_remote_cleanup
+        and config.organizer.provider != "local"
+        and organizer.mode == "llama"
+    ):
         # The training caveat belongs to the free tier. A paid-lead chain still ends in
         # free fallbacks, so it gets the caveat in conditional form rather than being
         # (wrongly) accused of logging outright.
