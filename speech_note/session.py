@@ -212,8 +212,11 @@ class ArtifactStore:
             archived = self.archive_dir / f"{slug}-{archive_suffix}"
             latest.write_text(content, encoding="utf-8")
             archived.write_text(content, encoding="utf-8")
-            session.paths[f"latest_{archive_suffix}"] = str(latest)
-            session.paths[f"archive_{archive_suffix}"] = str(archived)
+            # The path keys are identifiers callers write as session.paths["latest_x"],
+            # so they use the suffix's underscore form, not its filename form.
+            key = archive_suffix.replace("-", "_")
+            session.paths[f"latest_{key}"] = str(latest)
+            session.paths[f"archive_{key}"] = str(archived)
 
         write_pair("raw.latest", "raw", session.raw_text())
         write_pair("clean.latest", "clean", session.clean_text())

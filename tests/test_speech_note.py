@@ -1903,6 +1903,42 @@ class SessionTests(unittest.TestCase):
         assert warning is not None
         self.assertIn("very quiet", warning)
 
+    def test_annotated_run_keeps_the_plain_prose_as_a_real_artifact(self) -> None:
+        """clean.latest carries the anchors and the notes list, so the pre-annotation
+        prose needs somewhere to live for TTS/pasting — under a path key callers can
+        actually write, not one with a hyphen in the middle."""
+        from speech_note.model import CleanupOutcome
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            config = make_config(tmp_path=tmp)
+            session = Session(config)
+            session.add_transcript(Transcript("asr1", "m", "asr-final", "raw text"))
+            session.cleanup = CleanupOutcome(
+                text="Clean text.[1]\n\nUnclear passages:\n[1] ...",
+                method="llama",
+                text_before_annotation="Clean text.",
+                annotation_count=1,
+            )
+            ArtifactStore(config.artifacts_dir, config.archive_dir).commit(session)
+            self.assertEqual((tmp / "clean.plain.latest").read_text(), "Clean text.\n")
+            self.assertEqual(
+                session.paths["latest_clean_plain"], str(tmp / "clean.plain.latest")
+            )
+            self.assertIn("archive_clean_plain", session.paths)
+
+    def test_unannotated_run_writes_no_plain_copy(self) -> None:
+        from speech_note.model import CleanupOutcome
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            config = make_config(tmp_path=tmp)
+            session = Session(config)
+            session.cleanup = CleanupOutcome(text="Clean text.", method="llama")
+            ArtifactStore(config.artifacts_dir, config.archive_dir).commit(session)
+            self.assertFalse((tmp / "clean.plain.latest").exists())
+            self.assertNotIn("latest_clean_plain", session.paths)
+
     def test_artifact_store_writes_recording(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)

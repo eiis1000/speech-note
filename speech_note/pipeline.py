@@ -478,6 +478,13 @@ def report(config: "Config", session: Session) -> None:
         f"saved clean: {session.paths.get('latest_clean')} and {session.paths.get('archive_clean')}",
         file=err,
     )
+    if "latest_clean_plain" in session.paths:
+        # The audit ran, so clean.latest carries anchors and a notes list. Say where
+        # the plain prose is; otherwise it is an artifact nobody knows exists.
+        print(
+            f"saved clean (no annotations): {session.paths['latest_clean_plain']}",
+            file=err,
+        )
     if "output" in session.paths:
         print(f"saved output: {session.paths['output']}", file=err)
     if "exported_sources" in session.paths:
