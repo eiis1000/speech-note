@@ -31,7 +31,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from speech_note import audio, naming, textproc
-from speech_note.capture import SegmentCollector
+from speech_note.capture import SegmentCollector, require_webrtcvad
 from speech_note.cli import Config, parse_args, resolve_config, validate
 from speech_note.model import Transcript
 from speech_note.chat import ChatClient, ChatResponse, request_timeout_seconds
@@ -300,6 +300,15 @@ class AudioTests(unittest.TestCase):
             self.assertGreater(result.compressed_db, 0.0, "the peak should be compressed")
 
 
+def _webrtcvad_available() -> bool:
+    try:
+        require_webrtcvad()
+    except RuntimeError:
+        return False
+    return True
+
+
+@unittest.skipUnless(_webrtcvad_available(), "webrtcvad not installed")
 class SegmentCollectorTests(unittest.TestCase):
     def make_collector(self) -> SegmentCollector:
         collector = SegmentCollector(

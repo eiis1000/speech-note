@@ -18,20 +18,11 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
 import wave
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
-
-import warnings
-
-# webrtcvad still imports pkg_resources; not actionable from here.
-warnings.filterwarnings(
-    "ignore",
-    message="pkg_resources is deprecated as an API.*",
-    category=UserWarning,
-)
-import webrtcvad  # noqa: E402
+from typing import TYPE_CHECKING, Any, cast
 
 from .audio import convert_to_pcm_wav, write_wav
 from .config import LIVE_ASR_MODEL, SAMPLE_WIDTH
@@ -61,6 +52,32 @@ STOP_DRAIN_SECONDS = 0.7
 AUDIO_QUEUE_MAX = 512
 
 
+def require_webrtcvad() -> Any:
+    """The webrtcvad module, or a clear error where segmentation is attempted.
+
+    Deferred like sounddevice in .devices, and for the same reason: only live
+    capture segments a stream, so a machine without the wheel should still be able
+    to import this module and run file/text input. The import also emits a
+    DeprecationWarning of its own (it still uses pkg_resources), which belongs at
+    the point of use rather than in every process that imports speech_note.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="pkg_resources is deprecated as an API.*",
+            category=UserWarning,
+        )
+        try:
+            import webrtcvad
+        except ImportError as exc:
+            raise RuntimeError(
+                "live audio capture needs webrtcvad for utterance segmentation "
+                "(available in the Nix dev shell); file and text input still work "
+                "without it"
+            ) from exc
+    return webrtcvad
+
+
 class SegmentCollector:
     """webrtcvad-based utterance segmenter over fixed-size PCM frames."""
 
@@ -77,7 +94,7 @@ class SegmentCollector:
     ) -> None:
         self.sample_rate = sample_rate
         self.frame_bytes = sample_rate * frame_ms // 1000 * SAMPLE_WIDTH
-        self.vad = webrtcvad.Vad(vad_mode)
+        self.vad = require_webrtcvad().Vad(vad_mode)
         self.pre_roll: deque[bytes] = deque(maxlen=max(1, start_padding_ms // frame_ms))
         self.end_silence_frames = max(1, end_silence_ms // frame_ms)
         self.min_speech_frames = max(1, min_speech_ms // frame_ms)
