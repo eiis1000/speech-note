@@ -466,6 +466,12 @@ def report(config: "Config", session: Session) -> None:
             print(f"saved clean: {session.paths['output']}", file=err)
         else:
             print("no clean output", file=err)
+        # Only ever set for live capture, so this adds nothing to a file run — but a
+        # full-auto mic capture is exactly the case where nobody is watching the
+        # levels, and "your input was nearly silent" is the most useful thing we know.
+        level_warning = session.audio_level_warning()
+        if level_warning is not None:
+            print(level_warning, file=err)
         print_cleanup_notes(session, full_auto=True)
         if "exported_sources" in session.paths:
             print(f"exported sources: {session.paths['exported_sources']}", file=err)

@@ -1865,6 +1865,19 @@ class FullAutoTests(unittest.TestCase):
             self.assertIn("output token cap", payload["cleanup"]["error"])
             self.assertEqual(payload["paths"]["exported_sources"], str(sources))
 
+    def test_full_auto_reports_a_quiet_input(self) -> None:
+        """Full-auto mic capture is the one case where nobody is watching the levels,
+        so the near-silence warning has to survive into its shorter report."""
+        from speech_note.pipeline import report
+
+        config = make_config("--full-auto", "--input-text", "x")
+        session = Session(config)
+        session.observe_audio_frame(struct.pack("<hh", 100, -100))  # ~-50 dBFS
+        err = io.StringIO()
+        with redirect_stderr(err):
+            report(config, session)
+        self.assertIn("very quiet", err.getvalue())
+
     def test_full_auto_success_writes_only_clean_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
