@@ -28,10 +28,16 @@ import os
 import shutil
 import subprocess
 import tempfile
+import sys
 import unittest
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+
+# Direct execution (python tests/test_e2e.py) puts tests/ on sys.path, not
+# the repo root, so make the package importable either way — the __main__ guard at
+# the bottom is otherwise decorative.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from speech_note.cli import parse_args, resolve_config
 from speech_note.config import DEFAULT_GGUF_MODEL, WHISPER_CPP_MODEL_DIR
@@ -116,7 +122,7 @@ class ArchiveFullStackTests(unittest.TestCase):
             assert session.cleanup is not None
             self.assertEqual(session.cleanup.text, session.asr_transcripts()[0].text)
             self.assertIn("transcription", (tmp / "clean.latest").read_text().lower())
-            self.assertEqual(json.loads((tmp / "diagnostics.latest.json").read_text())["schema"], 4)
+            self.assertEqual(json.loads((tmp / "diagnostics.latest.json").read_text())["schema"], 5)
 
     def test_heuristic_mode_real_asr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

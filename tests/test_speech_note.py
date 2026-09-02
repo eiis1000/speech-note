@@ -16,6 +16,7 @@ import struct
 import tempfile
 import threading
 import types
+import sys
 import unittest
 import wave
 import zipfile
@@ -23,6 +24,11 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import cast
 from unittest import mock
+
+# Direct execution (python tests/test_speech_note.py) puts tests/ on sys.path, not
+# the repo root, so make the package importable either way — the __main__ guard at
+# the bottom is otherwise decorative.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from speech_note import audio, naming, textproc
 from speech_note.capture import SegmentCollector
@@ -1262,7 +1268,10 @@ class ServerCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             model = Path(tmp) / "model.gguf"
             model.write_text("fake")
-            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
+            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model), \
+                 mock.patch(
+                     "speech_note.llama_server.PREFERRED_GGUF_MODEL", Path("/absent.gguf")
+                 ):
                 with mock.patch("speech_note.llama_server.shutil.which", return_value="/bin/llama-server"):
                     # KV offload is on by default (fixed upstream; ~1.5x faster).
                     command = default_server_command(context_tokens=4096)
@@ -1406,7 +1415,10 @@ class ServerCommandTests(unittest.TestCase):
             model.write_bytes(b"x" * 1024)
             err = io.StringIO()
             with mock.patch("speech_note.llama_server.shutil.which", return_value="/bin/llama-server"):
-                with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
+                with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model), \
+                     mock.patch(
+                         "speech_note.llama_server.PREFERRED_GGUF_MODEL", Path("/absent.gguf")
+                     ):
                     with mock.patch(
                         "speech_note.llama_server.model_ram_shortfall",
                         return_value=5 * 1024**3,
@@ -1465,10 +1477,11 @@ class ServerCommandTests(unittest.TestCase):
                 HF_HUB_DOWNLOAD_TIMEOUT=10,
                 HF_HUB_DISABLE_XET=False,
             )
-            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
-                with mock.patch("speech_note.llama_server.time.sleep"):
-                    with mock.patch.dict("sys.modules", {"huggingface_hub": fake_hub}):
-                        self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
+            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model), \
+                 mock.patch("speech_note.llama_server.time.sleep"), \
+                 mock.patch.dict("sys.modules", {"huggingface_hub": fake_hub}), \
+                 redirect_stderr(io.StringIO()):  # the retry notice is real output
+                self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
             self.assertEqual(attempts, 2)
 
     def test_cleanup_download_progress_resets_stalled_failure_count(self) -> None:
@@ -1495,10 +1508,11 @@ class ServerCommandTests(unittest.TestCase):
                 HF_HUB_DOWNLOAD_TIMEOUT=10,
                 HF_HUB_DISABLE_XET=False,
             )
-            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model):
-                with mock.patch("speech_note.llama_server.time.sleep"):
-                    with mock.patch.dict("sys.modules", {"huggingface_hub": fake_hub}):
-                        self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
+            with mock.patch("speech_note.llama_server.DEFAULT_GGUF_MODEL", model), \
+                 mock.patch("speech_note.llama_server.time.sleep"), \
+                 mock.patch.dict("sys.modules", {"huggingface_hub": fake_hub}), \
+                 redirect_stderr(io.StringIO()):  # the retry notice is real output
+                self.assertTrue(ensure_default_cleanup_model(auto_yes=True))
             self.assertEqual(attempts, 13)
 
 
@@ -2271,7 +2285,9 @@ class NoAsrTranscriptTests(unittest.TestCase):
 
     def test_no_primary_secondary_flags_remain(self) -> None:
         for flag in ("--primary-transcript", "--secondary-transcript"):
-            with self.assertRaises(SystemExit):
+            # argparse's own usage error is real stderr output; keep it off the
+            # test run's terminal.
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                 parse_args([flag, "/tmp/x.txt"])
 
     def test_transcript_only_pipeline_cleans_extra_transcripts(self) -> None:
@@ -2394,10 +2410,6 @@ class ShortOptionTests(unittest.TestCase):
     def test_extra_transcript_short_flag_repeatable(self) -> None:
         args = parse_args(["-x", "a.txt", "-x", "b.txt"])
         self.assertEqual(args.extra_transcript, [Path("a.txt"), Path("b.txt")])
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class UncertaintyAnnotationTests(unittest.TestCase):
@@ -3065,3 +3077,7 @@ class UncertaintyAnnotationTests(unittest.TestCase):
         with mock.patch("speech_note.cli.preferred_model_selected", return_value=False):
             self.assertTrue(make_config("-u").organizer.annotate)
         self.assertFalse(make_config("--online-paid", "-U").organizer.annotate)
+
+
+if __name__ == "__main__":
+    unittest.main()
