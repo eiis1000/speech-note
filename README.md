@@ -163,8 +163,12 @@ speech-note -fFi /path/to/inbox --parallel
 
 `-P` includes `--parallel` in its preset. Every other mode is sequential by
 default—even if its current backends happen to be remote—and must opt in with
-`--parallel`. `--no-parallel` overrides `-P`. Failures remain per-item: the rest
-of the batch completes, and the command exits nonzero if any item failed.
+`--parallel`. `--no-parallel` overrides `-P`. At most four items run at once:
+each one is a whole pipeline, and levelling a single 65-minute recording holds
+about 1.5 GB, so an unbounded fan-out over a directory of long files exhausts
+RAM rather than going faster. `--parallel-workers N` raises the ceiling when the
+inputs are short or the machine is large. Failures remain per-item: the rest of
+the batch completes, and the command exits nonzero if any item failed.
 
 Add external transcripts (Google Recorder etc.) as extra sources for cleanup —
 `.srt`/`.vtt` files are parsed down to their text, `.txt` and `.json` are

@@ -700,7 +700,9 @@ def _run_batch(config: "Config", entries: list[BatchEntry]) -> Session:
     if not entries:
         raise SystemExit("no audio or archive files to process")
     mode = "parallel" if config.parallel and len(entries) > 1 else "sequential"
-    print(f"batch: {len(entries)} file(s), {mode}", file=sys.stderr)
+    workers = min(len(entries), max(1, config.parallel_workers))
+    detail = f"{mode} x{workers}" if mode == "parallel" else mode
+    print(f"batch: {len(entries)} file(s), {detail}", file=sys.stderr)
 
     def process(numbered: tuple[int, BatchEntry]) -> bool:
         index, batch_entry = numbered
@@ -738,7 +740,7 @@ def _run_batch(config: "Config", entries: list[BatchEntry]) -> Session:
 
     numbered = list(enumerate(entries, start=1))
     if mode == "parallel":
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(entries)) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             failures = sum(executor.map(process, numbered))
     else:
         failures = sum(process(item) for item in numbered)

@@ -78,6 +78,9 @@ class Config:
     full_auto: bool
     # Concurrent independent batch items. Has no effect on a single input.
     parallel: bool
+    # Ceiling on those concurrent items (see DEFAULT_PARALLEL_WORKERS for why there
+    # is one). Ignored when parallel is False.
+    parallel_workers: int
     # Directory the auto-named full-auto output is written into (default: cwd). Set
     # per item by the batch pipeline so outputs land in the input directory.
     full_auto_output_dir: Path | None
@@ -226,6 +229,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Process independent batch inputs concurrently. Included by default in the "
             "--online-paid preset; every other mode is sequential unless this flag is "
             "passed explicitly. --no-parallel overrides the paid preset."
+        ),
+    )
+    parser.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=None,
+        help=(
+            "Ceiling on concurrently processed batch inputs (default "
+            f"{defaults.DEFAULT_PARALLEL_WORKERS}). Each item runs a whole pipeline, and "
+            "levelling one long recording holds ~1.5 GB, so unbounded concurrency over a "
+            "directory of long files exhausts RAM. Raise it for short inputs or a big "
+            "machine."
         ),
     )
     # ASR collection
@@ -489,6 +504,13 @@ def resolve_config(args: argparse.Namespace) -> Config:
     # Parallel execution is a preset choice, not inferred from current backends: -P
     # includes it, while every other mode requires an explicit --parallel.
     parallel = args.parallel if args.parallel is not None else connectivity == "online-paid"
+    # `is None`, not `or`: an explicit --parallel-workers 0 must reach validate and be
+    # rejected, not silently become the default.
+    parallel_workers = (
+        defaults.DEFAULT_PARALLEL_WORKERS
+        if args.parallel_workers is None
+        else args.parallel_workers
+    )
 
     artifacts_dir: Path = args.artifacts_dir
     output: Path | None = args.output
@@ -521,6 +543,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         archive_dir=artifacts_dir / "logs",
         full_auto=args.full_auto,
         parallel=parallel,
+        parallel_workers=parallel_workers,
         full_auto_output_dir=None,
         asr_sources=asr_sources,
         asr_compute_type=args.asr_compute_type,
@@ -610,6 +633,8 @@ def validate(config: Config) -> None:
         )
     if (config.input_dir is not None or config.input_batch) and config.output is not None:
         raise SystemExit("--output names one file and cannot be used with a batch")
+    if config.parallel_workers < 1:
+        raise SystemExit("--parallel-workers must be at least 1")
     if (
         config.no_asr
         and config.input_file is not None

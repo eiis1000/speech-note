@@ -15,6 +15,7 @@ import re
 import struct
 import tempfile
 import threading
+import time
 import types
 import sys
 import unittest
@@ -611,6 +612,42 @@ class DirectoryBatchTests(unittest.TestCase):
         )
         self.assertEqual(entries[0].output_dir, first)
         self.assertEqual(entries[-1].output_dir, second)
+
+    def test_parallel_batch_is_capped_so_a_big_directory_cannot_exhaust_ram(self) -> None:
+        """Each item runs a whole pipeline, and levelling one long recording holds
+        ~1.5 GB of float64. max_workers=len(entries) turned a directory of 30 long
+        files into a ~45 GB allocation — and --online-paid enables parallelism
+        without being asked, so nobody opted into that."""
+        from speech_note.config import DEFAULT_PARALLEL_WORKERS
+
+        directory = self._dir()
+        names = [str(directory / f"item{i}.wav") for i in range(12)]
+        config = make_config("--full-auto", "--parallel", "-i", *names)
+        self.assertEqual(config.parallel_workers, DEFAULT_PARALLEL_WORKERS)
+        peak = 0
+        live = 0
+        lock = threading.Lock()
+
+        def fake_run(item: Config) -> Session:
+            nonlocal peak, live
+            with lock:
+                live += 1
+                peak = max(peak, live)
+            time.sleep(0.01)
+            with lock:
+                live -= 1
+            return Session(item)
+
+        with mock.patch("speech_note.pipeline.run_file_pipeline", side_effect=fake_run):
+            with redirect_stderr(io.StringIO()):
+                run_input_batch_pipeline(config)
+        self.assertLessEqual(peak, DEFAULT_PARALLEL_WORKERS)
+        self.assertGreater(peak, 1, "the cap must still allow real concurrency")
+
+    def test_parallel_workers_flag_overrides_the_cap(self) -> None:
+        self.assertEqual(make_config("--parallel-workers", "16").parallel_workers, 16)
+        with self.assertRaises(SystemExit):
+            validate(make_config("--parallel-workers", "0", "--input-text", "x"))
 
     def test_parallel_batch_really_overlaps_items(self) -> None:
         directory = self._dir()

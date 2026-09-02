@@ -44,6 +44,7 @@ __all__ = [
     "ANNOTATION_MAX_NOTES_CEILING", "ANNOTATION_TOKENS_PER_NOTE",
     "ORGANIZER_CONTEXT_SAFETY",
     "CLEANUP_MIN_LENGTH_RATIO", "CLEANUP_TARGET_LENGTH_RATIO",
+    "DEFAULT_PARALLEL_WORKERS",
     "ARCHIVE_AUDIO_EXTENSIONS", "ARCHIVE_TRANSCRIPT_EXTENSIONS",
 ]
 
@@ -457,6 +458,18 @@ ORGANIZER_CONTEXT_SAFETY = 0.92
 # as fractions of the mean source length; both are review hints, never gates.
 CLEANUP_MIN_LENGTH_RATIO = 0.6
 CLEANUP_TARGET_LENGTH_RATIO = 0.8
+
+# --- independent input batches (--parallel) ---
+# Concurrent batch items, capped. Each item runs a whole pipeline, and the peak is
+# normalization: it holds the recording plus a levelled copy plus a per-sample gain
+# curve as float64, so a 65-minute file costs ~1.5 GB while it is being levelled.
+# max_workers=len(entries) — what this used to be — turns a directory of 30 long
+# recordings into a ~45 GB allocation on a machine with 32, and --online-paid turns
+# parallelism on without being asked. Four long files is ~6 GB and still overlaps
+# essentially all of the hosted-ASR latency the mode exists for. Raise it with
+# --parallel-workers when the inputs are short (voice memos cost nothing) or the
+# machine is big.
+DEFAULT_PARALLEL_WORKERS = 4
 
 # --- archive mode ---
 ARCHIVE_AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav", ".ogg", ".opus", ".flac", ".aac", ".webm", ".mp4"}
