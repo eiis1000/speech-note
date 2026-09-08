@@ -225,6 +225,9 @@ class ArtifactStore:
             # that want pure prose (TTS, word counts, pasting into notes) get the
             # pre-annotation text as a real artifact instead of a diagnostics field.
             write_pair("clean.plain.latest", "clean-plain", session.cleanup.text_before_annotation)
+        else:
+            # A previous run's prose must not masquerade as this run's plain text.
+            (self.artifacts_dir / "clean.plain.latest").unlink(missing_ok=True)
 
         if session.recorded_audio:
             latest_wav = self.artifacts_dir / "recording.latest.wav"

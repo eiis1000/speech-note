@@ -149,6 +149,8 @@ speech-note --input /path/to/audio.m4a --full-auto
 succeeded (failed, empty, or truncated cleanup writes nothing and the process
 exits nonzero), keeps the usual artifacts in a temporary directory, and on any
 error drops a matching `<input>-clean-diagnostics.json` next to the output.
+If a microphone run fails or is interrupted, its captured audio is also saved as
+`<output-stem>-recording.wav` beside the diagnostics so it can be transcribed again.
 
 Pass several inputs after one `--input` (or repeat the flag), or pass a directory
 to process each top-level audio/zip as an independent full-auto job. Batch outputs
@@ -169,6 +171,8 @@ about 1.5 GB, so an unbounded fan-out over a directory of long files exhausts
 RAM rather than going faster. `--parallel-workers N` raises the ceiling when the
 inputs are short or the machine is large. Failures remain per-item: the rest of
 the batch completes, and the command exits nonzero if any item failed.
+Auto-named outputs are claimed exclusively when written, so inputs sharing a stem
+(for example `note.wav` and `note.mp3`) receive separate files even in parallel.
 
 Add external transcripts (Google Recorder etc.) as extra sources for cleanup —
 `.srt`/`.vtt` files are parsed down to their text, `.txt` and `.json` are

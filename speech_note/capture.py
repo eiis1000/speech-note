@@ -36,6 +36,7 @@ from .model import Transcript
 from .organizer import build_organizer
 from .pipeline import (
     finalize,
+    commit_artifacts,
     load_extra_transcripts,
     run_final_asr,
     start_organizer_prewarm,
@@ -242,12 +243,9 @@ class CaptureRunner:
 
     def _transcribe_worker(self) -> None:
         while True:
-            try:
-                item = self.segment_queue.get(timeout=0.5)
-            except queue.Empty:
-                if self.stop_event.is_set():
-                    return
-                continue
+            # Capture stopping does not mean segmentation has finished: the final
+            # utterance is queued during the drain. Only the sentinel ends this worker.
+            item = self.segment_queue.get()
             if item is None:
                 return
             try:
@@ -318,6 +316,8 @@ class CaptureRunner:
 
     def _enqueue_segment(self, segment: bytes) -> None:
         self.session.add_audio_segment(segment, sample_rate=self.sample_rate)
+        if self.config.no_asr:
+            return
         segment_path = self.temp_dir / f"segment-{time.time_ns()}.wav"
         write_wav(segment_path, segment, self.sample_rate)
         self.segment_queue.put(segment_path)
@@ -383,7 +383,8 @@ class CaptureRunner:
                     "capture_samplerate": self.sample_rate,
                 }
 
-        self._spawn(self._transcribe_worker, "live-transcribe")
+        if not config.no_asr:
+            self._spawn(self._transcribe_worker, "live-transcribe")
         previous_sigint = signal.signal(signal.SIGINT, self._signal_stop)
         previous_sigterm = signal.signal(signal.SIGTERM, self._signal_stop)
         # One status phase spans capture and the live-transcription drain: the
@@ -430,9 +431,10 @@ class CaptureRunner:
             self._note(
                 f"Live capture sample rate: {self.sample_rate} Hz (requested {config.sample_rate} Hz)."
             )
-        self._note("Raw transcript will print live below.")
-        self._spawn(self._load_live_transcriber, "live-model-load")
-        self._spawn(self._prewarm_primary, "primary-prewarm")
+        if not config.no_asr:
+            self._note("Raw transcript will print live below.")
+            self._spawn(self._load_live_transcriber, "live-model-load")
+            self._spawn(self._prewarm_primary, "primary-prewarm")
 
     def _drain_and_collect(self) -> Path | None:
         # Drain whatever the callback enqueued before the stream closed.
@@ -470,6 +472,8 @@ class CaptureRunner:
         return recording_path
 
     def cleanup(self) -> None:
+        self.stop_event.set()
+        self.segment_queue.put(None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
 
@@ -485,12 +489,21 @@ def run_capture_pipeline(config: "Config") -> Session:
         except Exception as exc:
             session.add_error(f"audio input failed: {exc}")
             raise SystemExit(f"audio input failed: {exc}") from None
-        if recording_path is not None:
+        if recording_path is not None and not config.no_asr:
             # Construction is lazy and cheap; the heavy model load happens inside
             # run_final_asr (prepare + preload), under its own status phases.
             built = build_transcribers(config)
             run_final_asr(config, session, recording_path, built=built)
         finalize(config, session, organizer)
+    except (Exception, KeyboardInterrupt, SystemExit) as exc:
+        # Preserve captured audio even if final ASR is interrupted or the input
+        # stream fails. The temporary recording otherwise vanishes in cleanup().
+        session.run_failed = True
+        if not session.errors:
+            session.add_error(f"capture run interrupted: {exc or type(exc).__name__}")
+        if "latest_diagnostics" not in session.paths:
+            commit_artifacts(config, session)
+        raise
     finally:
         if prewarm is not None:
             prewarm.join(timeout=0.1)

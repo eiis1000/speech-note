@@ -66,6 +66,20 @@ def unique_directory_path(directory: Path) -> Path:
     raise RuntimeError(f"could not choose unused directory for {directory}")
 
 
+def write_unique_output(path: Path, content: str) -> Path:
+    """Claim and write an auto-named output without overwriting a concurrent run."""
+    for _ in range(1000):
+        candidate = unique_output_path(path.parent, path.stem, path.suffix)
+        try:
+            handle = candidate.open("x", encoding="utf-8")
+        except FileExistsError:
+            continue  # another worker claimed it between the lookup and the open
+        with handle:
+            handle.write(content)
+        return candidate
+    raise RuntimeError(f"could not claim unused output filename for {path}")
+
+
 def full_auto_source_stem(config: "Config") -> str:
     """Stem describing the input and its transcript sources."""
     extra_tags = [

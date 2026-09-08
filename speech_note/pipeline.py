@@ -21,14 +21,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .asr import build_transcribers, prepare_sources, run_asr_collection
-from .audio import normalize_audio_for_asr, probe_duration_seconds
+from .audio import normalize_audio_for_asr, probe_duration_seconds, write_wav
 from .config import (
     ARCHIVE_AUDIO_EXTENSIONS,
     ARCHIVE_TRANSCRIPT_EXTENSIONS,
     short_model_name,
 )
 from .model import CleanupOutcome, Transcript
-from .naming import full_auto_output_path, unique_directory_path, unique_output_path
+from .naming import full_auto_output_path, unique_directory_path, unique_output_path, write_unique_output
 from .textproc import sanitize_filename_stem
 from .organizer import Organizer, build_organizer, cleanup_messages, cleanup_request_plan
 from .session import ArtifactStore, Session
@@ -287,8 +287,12 @@ def write_output_file(config: "Config", session: Session) -> None:
     if not cleanup.text:
         return
     config.output.parent.mkdir(parents=True, exist_ok=True)
-    config.output.write_text(cleanup.text + "\n", encoding="utf-8")
-    session.paths["output"] = str(config.output)
+    if config.output_auto_named:
+        output = write_unique_output(config.output, cleanup.text + "\n")
+    else:
+        output = config.output
+        output.write_text(cleanup.text + "\n", encoding="utf-8")
+    session.paths["output"] = str(output)
 
 
 def auto_sources_export_dir(config: "Config") -> Path:
@@ -351,11 +355,24 @@ def write_sources_export(config: "Config", session: Session, *, directory: Path 
 
 def commit_artifacts(config: "Config", session: Session) -> None:
     """Single commit point for all artifacts, including full-auto diagnostics."""
+    if config.full_auto and session.recorded_audio and (
+        session.errors or session.cleanup is None or not session.cleanup.text
+    ):
+        # Full-auto's temporary artifacts are deleted on exit. A failed microphone
+        # run has no other copy of its input, so keep a recoverable WAV beside its
+        # diagnostics instead of discarding the user's recording.
+        anchor = config.output or Path.cwd() / "speech-note"
+        recovery = unique_output_path(anchor.parent, f"{anchor.stem}-recording", ".wav")
+        write_wav(recovery, bytes(session.recorded_audio), session.recording_sample_rate)
+        session.paths["recovery_recording"] = str(recovery)
+        print(f"saved recovery recording: {recovery}", file=sys.stderr)
     write_output_file(config, session)
     write_sources_export(config, session)
     error_diag_path: Path | None = None
     if config.full_auto and session.errors:
-        anchor = config.output if config.output is not None else Path.cwd() / "speech-note"
+        anchor = Path(session.paths["output"]) if "output" in session.paths else (
+            config.output if config.output is not None else Path.cwd() / "speech-note"
+        )
         error_diag_path = unique_output_path(anchor.parent, f"{anchor.stem}-diagnostics", ".json")
         session.paths["error_diagnostics"] = str(error_diag_path)
     store = ArtifactStore(config.artifacts_dir, config.archive_dir)
@@ -530,12 +547,13 @@ def finalize(config: "Config", session: Session, organizer: Organizer) -> None:
     if config.full_auto:
         session.copy_choice = "n"
         session.clipboard_status = "skipped"
+        if (session.cleanup is None or not session.cleanup.text) and not session.errors:
+            session.add_error("cleanup produced no text")
     commit_artifacts(config, session)
     report(config, session)
     cleanup = session.cleanup
     session.run_failed = not session.produced_output or (
         config.full_auto
-        and config.organizer.mode == "llama"
         and (cleanup is None or not cleanup.text or bool(cleanup.error))
     )
 

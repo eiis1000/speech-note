@@ -1752,6 +1752,7 @@ class PipelineEndToEndTests(unittest.TestCase):
                         "--organizer-mode", "llama",
                         "--organizer-api-base", "http://127.0.0.1:9/v1/chat/completions",
                         "--export-sources", str(export),
+                        "--artifacts-dir", str(tmp / "artifacts"),
                         "--organizer-server-command",  # empty: no server launch
                     ]
                 )

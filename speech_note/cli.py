@@ -100,6 +100,8 @@ class Config:
     # Directory the auto-named full-auto output is written into (default: cwd). Set
     # per item by the batch pipeline so outputs land in the input directory.
     full_auto_output_dir: Path | None
+    # Auto-named outputs must never overwrite another run's file.
+    output_auto_named: bool
     # ASR: an ordered collection of sources, all fed to the cleanup LM as peers.
     asr_sources: tuple[AsrSource, ...]
     asr_compute_type: str  # faster-whisper compute type (applies to faster-whisper sources)
@@ -596,6 +598,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         announce_remote_cleanup=announce_remote_cleanup,
         announce_remote_asr=announce_remote_asr,
         full_auto_output_dir=None,
+        output_auto_named=args.full_auto and args.output is None,
         asr_sources=asr_sources,
         asr_compute_type=args.asr_compute_type,
         asr_cpu_threads=args.asr_cpu_threads,

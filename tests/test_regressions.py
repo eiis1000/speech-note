@@ -189,5 +189,98 @@ class AudioTailTests(unittest.TestCase):
                 self.assertEqual(len(fed), ((length + 511) // 512) * 512)
 
 
+class OutputAndCaptureTests(unittest.TestCase):
+    def test_parallel_same_stem_outputs_are_both_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            barrier = threading.Barrier(2)
+            cfg = dataclasses.replace(config("-f", "-t", "hello"), output=root / "same-clean.txt")
+
+            def write(text):
+                session = Session(cfg)
+                session.cleanup = CleanupOutcome(text=text)
+                barrier.wait(timeout=2)
+                pipeline.write_output_file(cfg, session)
+                return session.paths["output"]
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                paths = list(pool.map(write, ("first recording", "second recording")))
+            self.assertEqual(len(set(paths)), 2)
+            self.assertEqual({Path(p).read_text().strip() for p in paths},
+                             {"first recording", "second recording"})
+
+    def test_plain_latest_is_removed_when_the_next_run_has_no_annotations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config("--artifacts-dir", tmp)
+            store = ArtifactStore(cfg.artifacts_dir, cfg.archive_dir)
+            first = Session(cfg)
+            first.cleanup = CleanupOutcome(text="Old.[1]", text_before_annotation="Old.")
+            store.commit(first)
+            second = Session(cfg)
+            second.cleanup = CleanupOutcome(text="New.")
+            store.commit(second)
+            self.assertFalse((Path(tmp) / "clean.plain.latest").exists())
+            self.assertEqual(Path(first.paths["archive_clean_plain"]).read_text(), "Old.\n")
+
+    def test_full_auto_empty_heuristic_cleanup_is_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            out = Path(tmp) / "out.txt"
+            session = pipeline.run_dry_text_pipeline(config("-f", "-t", "um uh", "-o", str(out)))
+            self.assertTrue(session.run_failed)
+            self.assertFalse(out.exists())
+            self.assertTrue((Path(tmp) / "out-diagnostics.json").exists())
+
+    def test_live_worker_waits_for_the_final_segment_after_capture_stops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = object.__new__(capture.CaptureRunner)
+            runner.config = config()
+            runner.session = Session(runner.config)
+            runner.segment_queue = queue.Queue()
+            runner.stop_event = threading.Event()
+            runner.stop_event.set()
+            runner.live_transcriber_ready = threading.Event()
+            runner.live_transcriber_ready.set()
+            runner.live_transcriber = mock.Mock()
+            runner.live_transcriber.transcribe_file.return_value = "final utterance"
+            runner.live_chunks = []
+            runner._note = mock.Mock()
+            worker = threading.Thread(target=runner._transcribe_worker, daemon=True)
+            worker.start()
+            try:
+                worker.join(timeout=0.6)  # the old worker exits after a 0.5 s empty poll
+                self.assertTrue(worker.is_alive())
+                segment = Path(tmp) / "tail.wav"
+                segment.write_bytes(b"audio")
+                runner.segment_queue.put(segment)
+            finally:
+                runner.segment_queue.put(None)
+                worker.join(timeout=2)
+            self.assertEqual(runner.live_chunks, ["final utterance"])
+            self.assertFalse(worker.is_alive())
+
+    def test_capture_interruption_preserves_audio_and_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config("-f", "--input-device", "0", "-o", str(Path(tmp) / "note.txt"))
+            pcm = np.full(1600, 1000, dtype="<i2").tobytes()
+
+            def build_runner(_cfg, session):
+                runner = mock.Mock()
+                def interrupt():
+                    session.observe_audio_frame(pcm)
+                    raise KeyboardInterrupt
+                runner.run.side_effect = interrupt
+                return runner
+
+            with mock.patch("speech_note.capture.CaptureRunner", side_effect=build_runner), \
+                 redirect_stderr(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+                capture.run_capture_pipeline(cfg)
+            recovered = Path(tmp) / "note-recording.wav"
+            with wave.open(str(recovered)) as handle:
+                self.assertEqual(handle.readframes(handle.getnframes()), pcm)
+            payload = json.loads((Path(tmp) / "note-diagnostics.json").read_text())
+            self.assertTrue(payload["errors"])
+            self.assertEqual(payload["paths"]["recovery_recording"], str(recovered))
+
+
 if __name__ == "__main__":
     unittest.main()

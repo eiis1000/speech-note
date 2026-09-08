@@ -20,6 +20,7 @@ __pycache__/
 # Runtime outputs
 /raw.latest
 /clean.latest
+/clean.plain.latest
 /diagnostics.latest.json
 /recording.latest.wav
 /speech_notes.txt
