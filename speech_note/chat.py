@@ -209,21 +209,29 @@ class ChatClient:
                         failures, index=index, models=models, on_model_failure=on_model_failure
                     )
                     continue
-                choices = data.get("choices")
-                if not choices:
-                    detail = data.get("error", data)
+                choices = data.get("choices") if isinstance(data, dict) else None
+                if not isinstance(choices, list) or not choices:
+                    detail = data.get("error", data) if isinstance(data, dict) else data
                     failures.append(f"{model}: HTTP 200 but no choices ({json.dumps(detail)[:300]})")
                     self._advance_or_raise(
                         failures, index=index, models=models, on_model_failure=on_model_failure
                     )
                     continue
                 choice = choices[0]
+                message = choice.get("message") if isinstance(choice, dict) else None
+                content = _content_to_text(message.get("content")) if isinstance(message, dict) else ""
+                if not content:
+                    failures.append(f"{model}: HTTP 200 but empty or malformed message")
+                    self._advance_or_raise(
+                        failures, index=index, models=models, on_model_failure=on_model_failure
+                    )
+                    continue
                 # Record what the server says it served; for llama-server the
                 # requested name is decorative, the response is authoritative.
                 served = data.get("model") or model
                 self.last_served_model = served
                 return ChatResponse(
-                    content=_content_to_text(choice.get("message", {}).get("content")),
+                    content=content,
                     served_model=served,
                     finish_reason=choice.get("finish_reason"),
                 )

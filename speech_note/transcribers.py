@@ -628,11 +628,9 @@ def _openrouter_asr_user_text(language: str) -> str:
 class OpenRouterTranscriber(Transcriber):
     """Whole-file ASR via an OpenRouter audio-LLM (the chat ``input_audio`` path).
 
-    The dedicated OpenRouter transcription models reject a long single request, but an
-    audio-LLM such as Gemini 3 Flash transcribes an entire long recording in one chat
-    call — and, given the whole file at once, annotates non-speech instead of
-    confabulating it (the failure mode of per-chunk audio-LLM transcription). The whole
-    file is transcoded to mono mp3 (a long 16 kHz wav is too large to base64 into a JSON
+    This optional backend can confabulate on unclear audio and repeat itself on long
+    recordings; the default hosted collection uses dedicated recognizers instead.
+    The whole file is transcoded to mono mp3 (a long 16 kHz wav is too large to base64 into a JSON
     body), sent as ``input_audio``, and the reply is the transcript. Nothing is
     downloaded; the only requirement is the API key. Failures are non-fatal — the source
     simply produces no transcript and its peers (local whisper+sherpa) still run.
@@ -698,6 +696,8 @@ class OpenRouterTranscriber(Transcriber):
             },
         ]
         response = client.chat(messages, max_tokens=self.max_output_tokens, timeout=timeout)
+        if response.finish_reason == "length":
+            raise RuntimeError("audio-LLM transcript was truncated at the output token limit")
         return normalize_spacing(response.content)
 
 

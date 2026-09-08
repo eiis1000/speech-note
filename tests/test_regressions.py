@@ -282,5 +282,47 @@ class OutputAndCaptureTests(unittest.TestCase):
             self.assertEqual(payload["paths"]["recovery_recording"], str(recovered))
 
 
+class ResponseIntegrityTests(unittest.TestCase):
+    def test_truncated_audio_llm_response_is_an_asr_error(self):
+        transcriber = build_transcriber(config(), parse_asr_source("openrouter"))
+        response = ChatResponse("incomplete transcript", "model", "length")
+        def encode(_source, target, **_kwargs):
+            target.write_bytes(b"synthetic audio")
+        with mock.patch("speech_note.audio.encode_to_mp3", side_effect=encode), \
+             mock.patch("speech_note.chat.ChatClient.chat", return_value=response), \
+             self.assertRaisesRegex(RuntimeError, "truncated"):
+            transcriber.transcribe_file(Path("unused.wav"), "en")
+
+    def test_malformed_or_empty_chat_responses_fall_through(self):
+        for body in ([], None, {"choices": {}}, {"choices": [None]},
+                     {"choices": [{"message": None}]},
+                     {"choices": [{"message": {"content": " "}}]}):
+            with self.subTest(body=body):
+                client = ChatClient(api_base="http://unused/v1/chat/completions", models=["bad", "good"], timeout=1)
+                bad = mock.Mock(ok=True, status_code=200)
+                bad.json.return_value = body
+                good = mock.Mock(ok=True, status_code=200)
+                good.json.return_value = {"model": "good", "choices": [{"message": {"content": "Complete."}, "finish_reason": "stop"}]}
+                with mock.patch.object(client, "candidate_models", return_value=["bad", "good"]), \
+                     mock.patch("speech_note.chat.requests.post", side_effect=[bad, good]):
+                    response = client.chat([], max_tokens=100, timeout=1)
+                self.assertEqual(response.content, "Complete.")
+                self.assertEqual(response.served_model, "good")
+
+    def test_citation_display_cannot_reorder_or_multiply_source_words(self):
+        source = Transcript("asr1", "m", "asr-final", "Alice called Bob")
+        for display in ("Bob called Alice", "Alice called Bob Bob"):
+            citation = annotate.Citation(display, 1, source.text)
+            notes, rejected = annotate.verify_notes([annotate.UncertaintyNote("q", (citation,))], [source])
+            self.assertEqual(rejected, 0)
+            self.assertEqual(notes[0].alternatives[0].display(), source.text)
+
+    def test_citation_verification_preserves_non_ascii_words(self):
+        source = Transcript("asr1", "m", "asr-final", "the house 大房子")
+        citation = annotate.Citation("", 1, "the house 小房子")
+        notes, rejected = annotate.verify_notes([annotate.UncertaintyNote("q", (citation,))], [source])
+        self.assertEqual((notes, rejected), ([], 1))
+
+
 if __name__ == "__main__":
     unittest.main()

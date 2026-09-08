@@ -1320,7 +1320,8 @@ class ChatClientCatalogTests(unittest.TestCase):
                 "choices": [{"message": {"content": "clean"}, "finish_reason": "stop"}],
             },
         )
-        with mock.patch("speech_note.chat.requests.post", return_value=response) as post:
+        with mock.patch.object(client, "candidate_models", return_value=["model"]), \
+             mock.patch("speech_note.chat.requests.post", return_value=response) as post:
             client.chat([{"role": "user", "content": "transcript"}], max_tokens=4096, timeout=1)
         payload = json.loads(post.call_args.kwargs["data"])
         self.assertEqual(payload["reasoning"], {"effort": "none"})

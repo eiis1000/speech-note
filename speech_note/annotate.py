@@ -323,7 +323,7 @@ class AnnotationResult:
 
 def _comparable(text: str) -> str:
     """Loose form for deciding whether two readings actually differ."""
-    return re.sub(r"[^a-z0-9 ]+", "", " ".join(text.lower().split()))
+    return re.sub(r"[^\w ]+", "", " ".join(text.casefold().split()))
 
 
 def _citation(candidate: object) -> Citation | None:
@@ -412,7 +412,7 @@ def parse_notes(payload: object) -> list[UncertaintyNote]:
 def _word_key(text: str) -> str:
     """Tokenized form for exact word-sequence containment: alphanumeric words only,
     casefolded, space-joined. Mechanical — no stemming, no synonyms, no fuzz."""
-    return " ".join(re.findall(r"[a-z0-9']+", text.casefold()))
+    return " ".join(re.findall(r"[^\W_]+(?:'[^\W_]+)*", text.casefold()))
 
 
 def verify_notes(
@@ -439,10 +439,13 @@ def verify_notes(
             # The reader sees ``text``, but only ``verbatim`` was verified — an
             # unfaithful "readable form" would smuggle unvetted words past the
             # citation check. A legitimate cleanup only DELETES fillers, so every
-            # displayed word must exist in the cited span; otherwise show the
-            # verbatim itself.
-            if alt.text and not (
-                set(_word_key(alt.text).split()) <= set(_word_key(alt.verbatim).split())
+            # displayed word must occur in order, with no extra repetitions.
+            # Set containment would allow "Alice called Bob" to become
+            # "Bob called Alice" despite reversing the claim.
+            remaining = iter(_word_key(alt.verbatim).split())
+            if alt.text and not all(
+                any(word == candidate for candidate in remaining)
+                for word in _word_key(alt.text).split()
             ):
                 return dataclasses.replace(alt, text="")
             return alt
