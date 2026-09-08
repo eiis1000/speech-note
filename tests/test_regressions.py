@@ -324,5 +324,53 @@ class ResponseIntegrityTests(unittest.TestCase):
         self.assertEqual((notes, rejected), ([], 1))
 
 
+class EvalIntegrityTests(unittest.TestCase):
+    def test_truncated_replies_are_not_scored_as_successes(self):
+        payload = {"provider": "test", "choices": [{
+            "message": {"content": '{"uncertain": []}'}, "finish_reason": "length",
+        }]}
+        response = mock.Mock(ok=True, status_code=200)
+        response.json.return_value = payload
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("requests.post", return_value=response):
+            out = Path(tmp) / "reply.json"
+            _, error, _ = annotation_eval.ask("key", "m", [], {}, out, "http://local")
+            self.assertIn("truncated", error)
+            _, error, _ = cleanup_eval.ask("key", "m", [], "http://local", out)
+            self.assertIn("truncated", error)
+            clip = Path(tmp) / "clip.mp3"
+            clip.write_bytes(b"synthetic audio")
+            _, error = asr_eval.transcribe_audio_llm("key", "m", clip)
+            self.assertIn("truncated", error)
+
+    def test_annotation_eval_keeps_the_required_schema_on_provider_errors(self):
+        response = mock.Mock(ok=False, status_code=400, text="unsupported schema")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("requests.post", return_value=response) as post:
+            _, error, _ = annotation_eval.ask(
+                "key", "m", [], annotate.RESPONSE_FORMAT, Path(tmp) / "reply.json",
+                "https://openrouter.ai/api/v1/chat/completions", any_quant=True,
+            )
+        self.assertIn("400", error)
+        self.assertEqual(post.call_count, 1)
+        body = post.call_args.kwargs["json"]
+        self.assertTrue(body["provider"]["require_parameters"])
+        self.assertEqual(body["response_format"], annotate.RESPONSE_FORMAT)
+
+    def test_eval_case_loaders_include_sources_after_nine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for index in range(1, 12):
+                (root / f"{index:02d}-recognizer.txt").write_text(f"source {index}")
+            (root / "clean.txt").write_text("Clean.")
+            (root / "labels.json").write_text("{}")
+            (root / "cleanup-labels.json").write_text("{}")
+            for loader in (annotation_eval.Case, cleanup_eval.Case):
+                self.assertEqual(len(loader(root).sources), 11)
+
+    def test_plain_text_numeric_references_survive_case_creation(self):
+        self.assertEqual(make_eval_case.strip_annotations("See item [12]."), "See item [12].\n")
+        annotated = 'A claim.[1] See item [12].\n\nUnclear passages:\n[1] alternative'
+        self.assertEqual(make_eval_case.strip_annotations(annotated), "A claim. See item [12].\n")
+
+
 if __name__ == "__main__":
     unittest.main()

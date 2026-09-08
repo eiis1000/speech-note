@@ -47,8 +47,13 @@ SKELETON = {
 def strip_annotations(text: str) -> str:
     """Plain prose from a possibly-annotated transcript: drop the notes list and the
     [n] anchors. Harmless on already-plain text."""
-    body = re.split(r"\n\nUnclear passages:\n", text, maxsplit=1)[0]
-    return re.sub(r"\[\d+\]", "", body).rstrip() + "\n"
+    parts = re.split(r"\n\nUnclear passages:\n", text, maxsplit=1)
+    if len(parts) == 1:
+        return text.rstrip() + "\n"
+    body, notes = parts
+    for number in re.findall(r"^\[(\d+)\]", notes, re.MULTILINE):
+        body = body.replace(f"[{number}]", "")
+    return body.rstrip() + "\n"
 
 
 def main() -> None:

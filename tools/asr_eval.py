@@ -144,7 +144,10 @@ def transcribe_audio_llm(key: str, model: str, clip: Path) -> tuple[str, str]:
     )
     if not response.ok:
         return "", f"HTTP {response.status_code} {' '.join(response.text.split())[:80]}"
-    content = ((response.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    choice = (response.json().get("choices") or [{}])[0]
+    if choice.get("finish_reason") == "length":
+        return "", "truncated reply (output token limit)"
+    content = (choice.get("message") or {}).get("content") or ""
     return content, "" if content else "empty reply"
 
 
@@ -168,10 +171,16 @@ def capitalized_tokens(text: str) -> set[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", nargs="*")
-    parser.add_argument("--models", nargs="*", default=DEFAULT_MODELS)
+    parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--run-name", default="asr")
     args = parser.parse_args()
+    if args.repeats < 1:
+        parser.error("--repeats must be at least 1")
+    for spec in args.models:
+        kind, separator, model = spec.partition(":")
+        if kind not in {"stt", "audio"} or not separator or not model:
+            parser.error(f"invalid model {spec!r}; use stt:MODEL or audio:MODEL")
 
     key = load_env_key()
     out_root = REPO / "evals" / "out" / args.run_name
@@ -183,7 +192,10 @@ def main() -> None:
             spec, repeat = job
             kind, model = spec.split(":", 1)
             fn = transcribe_stt if kind == "stt" else transcribe_audio_llm
-            text, error = fn(key, model, case.clip)
+            try:
+                text, error = fn(key, model, case.clip)
+            except (requests.RequestException, ValueError, AttributeError, TypeError) as exc:
+                text, error = "", str(exc)
             slug = model.replace("/", "_")
             out = out_root / case.name / f"{slug}.{repeat}.txt"
             out.parent.mkdir(parents=True, exist_ok=True)

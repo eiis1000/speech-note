@@ -84,7 +84,7 @@ class Case:
                 kind="asr-final",
                 text=p.read_text().strip(),
             )
-            for i, p in enumerate(sorted(path.glob("0*.txt")), start=1)
+            for i, p in enumerate(sorted(path.glob("[0-9]*-*.txt")), start=1)
         ]
         labels = json.loads((path / "cleanup-labels.json").read_text())
         self.must_keep: list[str] = labels.get("must_keep", [])
@@ -161,6 +161,8 @@ def ask(
     content = ((choice.get("message") or {}).get("content") or "").strip()
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(content + "\n")
+    if choice.get("finish_reason") == "length":
+        return "", "truncated reply (output token limit)", served_by
     if not content:
         return "", f"empty reply (finish={choice.get('finish_reason')})", served_by
     return content, "", served_by
@@ -169,7 +171,7 @@ def ask(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", nargs="*")
-    parser.add_argument("--models", nargs="*", default=DEFAULT_MODELS)
+    parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--run-name", default="cleanup")
     parser.add_argument("--api-base", default=DEFAULT_URL)
@@ -179,6 +181,8 @@ def main() -> None:
         help="do not pin OpenRouter serving to bf16/fp16/fp8",
     )
     args = parser.parse_args()
+    if args.repeats < 1:
+        parser.error("--repeats must be at least 1")
 
     key = load_env_key(args.api_base)
     out_root = REPO / "evals" / "out" / args.run_name
@@ -192,11 +196,14 @@ def main() -> None:
         def one(job: tuple[str, int]):
             model, repeat = job
             slug = model.replace("/", "_").replace(":", "_")
-            text, error, served_by = ask(
-                key, model, messages, args.api_base,
-                out_root / case.name / f"{slug}.{repeat}.txt",
-                any_quant=args.any_quant,
-            )
+            try:
+                text, error, served_by = ask(
+                    key, model, messages, args.api_base,
+                    out_root / case.name / f"{slug}.{repeat}.txt",
+                    any_quant=args.any_quant,
+                )
+            except (requests.RequestException, ValueError, AttributeError, TypeError) as exc:
+                text, error, served_by = "", str(exc), ""
             return model, repeat, text, error, served_by
 
         jobs = [(model, repeat) for model in args.models for repeat in range(args.repeats)]

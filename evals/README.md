@@ -76,6 +76,8 @@ repetition), words/wpm coverage, and capitalized tokens no other panel model pro
 
 Every harness takes `--repeats` and reports mean and range across the runs — free
 routes vary wildly run to run, and a single sample has fooled us before.
+Truncated replies and request failures count as failed runs. The annotation eval
+requires schema support, matching the product; it does not retry without the schema.
 
 The two text harnesses (`annotation_eval`, `cleanup_eval`) additionally pin OpenRouter
 serving to bf16/fp16/fp8 so repeats compare the same weights (`--any-quant` opts out)

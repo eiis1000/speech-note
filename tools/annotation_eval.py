@@ -96,7 +96,7 @@ class Case:
                 kind="asr-final",
                 text=p.read_text().strip(),
             )
-            for i, p in enumerate(sorted(path.glob("0*.txt")), start=1)
+            for i, p in enumerate(sorted(path.glob("[0-9]*-*.txt")), start=1)
         ]
         labels = json.loads((path / "labels.json").read_text())
         self.expected: dict[str, list[str]] = labels.get("expected", {})
@@ -245,11 +245,13 @@ def ask(
         "response_format": fmt,
         "reasoning": {"effort": "low" if model in REASONING_MANDATORY else "none"},
     }
-    if "openrouter" in url and not any_quant:
+    if "openrouter" in url:
         # Routes silently swap providers AND quantizations between runs, which makes
         # run-to-run comparisons meaningless. Pin to high-precision serving; pass
         # --any-quant to measure whatever the route feels like today.
-        body["provider"] = {"quantizations": ["bf16", "fp16", "fp8"]}
+        body["provider"] = {"require_parameters": True}
+        if not any_quant:
+            body["provider"]["quantizations"] = ["bf16", "fp16", "fp8"]
     unpinned = False
     for attempt in range(6):
         response = requests.post(
@@ -261,17 +263,12 @@ def ask(
         if response.status_code == 429:
             time.sleep(30 * (attempt + 1))
             continue
-        if response.status_code == 404 and "quantization" in response.text and "provider" in body:
+        if response.status_code == 404 and "quantization" in response.text and "quantizations" in body.get("provider", {}):
             # Closed-weight models expose no quantization metadata, so the precision
             # filter excludes every endpoint. Retry unpinned; the provider report
             # marks it so mixed-precision serving stays visible.
-            body.pop("provider")
+            body["provider"].pop("quantizations")
             unpinned = True
-            continue
-        if response.status_code == 400 and "response_format" in body:
-            # Provider rejects json_schema: measure whether the prompt alone holds
-            # the format — the situation the product is in on such providers.
-            body.pop("response_format")
             continue
         if not response.ok:
             return [], f"HTTP {response.status_code} {' '.join(response.text.split())[:90]}", ""
@@ -280,6 +277,8 @@ def ask(
         out_file.write_text(json.dumps(payload, indent=2))
         served_by = str(payload.get("provider") or "?") + (" (unpinned)" if unpinned else "")
         choice = (payload.get("choices") or [{}])[0]
+        if choice.get("finish_reason") == "length":
+            return [], "truncated reply (output token limit)", served_by
         content = (choice.get("message") or {}).get("content") or ""
         notes, understood = decode_response(content)
         if not understood:
@@ -301,7 +300,7 @@ def verified(notes, case: Case) -> tuple[list, int]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", nargs="*", help="case directories (default: all under evals/)")
-    parser.add_argument("--models", nargs="*", default=DEFAULT_MODELS)
+    parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--run-name", default="run")
     parser.add_argument(
         "--api-base",
@@ -331,6 +330,8 @@ def main() -> None:
         help="per-request read timeout in seconds; raise for slow local servers",
     )
     args = parser.parse_args()
+    if args.repeats < 1:
+        parser.error("--repeats must be at least 1")
 
     key = load_env_key(args.api_base)
     cases = discover_cases(args.cases)
@@ -350,11 +351,14 @@ def main() -> None:
             model, repeat = job
             slug = model.replace("/", "_").replace(":", "_")
             fmt = response_format(notes_cap(case.clean))
-            notes, error, served_by = ask(
-                key, model, messages, fmt,
-                out_root / case.name / f"{slug}.{repeat}.json", args.api_base,
-                any_quant=args.any_quant, timeout=args.timeout,
-            )
+            try:
+                notes, error, served_by = ask(
+                    key, model, messages, fmt,
+                    out_root / case.name / f"{slug}.{repeat}.json", args.api_base,
+                    any_quant=args.any_quant, timeout=args.timeout,
+                )
+            except (requests.RequestException, ValueError, AttributeError, TypeError) as exc:
+                notes, error, served_by = [], str(exc), ""
             return model, repeat, notes, error, served_by
 
         jobs = [(model, repeat) for model in args.models for repeat in range(args.repeats)]
