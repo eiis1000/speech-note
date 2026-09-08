@@ -136,5 +136,58 @@ class ConfigAndModelTests(unittest.TestCase):
         self.assertIsNone(organizer.supervisor.launch_command)
 
 
+class AudioTailTests(unittest.TestCase):
+    def test_short_audio_has_finite_telemetry_and_keeps_every_sample(self):
+        for length in (1, 159, 160, 319, 320, 321):
+            with self.subTest(length=length), tempfile.TemporaryDirectory() as tmp:
+                source, target = Path(tmp) / "in.wav", Path(tmp) / "out.wav"
+                audio.write_wav(source, np.full(length, 100, dtype="<i2").tobytes(), 16000)
+                result = audio.normalize_pcm_wav(source, target)
+                json.dumps(result.as_dict(), allow_nan=False)
+                self.assertGreater(result.gain, 1)
+                with wave.open(str(target)) as handle:
+                    self.assertEqual(handle.getnframes(), length)
+
+    def test_final_partial_block_cannot_escape_the_limiter(self):
+        samples = np.concatenate([np.full(1600, 1000.0), [1e6]])
+        limited, blocks = audio._limit(samples)
+        ceiling = audio.INT16_FULL_SCALE * 10 ** (audio.NORMALIZE_PEAK_CEILING_DBFS / 20)
+        self.assertEqual(len(limited), len(samples))
+        self.assertLessEqual(np.max(np.abs(limited)), ceiling + 1e-6)
+        self.assertEqual(limited[0], samples[0])
+        self.assertGreater(blocks, 0)
+
+    def test_level_measurements_use_the_same_time_grid_at_different_rates(self):
+        # The same envelope sampled at three rates must produce the same gain.
+        levels = np.concatenate([np.full(50, 1000.0), np.full(50, 100.0)])
+        summaries = []
+        with tempfile.TemporaryDirectory() as tmp:
+            for rate in (8000, 16000, 48000):
+                samples = np.repeat(levels, rate // 50).astype("<i2")
+                source, target = Path(tmp) / "in.wav", Path(tmp) / "out.wav"
+                audio.write_wav(source, samples.tobytes(), rate)
+                result = audio.normalize_pcm_wav(source, target)
+                summaries.append((result.gain, result.gain_db_min, result.gain_db_max))
+            self.assertEqual(summaries[0], summaries[1])
+            self.assertEqual(summaries[1], summaries[2])
+
+    def test_sherpa_feeds_every_complete_window_and_pads_only_the_tail(self):
+        for length in (1, 512, 513, 1024, 1100):
+            with self.subTest(length=length):
+                samples = np.ones(length, dtype=np.float32)
+                vad = mock.Mock()
+                vad.empty.return_value = True
+                transcriber = build_transcriber(config(), parse_asr_source("sherpa"))
+                transcriber.recognizer = mock.Mock()
+                fake_sherpa = types.SimpleNamespace(VoiceActivityDetector=mock.Mock(return_value=vad))
+                fake_librosa = types.SimpleNamespace(load=mock.Mock(return_value=(samples, 16000)))
+                with mock.patch.dict(sys.modules, {"sherpa_onnx": fake_sherpa, "librosa": fake_librosa}):
+                    transcriber.transcribe_file(Path("unused.wav"), "en")
+                fed = np.concatenate([call.args[0] for call in vad.accept_waveform.call_args_list])
+                np.testing.assert_array_equal(fed[:length], samples)
+                self.assertTrue(np.all(fed[length:] == 0))
+                self.assertEqual(len(fed), ((length + 511) // 512) * 512)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -539,8 +539,11 @@ class SherpaTranscriber(Transcriber):
                     texts.append(stream.result.text)
                 vad.pop()
 
-        for start in range(0, len(audio) - window, window):
-            vad.accept_waveform(audio[start : start + window])
+        for start in range(0, len(audio), window):
+            chunk = audio[start : start + window]
+            if len(chunk) < window:
+                chunk = np.pad(chunk, (0, window - len(chunk)))
+            vad.accept_waveform(chunk)
             drain()
         vad.flush()
         drain()

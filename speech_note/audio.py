@@ -107,6 +107,7 @@ def convert_to_pcm_wav(source: Path, target: Path, *, sample_rate: int) -> None:
         [
             "ffmpeg", "-nostdin", "-y",
             "-i", str(source),
+            "-vn", "-c:a", "pcm_s16le",
             "-ac", str(CHANNELS),
             "-ar", str(sample_rate),
             "-f", "wav",
@@ -133,6 +134,7 @@ def encode_to_mp3(
         [
             "ffmpeg", "-nostdin", "-y",
             "-i", str(source),
+            "-vn",
             "-ac", str(CHANNELS),
             "-ar", str(sample_rate),
             "-c:a", "libmp3lame", *quality,
@@ -225,13 +227,14 @@ _FRAMES_PER_SEC = 50
 _BLOCK = 160  # 10 ms — the grid the compressor and limiter work on
 
 
-def _frame_dbfs(samples: np.ndarray) -> tuple[np.ndarray, int]:
+def _frame_dbfs(samples: np.ndarray, *, hop: int = _FRAME_HOP) -> tuple[np.ndarray, int]:
     """Per-frame loudness in dBFS over a 20 ms grid, plus the usable sample count."""
-    usable = len(samples) // _FRAME_HOP * _FRAME_HOP
-    if usable == 0:
+    if len(samples) == 0:
         return np.empty(0), 0
-    rms = np.sqrt((samples[:usable].reshape(-1, _FRAME_HOP) ** 2).mean(axis=1))
-    return 20.0 * np.log10(np.maximum(rms / INT16_FULL_SCALE, 1e-9)), usable
+    starts = np.arange(0, len(samples), hop)
+    counts = np.minimum(hop, len(samples) - starts)
+    rms = np.sqrt(np.add.reduceat(samples ** 2, starts) / counts)
+    return 20.0 * np.log10(np.maximum(rms / INT16_FULL_SCALE, 1e-9)), len(samples)
 
 
 def _centred_percentile(values: np.ndarray, *, window: int, percentile: float) -> np.ndarray:
@@ -316,7 +319,7 @@ def _expand_to_samples(per_frame: np.ndarray, total: int, *, hop: int) -> np.nda
     return np.interp(np.arange(total), centres, per_frame)
 
 
-def _compress_peaks(samples: np.ndarray) -> tuple[np.ndarray, float]:
+def _compress_peaks(samples: np.ndarray, *, block: int = _BLOCK) -> tuple[np.ndarray, float]:
     """Look-ahead soft-knee compressor. Returns (compressed, max reduction in dB).
 
     This is what handles transients, instead of letting the loudest sample decide the
@@ -324,12 +327,11 @@ def _compress_peaks(samples: np.ndarray) -> tuple[np.ndarray, float]:
     minimum over the look-ahead window pulls the gain down *before* the transient
     arrives, so the attack has no click. Release is slow enough not to pump.
     """
-    usable = len(samples) // _BLOCK * _BLOCK
-    if usable == 0:
+    if len(samples) == 0:
         return samples, 0.0
-    blocks = samples[:usable].reshape(-1, _BLOCK)
+    peaks = np.maximum.reduceat(np.abs(samples), np.arange(0, len(samples), block))
     peak_db = 20.0 * np.log10(
-        np.maximum(np.abs(blocks).max(axis=1) / INT16_FULL_SCALE, 1e-9)
+        np.maximum(peaks / INT16_FULL_SCALE, 1e-9)
     )
 
     # Soft knee: no reduction below the knee, full ratio above it, quadratic between.
@@ -357,10 +359,10 @@ def _compress_peaks(samples: np.ndarray) -> tuple[np.ndarray, float]:
     held = np.empty_like(reduction)
     current = 0.0
     for index, value in enumerate(reduction):
-        current = value if value > current else current * release
+        current = max(value, current * release)
         held[index] = current
 
-    gain = _expand_to_samples(10 ** (-held / 20.0), len(samples), hop=_BLOCK)
+    gain = _expand_to_samples(10 ** (-held / 20.0), len(samples), hop=block)
     return samples * gain, float(held.max())
 
 
@@ -381,31 +383,28 @@ def _shift(values: np.ndarray, offset: int, fill: float) -> np.ndarray:
     return out
 
 
-def _limit(samples: np.ndarray) -> tuple[np.ndarray, int]:
+def _limit(samples: np.ndarray, *, block: int = _BLOCK) -> tuple[np.ndarray, int]:
     """Final safety limiter. With the compressor in front, it should barely engage."""
     ceiling = INT16_FULL_SCALE * 10 ** (NORMALIZE_PEAK_CEILING_DBFS / 20.0)
-    usable = len(samples) // _BLOCK * _BLOCK
-    if usable == 0:
-        return np.clip(samples, -ceiling, ceiling), 0
-    blocks = samples[:usable].reshape(-1, _BLOCK)
-    reduce = np.minimum(1.0, ceiling / np.maximum(np.abs(blocks).max(axis=1), 1e-9))
+    if len(samples) == 0:
+        return samples, 0
+    peaks = np.maximum.reduceat(np.abs(samples), np.arange(0, len(samples), block))
+    reduce = np.minimum(1.0, ceiling / np.maximum(peaks, 1e-9))
     # Each block also obeys its neighbours', so the reduction eases in and out
     # rather than stepping at a block edge. 1.0 past the ends: no neighbour there.
     reduce = np.minimum.reduce([reduce, *(_shift(reduce, s, 1.0) for s in (-2, -1, 1, 2))])
-    limited = (blocks * reduce[:, None]).reshape(-1)
-    if usable < len(samples):
-        limited = np.concatenate([limited, samples[usable:] * reduce[-1]])
+    limited = samples * np.repeat(reduce, block)[:len(samples)]
     return limited, int((reduce < 1.0).sum())
 
 
-def _level_summary(samples: np.ndarray) -> tuple[float | None, float | None]:
+def _level_summary(samples: np.ndarray, *, hop: int = _FRAME_HOP) -> tuple[float | None, float | None]:
     """(median loudness, p90-p10 spread) in dBFS over the loud half of the recording.
 
     Restricted to frames above the median so that long silences don't dominate the
     numbers — this is a report, not a gate, and nothing is removed from the audio on the
     strength of it.
     """
-    frame_db, usable = _frame_dbfs(samples)
+    frame_db, usable = _frame_dbfs(samples, hop=hop)
     if usable == 0:
         return None, None
     loud = frame_db[frame_db >= np.median(frame_db)]
@@ -437,15 +436,18 @@ def normalize_pcm_wav(source: Path, target: Path) -> NormalizationResult:
         target.write_bytes(source.read_bytes())
         return NormalizationResult(gain=1.0, input_stats=stats, applied=False)
 
-    before_level, before_spread = _level_summary(samples)
-    frame_db, _usable = _frame_dbfs(samples)
+    # Keep the 20 ms level / 10 ms peak grids in time at every supported rate.
+    hop = max(1, params.framerate // _FRAMES_PER_SEC)
+    block = max(1, params.framerate // 100)
+    before_level, before_spread = _level_summary(samples, hop=hop)
+    frame_db, _usable = _frame_dbfs(samples, hop=hop)
     gain_db = _gain_curve_db(frame_db)
     leveled = samples * _expand_to_samples(
-        10 ** (gain_db / 20.0), len(samples), hop=_FRAME_HOP
+        10 ** (gain_db / 20.0), len(samples), hop=hop
     )
-    leveled, compressed_db = _compress_peaks(leveled)
-    leveled, limited_blocks = _limit(leveled)
-    after_level, after_spread = _level_summary(leveled)
+    leveled, compressed_db = _compress_peaks(leveled, block=block)
+    leveled, limited_blocks = _limit(leveled, block=block)
+    after_level, after_spread = _level_summary(leveled, hop=hop)
 
     scaled = np.clip(np.rint(leveled), -32768, 32767).astype("<i2")
     target.parent.mkdir(parents=True, exist_ok=True)
