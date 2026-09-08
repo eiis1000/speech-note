@@ -337,16 +337,13 @@ class CTCTranscriber(Transcriber):
             auto_yes=self.auto_download,
         )
         self._fix_logit_ratio(model, processor)
-        pipeline_kwargs: dict[str, Any] = {}
         pipeline_device = self._pipeline_device()
-        if pipeline_device >= 0:
-            pipeline_kwargs["device"] = pipeline_device
         self.asr_pipeline = pipeline(
             "automatic-speech-recognition",
             model=model,
             tokenizer=processor.tokenizer,
             feature_extractor=processor.feature_extractor,
-            **pipeline_kwargs,
+            device=pipeline_device,
         )
         self.load_seconds = round(time.monotonic() - started, 3)
         debug_log(f"ctc pipeline ready model={self.model_name} device={pipeline_device}")

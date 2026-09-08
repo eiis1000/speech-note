@@ -2371,7 +2371,7 @@ class OnlinePaidAsrTests(unittest.TestCase):
 
     def test_openrouter_asr_requires_key(self) -> None:
         for backend in ("openrouter", "openrouter-stt"):
-            config = make_config("--asr", backend, "--input-text", "x")
+            config = make_config("--asr", backend, "--input", "/tmp/audio.wav")
             with mock.patch.dict(os.environ, {}, clear=True):
                 with self.assertRaises(SystemExit):
                     validate(config)

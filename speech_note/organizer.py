@@ -28,6 +28,7 @@ from .config import (
     CLEANUP_MIN_LENGTH_RATIO,
     CLEANUP_TARGET_LENGTH_RATIO,
     DEFAULT_GGUF_MODEL,
+    DEFAULT_LOCAL_API_BASE,
     OPENROUTER_ANNOTATION_MODELS,
     OPENROUTER_FREE_ANNOTATION_MODELS,
     ORGANIZER_CONTEXT_SAFETY,
@@ -37,6 +38,7 @@ from .llama_server import (
     LocalServerSupervisor,
     default_server_command,
     ensure_default_cleanup_model,
+    preferred_model_selected,
 )
 from .model import CleanupOutcome, Transcript
 from .textproc import count_words, estimate_text_tokens, heuristic_cleanup
@@ -548,19 +550,25 @@ def build_organizer(config: "Config") -> Organizer:
     supervisor: LocalServerSupervisor | None = None
     if config.organizer.provider == "local":
         launch_command = config.organizer.server_command
-        if launch_command is None:
+        if launch_command is None and config.organizer.api_base == DEFAULT_LOCAL_API_BASE:
             model_path = config.organizer.gguf or DEFAULT_GGUF_MODEL
             have_server = bool(shutil.which("llama-server"))
             # Auto-install the bundled default quant on a cache miss (consent-gated,
             # like the ASR models). A user-supplied --organizer-gguf is never fetched
             # — only the default has a known source.
-            if have_server and config.organizer.gguf is None and not model_path.exists():
-                ensure_default_cleanup_model(auto_yes=config.auto_download)
+            if (
+                have_server and config.organizer.gguf is None and not model_path.exists()
+                and not preferred_model_selected(config.organizer.context_tokens)
+            ):
+                ensure_default_cleanup_model(
+                    auto_yes=config.auto_download,
+                    interactive=False if config.full_auto else None,
+                )
             launch_command = default_server_command(
                 context_tokens=config.organizer.context_tokens,
                 gpu_layers=config.organizer.gpu_layers,
                 kv_offload=config.organizer.kv_offload,
-                model_path=model_path,
+                model_path=config.organizer.gguf,
             )
             if launch_command is None and have_server and not model_path.exists():
                 # Reached only if auto-install was declined/unavailable or a custom

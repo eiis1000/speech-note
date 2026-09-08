@@ -123,6 +123,7 @@ def build_transcriber(config: "Config", source: AsrSource) -> Transcriber | None
             compute_type=config.asr_compute_type,
             cpu_threads=config.asr_cpu_threads,
             download_root=config.download_root,
+            auto_download=config.auto_download,
         )
     if backend == "sherpa":
         return SherpaTranscriber(

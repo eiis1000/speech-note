@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import dataclasses
+import math
 import os
 import shutil
 import sys
@@ -338,7 +339,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--organizer-provider",
         choices=["local", "openrouter"],
-        default=defaults.DEFAULT_ORGANIZER_PROVIDER,
+        default=None,
     )
     parser.add_argument("--organizer-api-base", default=None)
     parser.add_argument(
@@ -445,7 +446,10 @@ def resolve_asr_sources(
             return defaults.parse_asr_sources(args.asr)
         except ValueError as exc:
             raise SystemExit(f"--asr: {exc}") from None
-    from_file = defaults.load_user_asr_sources()
+    try:
+        from_file = defaults.load_user_asr_sources()
+    except ValueError as exc:
+        raise SystemExit(f"{defaults.USER_ASR_FILE}: {exc}") from None
     if from_file:
         return from_file
     return tuple(source.resolved() for source in default_sources)
@@ -494,15 +498,13 @@ def resolve_config(args: argparse.Namespace) -> Config:
     # branch). --offline and --online-free keep the local whisper+sherpa ASR default;
     # --online-paid moves ASR to the hosted equivalents (see below).
     connectivity = getattr(args, "connectivity", None)
-    # Captured before the preset overwrites it: "did the user ask for a remote
-    # provider?" is the question, and after the assignment below every preset run
-    # looks like it did. The interactive prompt sets this too, which is correct —
-    # picking OpenRouter from a menu is asking for it.
+    # Keep the explicit choice separate from preset defaults. The interactive
+    # prompt sets this too: picking OpenRouter from a menu is asking for it.
     provider_requested = args.organizer_provider == "openrouter"
-    if connectivity == "offline":
-        args.organizer_provider = "local"
-    elif connectivity in ("online-free", "online-paid"):
-        args.organizer_provider = "openrouter"
+    provider = args.organizer_provider or (
+        "openrouter" if connectivity in ("online-free", "online-paid")
+        else defaults.DEFAULT_ORGANIZER_PROVIDER
+    )
 
     # --online-paid also changes the *default* ASR collection: Whisper and Parakeet run
     # as hosted models rather than on this machine (bigger checkpoints, and a long
@@ -515,7 +517,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
     )
     asr_sources = resolve_asr_sources(args, default_asr)
 
-    if args.organizer_provider == "openrouter":
+    if provider == "openrouter":
         api_base = args.organizer_api_base or defaults.DEFAULT_OPENROUTER_API_BASE
         if connectivity == "online-paid":
             mode_models = defaults.OPENROUTER_PAID_MODELS
@@ -525,18 +527,18 @@ def resolve_config(args: argparse.Namespace) -> Config:
             mode_models = defaults.OPENROUTER_PREFERRED_MODELS
         models = _organizer_model_list(args.organizer_model, mode_models)
         auth_env: str | None = defaults.OPENROUTER_API_KEY_ENV
-        context_tokens = args.organizer_context_tokens or defaults.DEFAULT_OPENROUTER_CONTEXT_TOKENS
-        max_output_tokens = (
-            args.organizer_max_output_tokens or defaults.DEFAULT_OPENROUTER_MAX_OUTPUT_TOKENS
-        )
+        context_tokens = defaults.DEFAULT_OPENROUTER_CONTEXT_TOKENS
+        max_output_tokens = defaults.DEFAULT_OPENROUTER_MAX_OUTPUT_TOKENS
     else:
         api_base = args.organizer_api_base or defaults.DEFAULT_LOCAL_API_BASE
         models = _organizer_model_list(args.organizer_model, [defaults.DEFAULT_LOCAL_MODEL_LABEL])
         auth_env = None
-        context_tokens = args.organizer_context_tokens or defaults.DEFAULT_ORGANIZER_CONTEXT_TOKENS
-        max_output_tokens = (
-            args.organizer_max_output_tokens or defaults.DEFAULT_ORGANIZER_MAX_OUTPUT_TOKENS
-        )
+        context_tokens = defaults.DEFAULT_ORGANIZER_CONTEXT_TOKENS
+        max_output_tokens = defaults.DEFAULT_ORGANIZER_MAX_OUTPUT_TOKENS
+    if args.organizer_context_tokens is not None:
+        context_tokens = args.organizer_context_tokens
+    if args.organizer_max_output_tokens is not None:
+        max_output_tokens = args.organizer_max_output_tokens
 
     # Parallel execution is a preset choice, not inferred from current backends: -P
     # includes it, while every other mode requires an explicit --parallel.
@@ -606,7 +608,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         download_root=args.download_root,
         organizer=OrganizerConfig(
             mode=args.organizer_mode,
-            provider=args.organizer_provider,
+            provider=provider,
             api_base=api_base,
             models=models,
             auth_env=auth_env,
@@ -633,7 +635,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
                 args.annotate_uncertainty
                 if args.annotate_uncertainty is not None
                 else (
-                    args.organizer_provider == "openrouter"
+                    provider == "openrouter"
                     or (
                         args.organizer_gguf is None
                         and args.organizer_server_command is None
@@ -659,6 +661,29 @@ def resolve_config(args: argparse.Namespace) -> Config:
 
 
 def validate(config: Config) -> None:
+    for flag, value in (
+        ("sample-rate", config.sample_rate),
+        ("max-segment-seconds", config.max_segment_seconds),
+        ("replay-speed", config.replay_speed),
+        ("asr-cpu-threads", config.asr_cpu_threads),
+        ("live-asr-cpu-threads", config.live_asr_cpu_threads),
+        ("organizer-timeout", config.organizer.timeout),
+        ("organizer-context-tokens", config.organizer.context_tokens),
+        ("organizer-max-output-tokens", config.organizer.max_output_tokens),
+    ):
+        if not math.isfinite(value) or value <= 0:
+            raise SystemExit(f"--{flag} must be finite and greater than zero")
+    for flag, value in (
+        ("start-padding-ms", config.start_padding_ms),
+        ("end-silence-ms", config.end_silence_ms),
+        ("min-speech-ms", config.min_speech_ms),
+    ):
+        if value < 0:
+            raise SystemExit(f"--{flag} must not be negative")
+    if not config.asr_sources:
+        raise SystemExit("--asr must name at least one source")
+    if not config.organizer.models:
+        raise SystemExit("--organizer-model must name at least one model")
     # The single-audio/text inputs are mutually exclusive; --extra-transcript is not —
     # it supplements ASR, or (with no audio) is the input on its own.
     inputs = [
@@ -686,7 +711,7 @@ def validate(config: Config) -> None:
         raise SystemExit("--parallel-workers must be at least 1")
     if (
         config.no_asr
-        and config.input_file is not None
+        and (config.input_file is not None or config.replay_input_file is not None)
         and not config.extra_transcripts
     ):
         raise SystemExit(
@@ -715,7 +740,10 @@ def validate(config: Config) -> None:
             if source.backend in {"openrouter", "openrouter-stt"}
         }
     )
-    if network_backends and not os.environ.get(defaults.OPENROUTER_API_KEY_ENV, "").strip():
+    uses_audio_asr = not config.no_asr and config.dry_run_text is None and (
+        any(value is not None for value in inputs[:-1]) or not config.extra_transcripts
+    )
+    if uses_audio_asr and network_backends and not os.environ.get(defaults.OPENROUTER_API_KEY_ENV, "").strip():
         raise SystemExit(
             f"{defaults.OPENROUTER_API_KEY_ENV} is not set; it is required for the "
             f"{', '.join(repr(name) for name in network_backends)} ASR backend(s) "
@@ -728,10 +756,10 @@ def _interactive_capture_setup(args: argparse.Namespace) -> None:
     if (
         args.organizer_mode == "llama"
         # A connectivity preset (--offline / --online-free / --online-paid) already
-        # fixes the provider in resolve_config, so don't ask — the answer would be
-        # silently overridden by the preset anyway.
+        # supplies the provider, so don't ask again. An explicit provider flag
+        # also suppresses the prompt.
         and getattr(args, "connectivity", None) is None
-        and args.organizer_provider == defaults.DEFAULT_ORGANIZER_PROVIDER
+        and args.organizer_provider is None
         and sys.stdin
         and sys.stdin.isatty()
     ):
