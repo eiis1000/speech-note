@@ -39,7 +39,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from speech_note.config import OPENROUTER_STT_API_BASE  # noqa: E402
-from speech_note.transcribers import OPENROUTER_ASR_SYSTEM_PROMPT  # noqa: E402
+from speech_note.chat import parse_chat_response  # noqa: E402
+from speech_note.transcribers import OPENROUTER_ASR_SYSTEM_PROMPT, parse_stt_response  # noqa: E402
 
 CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -112,7 +113,10 @@ def transcribe_stt(key: str, model: str, clip: Path) -> tuple[str, str]:
         )
     if not response.ok:
         return "", f"HTTP {response.status_code} {' '.join(response.text.split())[:80]}"
-    text = response.json().get("text") or ""
+    try:
+        text = parse_stt_response(response.json(), model=model)
+    except ValueError as exc:
+        return "", str(exc)
     return text, "" if text else "empty transcript"
 
 
@@ -144,11 +148,11 @@ def transcribe_audio_llm(key: str, model: str, clip: Path) -> tuple[str, str]:
     )
     if not response.ok:
         return "", f"HTTP {response.status_code} {' '.join(response.text.split())[:80]}"
-    choice = (response.json().get("choices") or [{}])[0]
-    if choice.get("finish_reason") == "length":
-        return "", "truncated reply (output token limit)"
-    content = (choice.get("message") or {}).get("content") or ""
-    return content, "" if content else "empty reply"
+    try:
+        reply = parse_chat_response(response.json(), model=model, require_finish_reason=True)
+    except ValueError as exc:
+        return "", str(exc)
+    return reply.content, ""
 
 
 def uniq_ngram_ratio(text: str, n: int = 8) -> float:

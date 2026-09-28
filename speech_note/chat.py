@@ -240,44 +240,21 @@ class ChatClient:
                         failures, index=index, models=models, on_model_failure=on_model_failure
                     )
                     continue
-                choices = data.get("choices") if isinstance(data, dict) else None
-                if not isinstance(choices, list) or not choices:
-                    detail = data.get("error", data) if isinstance(data, dict) else data
-                    attempt["error"] = f"HTTP 200 but no choices ({json.dumps(detail)[:300]})"
-                    failures.append(f"{model}: HTTP 200 but no choices ({json.dumps(detail)[:300]})")
+                try:
+                    result = parse_chat_response(
+                        data, model=model, require_finish_reason="openrouter.ai" in self.api_base
+                    )
+                except ValueError as exc:
+                    attempt["error"] = str(exc)
+                    failures.append(f"{model}: {exc}")
                     self._advance_or_raise(
                         failures, index=index, models=models, on_model_failure=on_model_failure
                     )
                     continue
-                choice = choices[0] if isinstance(choices[0], dict) else {}
-                message = choice.get("message")
-                message = message if isinstance(message, dict) else {}
-                content = _content_to_text(message.get("content"))
-                result = ChatResponse(
-                    content=content,
-                    served_model=data.get("model") or model,
-                    finish_reason=choice.get("finish_reason"),
-                    request_id=data.get("id"),
-                    provider=data.get("provider"),
-                    native_finish_reason=choice.get("native_finish_reason"),
-                    usage=data.get("usage"),
-                    error=data.get("error") or choice.get("error") or message.get("refusal"),
-                )
-                rejection = result.failure_reason()
-                if not rejection and "openrouter.ai" in self.api_base and result.finish_reason is None:
-                    rejection = "response has no finish_reason"
-                if not rejection and content and validate_response is not None:
-                    rejection = validate_response(result)
+                rejection = validate_response(result) if validate_response is not None else None
                 if rejection:
                     attempt["error"] = rejection
                     failures.append(f"{model} ({result.provider or 'unknown provider'}): {rejection}")
-                    self._advance_or_raise(
-                        failures, index=index, models=models, on_model_failure=on_model_failure
-                    )
-                    continue
-                if not content:
-                    attempt["error"] = "HTTP 200 but empty or malformed message"
-                    failures.append(f"{model}: HTTP 200 but empty or malformed message")
                     self._advance_or_raise(
                         failures, index=index, models=models, on_model_failure=on_model_failure
                     )
@@ -301,10 +278,42 @@ def _content_to_text(content: object) -> str:
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
-        parts = [
-            str(item.get("text", ""))
-            for item in content
-            if isinstance(item, dict) and item.get("type") == "text"
-        ]
+        parts = []
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "text":
+                return ""
+            if not isinstance(item.get("text"), str):
+                return ""
+            parts.append(item["text"])
         return "\n".join(part for part in parts if part).strip()
     return ""
+
+
+def parse_chat_response(
+    data: object, *, model: str = "", require_finish_reason: bool = False,
+) -> ChatResponse:
+    """Decode one complete reply. Shared by runtime and evals so failures cannot score."""
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(choices, list) or not choices:
+        detail = data.get("error", data) if isinstance(data, dict) else data
+        raise ValueError(f"HTTP 200 but no choices ({json.dumps(detail)[:300]})")
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = choice.get("message")
+    message = message if isinstance(message, dict) else {}
+    result = ChatResponse(
+        content=_content_to_text(message.get("content")),
+        served_model=data.get("model") or model,
+        finish_reason=choice.get("finish_reason"),
+        request_id=data.get("id"), provider=data.get("provider"),
+        native_finish_reason=choice.get("native_finish_reason"),
+        usage=data.get("usage"),
+        error=data.get("error") or choice.get("error") or message.get("refusal"),
+    )
+    failure = result.failure_reason()
+    if not failure and require_finish_reason and result.finish_reason is None:
+        failure = "response has no finish_reason"
+    if not failure and not result.content:
+        failure = "HTTP 200 but empty or malformed message"
+    if failure:
+        raise ValueError(f"{result.provider or 'unknown provider'}: {failure}")
+    return result

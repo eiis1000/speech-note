@@ -37,6 +37,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from speech_note.model import Transcript  # noqa: E402
+from speech_note.chat import parse_chat_response  # noqa: E402
 from speech_note.organizer import (  # noqa: E402
     _reference_words,
     cleanup_messages,
@@ -156,15 +157,15 @@ def ask(
     if not response.ok:
         return "", f"HTTP {response.status_code} {' '.join(response.text.split())[:90]}", ""
     payload = response.json()
-    served_by = str(payload.get("provider") or "?") + (" (unpinned)" if unpinned else "")
-    choice = (payload.get("choices") or [{}])[0]
-    content = ((choice.get("message") or {}).get("content") or "").strip()
     out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.with_suffix(".response.json").write_text(json.dumps(payload, indent=2) + "\n")
+    try:
+        reply = parse_chat_response(payload, model=model, require_finish_reason="openrouter.ai" in url)
+    except ValueError as exc:
+        return "", str(exc), ""
+    served_by = str(reply.provider or "?") + (" (unpinned)" if unpinned else "")
+    content = reply.content
     out_file.write_text(content + "\n")
-    if choice.get("finish_reason") == "length":
-        return "", "truncated reply (output token limit)", served_by
-    if not content:
-        return "", f"empty reply (finish={choice.get('finish_reason')})", served_by
     return content, "", served_by
 
 

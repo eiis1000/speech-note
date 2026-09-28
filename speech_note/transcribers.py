@@ -696,8 +696,8 @@ class OpenRouterTranscriber(Transcriber):
             },
         ]
         response = client.chat(messages, max_tokens=self.max_output_tokens, timeout=timeout)
-        if response.finish_reason == "length":
-            raise RuntimeError("audio-LLM transcript was truncated at the output token limit")
+        if failure := response.failure_reason():
+            raise RuntimeError(f"audio-LLM transcript failed: {failure}")
         return normalize_spacing(response.content)
 
 
@@ -811,13 +811,21 @@ class OpenRouterSttTranscriber(Transcriber):
             ) from None
         # A 200 can still carry a provider error and no transcript; say so rather than
         # returning "" (which the collection would report as "no speech detected").
-        text = payload.get("text")
-        if not isinstance(text, str):
-            raise RuntimeError(
-                f"{self.model_name}: response carried no transcript "
-                f"({json.dumps(payload.get('error', payload))[:200]})"
-            )
-        return normalize_paragraphs(text)
+        try:
+            return parse_stt_response(payload, model=self.model_name)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+
+def parse_stt_response(payload: object, *, model: str) -> str:
+    """An explicit provider error wins over any partial transcription text."""
+    if not isinstance(payload, dict) or payload.get("error"):
+        detail = payload.get("error", payload) if isinstance(payload, dict) else payload
+        raise ValueError(f"{model}: response carried no transcript accepted ({json.dumps(detail)[:400]})")
+    text = payload.get("text")
+    if not isinstance(text, str):
+        raise ValueError(f"{model}: response carried no transcript ({json.dumps(payload)[:200]})")
+    return normalize_paragraphs(text)
 
 
 def thread_env(cpu_threads: int) -> dict[str, str]:

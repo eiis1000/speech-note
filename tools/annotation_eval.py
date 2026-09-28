@@ -43,6 +43,7 @@ from speech_note.annotate import (  # noqa: E402
     verify_notes,
 )
 from speech_note.model import Transcript  # noqa: E402
+from speech_note.chat import parse_chat_response  # noqa: E402
 
 DEFAULT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -275,14 +276,15 @@ def ask(
         payload = response.json()
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(json.dumps(payload, indent=2))
-        served_by = str(payload.get("provider") or "?") + (" (unpinned)" if unpinned else "")
-        choice = (payload.get("choices") or [{}])[0]
-        if choice.get("finish_reason") == "length":
-            return [], "truncated reply (output token limit)", served_by
-        content = (choice.get("message") or {}).get("content") or ""
+        try:
+            reply = parse_chat_response(payload, model=model, require_finish_reason="openrouter.ai" in url)
+        except ValueError as exc:
+            return [], str(exc), ""
+        served_by = str(reply.provider or "?") + (" (unpinned)" if unpinned else "")
+        content = reply.content
         notes, understood = decode_response(content)
         if not understood:
-            finish = choice.get("finish_reason")
+            finish = reply.finish_reason
             return (
                 [],
                 f"NOT the requested JSON (finish={finish}): {' '.join(content.split())[:90]}",
