@@ -14,9 +14,22 @@ Adding a model: detect "missing", then call ``require_consent`` before fetching.
 from __future__ import annotations
 
 import sys
+import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Callable, TypeVar
 
 T = TypeVar("T")
+_allow_prompt = ContextVar("allow_model_download_prompt", default=True)
+
+
+@contextmanager
+def download_prompts(allowed: bool):
+    token = _allow_prompt.set(allowed)
+    try:
+        yield
+    finally:
+        _allow_prompt.reset(token)
 
 
 class ModelInstallDeclined(RuntimeError):
@@ -45,6 +58,8 @@ def consent_to_download(
     """
     if auto_yes:
         return True
+    if not _allow_prompt.get() or threading.current_thread() is not threading.main_thread():
+        return False
     if interactive is None:
         interactive = _interactive()
     if not interactive:

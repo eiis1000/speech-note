@@ -269,21 +269,26 @@ class CaptureRunner:
         frames_per_chunk = self.sample_rate * self.config.frame_ms // 1000
         sleep_seconds = (self.config.frame_ms / 1000.0) / max(self.config.replay_speed, 0.01)
         next_emit_at = time.monotonic()
-        with wave.open(str(replay_wav), "rb") as handle:
-            while not self.stop_event.is_set():
-                chunk = handle.readframes(frames_per_chunk)
-                if not chunk:
-                    break
-                try:
-                    self.audio_queue.put_nowait(chunk)
-                    self.session.note_audio_queue_depth(self.audio_queue.qsize())
-                except queue.Full:
-                    self.session.note_audio_queue_full()
-                next_emit_at += sleep_seconds
-                delay = next_emit_at - time.monotonic()
-                if delay > 0:
-                    time.sleep(delay)
-        self.replay_finished.set()
+        try:
+            with wave.open(str(replay_wav), "rb") as handle:
+                while not self.stop_event.is_set():
+                    chunk = handle.readframes(frames_per_chunk)
+                    if not chunk:
+                        break
+                    while not self.stop_event.is_set():
+                        try:
+                            self.audio_queue.put(chunk, timeout=0.1)
+                            self.session.note_audio_queue_depth(self.audio_queue.qsize())
+                            break
+                        except queue.Full:
+                            continue
+                    next_emit_at += sleep_seconds
+                    self.stop_event.wait(max(0, next_emit_at - time.monotonic()))
+        except Exception as exc:
+            self.session.add_error(f"replay input failed: {exc}")
+            self.session.run_failed = True
+        finally:
+            self.replay_finished.set()
 
     def _stream_callback(self, indata, frames, stream_time, status) -> None:
         del frames, stream_time
@@ -413,9 +418,27 @@ class CaptureRunner:
                         self._consume_until_stopped()
             finally:
                 self.stop_event.set()
+                for thread in self._threads:
+                    if thread.name == "replay-feeder":
+                        thread.join()
+                # Preserve queued PCM even when segmentation/capture failed. Do
+                # not call the failed segmenter again on this recovery path.
+                if sys.exc_info()[0] is not None:
+                    self._preserve_pending_audio()
                 signal.signal(signal.SIGINT, previous_sigint)
                 signal.signal(signal.SIGTERM, previous_sigterm)
-            return self._drain_and_collect()
+            try:
+                return self._drain_and_collect()
+            except BaseException:
+                self._preserve_pending_audio()
+                raise
+
+    def _preserve_pending_audio(self) -> None:
+        while True:
+            try:
+                self.session.observe_audio_frame(self.audio_queue.get_nowait())
+            except queue.Empty:
+                return
 
     def _signal_stop(self, signum: int, frame: object) -> None:
         del signum, frame

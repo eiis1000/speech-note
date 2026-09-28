@@ -125,12 +125,19 @@ class Session:
         key = str(status)
         self.stream_status_counts[key] = self.stream_status_counts.get(key, 0) + 1
         self.add_event("stream-status", status=key, queue_depth=queue_depth)
+        if getattr(status, "input_overflow", False):
+            self.run_failed = True
+            if self.stream_status_counts[key] == 1:
+                self.add_error("audio input overflow: recording is incomplete")
 
     def note_audio_queue_depth(self, depth: int) -> None:
         self.audio_queue_high_watermark = max(self.audio_queue_high_watermark, depth)
 
     def note_audio_queue_full(self) -> None:
         self.audio_queue_full_count += 1
+        self.run_failed = True
+        if self.audio_queue_full_count == 1:
+            self.add_error("audio queue overflow: recording is incomplete")
 
     def audio_level_warning(self) -> str | None:
         if not self.audio_measured:

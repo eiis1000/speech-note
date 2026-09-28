@@ -25,9 +25,11 @@ from .audio import normalize_audio_for_asr, probe_duration_seconds, write_wav
 from .config import (
     ARCHIVE_AUDIO_EXTENSIONS,
     ARCHIVE_TRANSCRIPT_EXTENSIONS,
+    DEFAULT_LOCAL_API_BASE,
     short_model_name,
 )
 from .model import CleanupOutcome, Transcript
+from .install import download_prompts
 from .naming import full_auto_output_path, open_unique_output, unique_directory_path, unique_output_path, write_unique_output
 from .textproc import sanitize_filename_stem
 from .organizer import Organizer, build_organizer, cleanup_messages, cleanup_request_plan
@@ -109,7 +111,8 @@ def run_final_asr(
     # Make every source's model present first, on this thread, before any spinner
     # starts — so download-consent prompts are visible and serial rather than
     # buried under a status line or racing across ASR worker threads.
-    prepared = prepare_sources(built)
+    with download_prompts(not config.full_auto):
+        prepared = prepare_sources(built)
 
     # Preload in-process models (whose download already happened above) while we
     # normalize, so the heavy load overlaps audio I/O. A source that failed to
@@ -815,6 +818,15 @@ def _run_batch(config: "Config", entries: list[BatchEntry]) -> Session:
     if not entries:
         raise SystemExit("no audio or archive files to process")
     mode = "parallel" if config.parallel and len(entries) > 1 else "sequential"
+    owns_local_server = (
+        config.organizer.mode == "llama"
+        and config.organizer.provider == "local"
+        and (config.organizer.server_command is not None
+             or config.organizer.api_base == DEFAULT_LOCAL_API_BASE)
+    )
+    if mode == "parallel" and owns_local_server:
+        print("batch: serializing runs that may launch the shared local cleanup server", file=sys.stderr)
+        mode = "sequential"
     workers = min(len(entries), max(1, config.parallel_workers))
     detail = f"{mode} x{workers}" if mode == "parallel" else mode
     print(f"batch: {len(entries)} file(s), {detail}", file=sys.stderr)

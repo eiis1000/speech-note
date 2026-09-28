@@ -7,6 +7,8 @@ import requests
 import dataclasses
 import threading
 import zipfile
+import queue
+import wave
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -20,6 +22,8 @@ from speech_note.config import parse_asr_source
 from speech_note.model import Transcript, CleanupOutcome
 from speech_note.organizer import Organizer, cleanup_request_plan
 from speech_note.session import Session, ArtifactStore
+from speech_note.capture import CaptureRunner
+from speech_note.install import consent_to_download, download_prompts
 from tools import annotation_eval, asr_eval, cleanup_eval
 
 
@@ -202,6 +206,86 @@ class ArtifactContracts(unittest.TestCase):
                 paths = list(pool.map(commit, (1, 2)))
             self.assertEqual(len(set(paths)), 2)
             self.assertEqual({json.loads(p.read_text())['errors'][0] for p in paths}, {'failure 1', 'failure 2'})
+
+
+class LifecycleContracts(unittest.TestCase):
+    def test_unattended_and_worker_downloads_never_prompt(self):
+        with mock.patch('builtins.input', side_effect=AssertionError('unexpected prompt')):
+            with download_prompts(False):
+                self.assertFalse(consent_to_download('model', '/tmp/cache', auto_yes=False, interactive=True))
+                self.assertTrue(consent_to_download('model', '/tmp/cache', auto_yes=True, interactive=True))
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                self.assertFalse(pool.submit(consent_to_download, 'model', '/tmp/cache', auto_yes=False, interactive=True).result())
+
+    def test_replay_backpressure_preserves_every_frame_and_errors_finish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config('--no-asr', '--replay-input-file', str(Path(tmp) / 'audio.wav'), '--replay-speed', '1000')
+            runner = CaptureRunner.__new__(CaptureRunner)
+            runner.config = cfg
+            runner.session = Session(cfg)
+            runner.sample_rate = 16000
+            runner.audio_queue = queue.Queue(maxsize=1)
+            runner.stop_event = threading.Event()
+            runner.replay_finished = threading.Event()
+            data = b'\x01\x00' * 16000
+            with wave.open(str(cfg.replay_input_file), 'wb') as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(2)
+                handle.setframerate(16000)
+                handle.writeframes(data)
+            feeder = threading.Thread(target=runner._replay_feeder, args=(cfg.replay_input_file,))
+            feeder.start()
+            received = bytearray()
+            while not runner.replay_finished.is_set() or not runner.audio_queue.empty():
+                try:
+                    received.extend(runner.audio_queue.get(timeout=0.1))
+                except queue.Empty:
+                    pass
+            feeder.join(timeout=2)
+            self.assertEqual(received, data)
+            self.assertEqual(runner.session.audio_queue_full_count, 0)
+            runner.replay_finished.clear()
+            runner._replay_feeder(Path(tmp) / 'missing.wav')
+            self.assertTrue(runner.replay_finished.is_set())
+            self.assertTrue(runner.session.run_failed)
+
+    def test_capture_failure_preserves_queued_pcm(self):
+        cfg = config('--no-asr', '--replay-input-file', '/tmp/unused.wav')
+        runner = CaptureRunner.__new__(CaptureRunner)
+        runner.config = cfg
+        runner.session = Session(cfg)
+        runner.sample_rate = 16000
+        runner.replay_mode = True
+        runner.temp_dir = Path('/tmp')
+        runner.stop_event = threading.Event()
+        runner.audio_queue = queue.Queue()
+        runner.audio_queue.put(b'\x01\x00' * 100)
+        runner._threads = []
+        with mock.patch('speech_note.capture.convert_to_pcm_wav'), \
+             mock.patch.object(runner, '_start_capture_threads'), \
+             mock.patch.object(runner, '_spawn'), \
+             mock.patch.object(runner, '_consume_until_stopped', side_effect=RuntimeError('capture failed')):
+            with self.assertRaisesRegex(RuntimeError, 'capture failed'):
+                runner.run()
+        self.assertEqual(runner.session.recorded_audio, b'\x01\x00' * 100)
+
+    def test_audio_loss_marks_run_failed(self):
+        session = Session(config())
+        session.note_audio_queue_full()
+        session.note_audio_queue_full()
+        self.assertTrue(session.run_failed)
+        self.assertEqual(len(session.errors), 1)
+
+    def test_local_server_batch_has_one_owner_at_a_time(self):
+        cfg = config('-f', '--parallel', '--organizer-mode', 'llama', '--organizer-provider', 'local')
+        entries = [pipeline.BatchEntry(Path(f'/tmp/{i}.wav'), Path('/tmp')) for i in range(2)]
+        threads = []
+        def run(item):
+            threads.append(threading.current_thread())
+            return Session(item)
+        with mock.patch.object(pipeline, 'run_file_pipeline', side_effect=run), redirect_stderr(io.StringIO()):
+            pipeline._run_batch(cfg, entries)
+        self.assertEqual(threads, [threading.main_thread()] * 2)
 
 
 if __name__ == '__main__':
