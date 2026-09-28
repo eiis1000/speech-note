@@ -138,6 +138,34 @@ class CleanupAndAuditContracts(unittest.TestCase):
 
 
 class ArtifactContracts(unittest.TestCase):
+    def test_wav_replacement_failure_preserves_previous_recording(self):
+        from speech_note.audio import write_wav
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'recording.wav'
+            write_wav(path, b'\x01\x00' * 100, 16000)
+            original = path.read_bytes()
+            with self.assertRaises(FileExistsError):
+                write_wav(path, b'\x02\x00' * 100, 16000, exclusive=True)
+            self.assertEqual(path.read_bytes(), original)
+            with mock.patch('speech_note.audio.os.replace', side_effect=OSError('write failed')):
+                with self.assertRaises(OSError):
+                    write_wav(path, b'\x02\x00' * 100, 16000)
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_runtime_store_failure_keeps_interactive_recovery_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            blocked = root / 'blocked'
+            blocked.write_text('occupied')
+            cfg = config('-t', 'Complete transcript.', '--artifacts-dir', str(blocked))
+            with mock.patch('speech_note.pipeline.tempfile.mkdtemp', return_value=str(root / 'recovery')), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                (root / 'recovery').mkdir()
+                result = pipeline.run_dry_text_pipeline(cfg)
+            self.assertTrue(result.run_failed)
+            evidence = json.loads(Path(result.paths['diagnostics']).read_text())
+            self.assertEqual(evidence['cleanup']['text'], 'Complete transcript.')
+
     def test_output_failure_keeps_computed_text_and_nonzero_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -209,6 +237,15 @@ class ArtifactContracts(unittest.TestCase):
 
 
 class LifecycleContracts(unittest.TestCase):
+    def test_unsupported_capture_rates_fail_before_recording(self):
+        from speech_note.devices import choose_live_capture_sample_rate
+        device = mock.Mock()
+        device.query_devices.return_value = {'default_samplerate': 44100}
+        device.check_input_settings.side_effect = ValueError('unsupported')
+        with mock.patch('speech_note.devices.require_sounddevice', return_value=device):
+            with self.assertRaisesRegex(RuntimeError, 'VAD capture rates'):
+                choose_live_capture_sample_rate(None, 44100)
+
     def test_unattended_and_worker_downloads_never_prompt(self):
         with mock.patch('builtins.input', side_effect=AssertionError('unexpected prompt')):
             with download_prompts(False):

@@ -132,8 +132,6 @@ def choose_live_capture_sample_rate(device: object, preferred_rate: int) -> int:
     for rate in VAD_SUPPORTED_SAMPLE_RATES:
         if rate not in candidates:
             candidates.append(rate)
-    if preferred_rate not in candidates:
-        candidates.append(preferred_rate)
     for rate in candidates:
         try:
             sd.check_input_settings(
@@ -145,7 +143,8 @@ def choose_live_capture_sample_rate(device: object, preferred_rate: int) -> int:
             return rate
         except Exception:
             continue
-    return preferred_rate
+    raise RuntimeError("input device supports none of the VAD capture rates: "
+                       + ", ".join(str(rate) for rate in candidates))
 
 
 def choose_replay_capture_sample_rate(preferred_rate: int) -> int:

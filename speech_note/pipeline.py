@@ -400,24 +400,39 @@ def commit_artifacts(config: "Config", session: Session) -> None:
         if session.errors:
             session.paths["error_diagnostics"] = str(diagnostics_path)
     store = ArtifactStore(config.artifacts_dir, config.archive_dir)
-    try:
+    def save_recovery_audio() -> None:
         if diagnostics_path is not None and session.recorded_audio and (
             session.errors or session.cleanup is None or not session.cleanup.text
         ):
             anchor = config.output or Path.cwd() / "speech-note"
-            recovery = unique_output_path(diagnostics_path.parent, f"{anchor.stem}-recording", ".wav")
             try:
-                write_wav(recovery, bytes(session.recorded_audio), session.recording_sample_rate)
+                while True:
+                    recovery = unique_output_path(diagnostics_path.parent, f"{anchor.stem}-recording", ".wav")
+                    try:
+                        write_wav(recovery, bytes(session.recorded_audio), session.recording_sample_rate, exclusive=True)
+                        break
+                    except FileExistsError:
+                        continue
                 session.paths["recovery_recording"] = str(recovery)
                 print(f"saved recovery recording: {recovery}", file=sys.stderr)
             except OSError as exc:
                 session.add_error(f"could not save recovery recording: {exc}")
                 session.run_failed = True
+    try:
+        save_recovery_audio()
         try:
             store.commit(session)
         except OSError as exc:
             session.add_error(f"could not save runtime artifacts: {exc}")
             session.run_failed = True
+            if diagnostics_handle is None:
+                recovery_dir = Path(tempfile.mkdtemp(prefix="speech-note-recovery-"))
+                diagnostics_path, diagnostics_handle = open_unique_output(recovery_dir / "diagnostics.json")
+                session.paths["diagnostics"] = str(diagnostics_path)
+                session.paths["error_diagnostics"] = str(diagnostics_path)
+                print(f"saved recovery diagnostics: {diagnostics_path}", file=sys.stderr)
+            if "recovery_recording" not in session.paths:
+                save_recovery_audio()
         if diagnostics_handle is not None:
             # Serialize this session, never another concurrent run's latest file.
             diagnostics_handle.write(json.dumps(store.diagnostics_payload(session), indent=2) + "\n")

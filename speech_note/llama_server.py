@@ -255,6 +255,8 @@ class LocalServerSupervisor:
             if not self.launch_command:
                 return
             if self.process is None or self.process.poll() is not None:
+                if self._log_handle is not None:
+                    self._log_handle.close()
                 fd, log_name = tempfile.mkstemp(prefix="speech-note-llama-server-", suffix=".log")
                 os.close(fd)
                 self.log_path = Path(log_name)

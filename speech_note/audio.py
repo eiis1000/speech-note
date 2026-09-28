@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import os
 import subprocess
 import tempfile
 import wave
@@ -80,13 +81,21 @@ def pcm_duration_seconds(num_bytes: int, sample_rate: int) -> float:
     return num_bytes / (sample_rate * SAMPLE_WIDTH * CHANNELS)
 
 
-def write_wav(path: Path, pcm_data: bytes, sample_rate: int) -> None:
+def write_wav(path: Path, pcm_data: bytes, sample_rate: int, *, exclusive: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(path), "wb") as handle:
-        handle.setnchannels(CHANNELS)
-        handle.setsampwidth(SAMPLE_WIDTH)
-        handle.setframerate(sample_rate)
-        handle.writeframes(pcm_data)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream, wave.open(stream, "wb") as handle:
+            handle.setnchannels(CHANNELS)
+            handle.setsampwidth(SAMPLE_WIDTH)
+            handle.setframerate(sample_rate)
+            handle.writeframes(pcm_data)
+        if exclusive:
+            os.link(temporary, path)
+        else:
+            os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _run_ffmpeg(command: list[str], *, action: str) -> None:
