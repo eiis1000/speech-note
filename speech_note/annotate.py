@@ -41,11 +41,10 @@ from .config import (
     ANNOTATION_WORDS_PER_NOTE,
     ORGANIZER_CONTEXT_SAFETY,
 )
-from .chat import request_timeout_seconds
+from .chat import ChatClient, request_timeout_seconds
 from .textproc import estimate_text_tokens
 
 if TYPE_CHECKING:
-    from .chat import ChatClient
     from .model import Transcript
 
 
@@ -472,29 +471,48 @@ def decode_response(content: str) -> tuple[list[UncertaintyNote], bool]:
     """(notes, understood). ``understood`` False means the reply was not the JSON we asked
     for at all — distinct from a well-formed empty list, which is a real answer.
 
-    The object is prefix-parsed (raw_decode) rather than sliced to the last brace:
-    providers without schema enforcement were observed closing the envelope after the
-    first entry and continuing anyway ('{"uncertain": [..]}, {..}]}'), and the valid
-    prefix of such a reply is a real answer while the whole is unparseable.
+    A valid prefix is not a complete audit: trailing entries or unfinished JSON
+    must trigger fallback rather than silently losing findings.
     """
     text = content.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    start = text.find("{")
-    if start == -1:
-        return [], False
+    if text.startswith("```") and text.endswith("```"):
+        text = text.split("\n", 1)[-1][:-3].strip()
     try:
-        payload = json.JSONDecoder().raw_decode(text[start:])[0]
+        payload = json.loads(text)
     except ValueError:
         return [], False
     if not isinstance(payload, dict) or not isinstance(payload.get("uncertain"), list):
         return [], False
+    for entry in payload["uncertain"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("quote"), str) or not entry["quote"].strip():
+            return [], False
+        alternatives = entry.get("alternatives")
+        if not isinstance(alternatives, list) or not alternatives:
+            return [], False
+        for alt in alternatives:
+            if isinstance(alt, str) and alt.strip():
+                continue  # Legacy uncited readings still require source verification.
+            if not isinstance(alt, dict):
+                return [], False
+            if not all(isinstance(alt.get(key, ""), str) for key in ("text", "verbatim")):
+                return [], False
+            if not (alt.get("text", "").strip() or alt.get("verbatim", "").strip()):
+                return [], False
     return parse_notes(payload), True
 
 
 def _flexible_pattern(fragment: str) -> str:
     """Whitespace-flexible regex for a fragment, exact otherwise."""
     return r"\s+".join(re.escape(word) for word in fragment.split())
+
+
+def _bounded_pattern(pattern: str, fragment: str) -> str:
+    """A quoted word must not anchor inside a different, longer word."""
+    if fragment and fragment[0].isalnum():
+        pattern = r"(?<!\w)" + pattern
+    if fragment and fragment[-1].isalnum():
+        pattern += r"(?!\w)"
+    return pattern
 
 
 def _locate(text: str, note: UncertaintyNote, start: int = 0) -> tuple[int, int] | None:
@@ -511,7 +529,7 @@ def _locate(text: str, note: UncertaintyNote, start: int = 0) -> tuple[int, int]
     wrong sentence is worse than an unanchored listing, and an unlocatable quote is
     never lost — it stays in the notes list.
     """
-    quote_pattern = _flexible_pattern(note.quote)
+    quote_pattern = _bounded_pattern(_flexible_pattern(note.quote), note.quote)
     if not quote_pattern:
         return None
     if note.before or note.after:
@@ -524,11 +542,10 @@ def _locate(text: str, note: UncertaintyNote, start: int = 0) -> tuple[int, int]
         match = re.search(r"\s*".join(parts), text, re.IGNORECASE)
         if match:
             return match.start(1), match.end(1)
-    index = text.find(note.quote, start)
-    if index == -1:
-        index = text.find(note.quote)
-    if index != -1:
-        return index, index + len(note.quote)
+    exact = re.compile(_bounded_pattern(re.escape(note.quote), note.quote))
+    match = exact.search(text, start) or exact.search(text)
+    if match:
+        return match.span()
     # Word tokens joined by any non-word run: tolerates punctuation-style differences
     # (a model writing 'single' where the transcript has "double" quotes) while still
     # requiring the exact word sequence. Measured: a real quote failed to anchor over
@@ -536,12 +553,13 @@ def _locate(text: str, note: UncertaintyNote, start: int = 0) -> tuple[int, int]
     # Interior apostrophes stay inside a token ("let's"); a bare ' is a quotation
     # mark, not a word, and must not become a token of its own.
     tokens = re.findall(r"\w+(?:'\w+)*", note.quote)
-    word_pattern = r"\W+".join(re.escape(token) for token in tokens) if tokens else quote_pattern
+    word_pattern = (r"(?<!\w)" + r"\W+".join(re.escape(token) for token in tokens) + r"(?!\w)") if tokens else quote_pattern
     for pattern in (quote_pattern, word_pattern):
-        match = re.search(pattern, text[start:], re.IGNORECASE)
+        compiled = re.compile(pattern, re.IGNORECASE)
+        match = compiled.search(text, start)
         if match:
-            return start + match.start(), start + match.end()
-        match = re.search(pattern, text, re.IGNORECASE)
+            return match.span()
+        match = compiled.search(text)
         if match:
             return match.start(), match.end()
     return None
@@ -631,6 +649,8 @@ def annotate(
     context_tokens: int,
 ) -> AnnotationResult:
     """Run the audit pass. Never raises: on any failure the transcript comes back as-is."""
+    if isinstance(client, ChatClient):
+        client.last_attempts = []
     prompt = build_prompt(cleaned_text, sources)
     estimated = sum(
         estimate_text_tokens(text)
@@ -665,6 +685,10 @@ def annotate(
                 requested_output_tokens=requested,
             ),
             response_format=response_format(cap),
+            validate_response=lambda reply: (
+                None if decode_response(reply.content)[1]
+                else "uncertainty annotation did not return the requested JSON"
+            ),
         )
     except Exception as exc:  # noqa: BLE001 — annotation must never fail the run
         return AnnotationResult(text=cleaned_text, error=f"uncertainty annotation failed: {exc}")

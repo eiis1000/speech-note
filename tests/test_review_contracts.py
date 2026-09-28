@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import unittest
+import requests
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -12,6 +13,8 @@ from speech_note.asr import build_transcriber, run_source
 from speech_note.chat import ChatClient
 from speech_note.cli import parse_args, resolve_config
 from speech_note.config import parse_asr_source
+from speech_note.model import Transcript
+from speech_note.organizer import Organizer, cleanup_request_plan
 from tools import annotation_eval, asr_eval, cleanup_eval
 
 
@@ -82,6 +85,47 @@ class ProviderContracts(unittest.TestCase):
             text, error = asr_eval.transcribe_stt('key', 'm', clip)
             self.assertFalse(text)
             self.assertIn('stopped', error)
+
+
+class CleanupAndAuditContracts(unittest.TestCase):
+    def test_malformed_audit_retries_without_applying_a_prefix(self):
+        for malformed in ('{"uncertain": []} {"quote": "lost"}', '{"uncertain": [{"quote": "lost"}]}', 'not JSON'):
+            transport = client()
+            with self.subTest(malformed=malformed), mock.patch('requests.post', side_effect=[response(chat_body(malformed)), response(chat_body('{"uncertain": []}'))]):
+                result = annotate.annotate(transport, cleaned_text='Complete.', sources=[], context_tokens=16384)
+            self.assertIsNone(result.error)
+            self.assertEqual(result.text, 'Complete.')
+            self.assertEqual(len(transport.last_attempts), 2)
+            self.assertIn('error', transport.last_attempts[0])
+
+    def test_word_fragments_do_not_anchor_inside_other_words(self):
+        note = annotate.UncertaintyNote('he', (annotate.Citation('she', 0, ''),))
+        result = annotate.apply_notes('The weather improved.', [note])
+        self.assertEqual(result.inline_count, 0)
+        self.assertEqual(result.appended_count, 1)
+        result = annotate.apply_notes('The weather improved; he left.', [note])
+        self.assertIn('he[1] left', result.text)
+
+    def test_exact_output_budget_is_usable_through_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config('-f', '-t', 'Complete transcript.', '-o', str(Path(tmp) / 'out.txt'),
+                         '--organizer-mode', 'llama', '--organizer-max-output-tokens', '4096',
+                         '--organizer-api-base', 'http://local/v1/chat/completions')
+            with mock.patch('requests.get', side_effect=requests.ConnectionError('no catalog')), \
+                 mock.patch('requests.post', return_value=response(chat_body())) as post, \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                result = pipeline.run_dry_text_pipeline(cfg)
+            self.assertFalse(result.run_failed)
+            self.assertEqual(post.call_count, 1)
+
+    def test_skipped_cleanup_does_not_reuse_previous_attempt_history(self):
+        transport = client()
+        organizer = Organizer(mode='llama', client=transport, supervisor=None, context_tokens=16384, max_output_tokens=4096)
+        with mock.patch('requests.post', return_value=response(chat_body())):
+            first = organizer.cleanup([Transcript('s', 'm', 'user', 'Complete transcript.')])
+            second = organizer.cleanup([])
+        self.assertEqual(len(first.attempts), 1)
+        self.assertEqual(second.attempts, [])
 
 
 if __name__ == '__main__':

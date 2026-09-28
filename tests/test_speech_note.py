@@ -2934,24 +2934,21 @@ class UncertaintyAnnotationTests(unittest.TestCase):
             _notes, understood = self._decode(bad)
             self.assertFalse(understood, f"{bad!r} should not read as understood")
 
-    def test_valid_prefix_survives_trailing_junk(self) -> None:
-        """Providers without schema enforcement were observed closing the envelope after
-        the first entry and continuing anyway. The valid prefix is a real answer; slicing
-        to the LAST brace (the old decode) turned it into nothing."""
+    def test_valid_prefix_does_not_hide_trailing_findings(self) -> None:
         notes, understood = self._decode(
             '{"uncertain": [{"quote": "a b", "alternatives": ["c d"]}]}, '
             '{"quote": "e f", "alternatives": ["g h"]}]}'
         )
-        self.assertTrue(understood)
-        self.assertEqual([n.quote for n in notes], ["a b"])
+        self.assertFalse(understood)
+        self.assertEqual(notes, [])
 
     def test_malformed_entries_are_skipped(self) -> None:
         for bad in ('{"uncertain": [{"quote": "x"}]}',
                     '{"uncertain": [{"alternatives": ["x"]}]}',
                     '{"uncertain": [{"quote": "  ", "alternatives": ["x"]}]}'):
             notes, understood = self._decode(bad)
-            self.assertTrue(understood)   # the shape was right...
-            self.assertEqual(notes, [])   # ...but no usable entry in it
+            self.assertFalse(understood)
+            self.assertEqual(notes, [])
 
     def test_duplicate_notes_collapse_to_one(self) -> None:
         """Measured on a 9B model: the same note emitted 14 times in one reply. Same

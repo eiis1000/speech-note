@@ -263,7 +263,7 @@ def cleanup_request_plan(
         largest_source_tokens=largest_source_tokens,
         requested_output_tokens=requested_output_tokens,
         token_budget=token_budget,
-        output_cap_limited=uncapped_output_tokens >= max_output_tokens,
+        output_cap_limited=uncapped_output_tokens > max_output_tokens,
         reference_words=reference_words,
         minimum_words=max(1, math.ceil(reference_words * CLEANUP_MIN_LENGTH_RATIO)),
     )
@@ -306,6 +306,9 @@ class Organizer:
         same sources) avoids rebuilding the prompt over the full transcript text."""
         sources = [s for s in sources if s.text.strip()]
         sources = _dedupe_sources(sources)
+        for client in (self.client, self.annotation_client):
+            if isinstance(client, ChatClient):
+                client.last_attempts = []
         started = time.monotonic()
         outcome = self._cleanup_inner(sources, plan)
         if isinstance(self.client, ChatClient):
@@ -376,14 +379,14 @@ class Organizer:
         self, sources: list[Transcript], plan: CleanupRequestPlan | None
     ) -> CleanupOutcome:
         assert self.client is not None
-        if self.supervisor is not None:
-            self.supervisor.ensure_running()
         if plan is None:
             plan = cleanup_request_plan(
                 sources,
                 context_tokens=self.context_tokens,
                 max_output_tokens=self.max_output_tokens,
             )
+        if plan.output_cap_limited:
+            raise PromptTooLargeError("estimated cleanup output exceeds the configured output token cap")
         if plan.estimated_prompt_tokens + plan.requested_output_tokens > plan.token_budget:
             raise PromptTooLargeError(
                 "estimated cleanup prompt is too large "
@@ -391,6 +394,8 @@ class Organizer:
                 f"output tokens > budget {plan.token_budget} of context {self.context_tokens}); "
                 "raise --organizer-context-tokens or use --organizer-provider openrouter"
             )
+        if self.supervisor is not None:
+            self.supervisor.ensure_running()
         timeout = request_timeout_seconds(
             configured_timeout=self.client.timeout,
             estimated_prompt_tokens=plan.estimated_prompt_tokens,
@@ -433,6 +438,8 @@ class Organizer:
         # Also enforce the contract for alternate clients implementing chat().
         outcome.error = cleanup_response_error(response, plan)
         outcome.flagged_short = outcome.error is not None
+        if outcome.error:
+            outcome.text = ""
         return outcome
 
 

@@ -420,13 +420,11 @@ ORGANIZER_MIN_OUTPUT_TOKENS = 4_096
 # --- uncertainty annotation ---
 # The annotation pass is answered under a JSON *schema*, not merely "please emit JSON".
 # That matters for more than tidiness: llama.cpp compiles a schema into a GBNF grammar
-# and constrains sampling with it, so a small local model physically cannot emit an
-# unterminated string. Without it, the bundled gemma quant looped inside the first
+# and constrains sampling with it. Without it, the bundled gemma quant looped inside the first
 # entry's string until it hit the token cap and the whole reply was unusable.
 #
-# The bounds below are part of that guarantee — they are what makes the worst-case reply
-# a bounded length instead of "until the model stops", so truncation stops being possible
-# rather than being something to recover from afterwards.
+# These bounds limit response size, but token limits and provider failures can still
+# interrupt generation. Transport and annotation decoding must reject partial replies.
 ANNOTATION_MAX_NOTES = 25
 ANNOTATION_MAX_QUOTE_CHARS = 200
 ANNOTATION_MAX_ALTERNATIVES = 3
@@ -454,8 +452,8 @@ ORGANIZER_CONTEXT_SAFETY = 0.92
 # the shortest would license dropping the extra real content a more sensitive source
 # (e.g. the Gemini audio-LLM) caught — but anchoring to the longest over-counts when
 # that source is long because it kept every disfluency, demanding a bloated output. The
-# mean is robust to one filler-heavy source. These are the warning floor / soft target
-# as fractions of the mean source length; both are review hints, never gates.
+# mean reduces the influence of one filler-heavy source. These are the rejection floor
+# and soft prompt target as fractions of the mean source length.
 CLEANUP_MIN_LENGTH_RATIO = 0.6
 CLEANUP_TARGET_LENGTH_RATIO = 0.8
 
