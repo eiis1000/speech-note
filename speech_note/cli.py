@@ -234,9 +234,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-f", "--full-auto",
         action="store_true",
         help=(
-            "Non-interactive: write only an auto-named cleaned transcript to the current "
-            "directory, or beside each input in batch mode (plus a diagnostics file on "
-            "errors); keep other artifacts in a temporary directory."
+            "Non-interactive: write an auto-named cleaned transcript to the current "
+            "directory, or beside each input in batch mode, and retain a diagnostics "
+            "sidecar for every run; keep other artifacts in a temporary directory."
         ),
     )
     parser.add_argument(

@@ -92,7 +92,8 @@ let
       unset PYTHONHOME VIRTUAL_ENV __PYVENV_LAUNCHER__
       export PYTHONPATH=${runtimeSrc}
       export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL="''${TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL:-1}"
-      exec ${pythonEnv}/bin/python -m speech_note "$@"
+      # Use the packaged source even when invoked from another checkout.
+      exec ${pythonEnv}/bin/python -P -m speech_note "$@"
     '';
   };
 in
