@@ -10,8 +10,8 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import dataclasses
+import json
 import re
-import shutil
 import sys
 import tempfile
 import threading
@@ -28,10 +28,10 @@ from .config import (
     short_model_name,
 )
 from .model import CleanupOutcome, Transcript
-from .naming import full_auto_output_path, unique_directory_path, unique_output_path, write_unique_output
+from .naming import full_auto_output_path, open_unique_output, unique_directory_path, unique_output_path, write_unique_output
 from .textproc import sanitize_filename_stem
 from .organizer import Organizer, build_organizer, cleanup_messages, cleanup_request_plan
-from .session import ArtifactStore, Session
+from .session import ArtifactStore, Session, atomic_write_text
 from .terminal import (
     copy_with_wl_copy,
     print_side_by_side,
@@ -208,7 +208,11 @@ def run_cleanup_stage(config: "Config", session: Session, organizer: Organizer) 
                 requested_output_tokens=plan.requested_output_tokens,
             )
             session.add_error(f"cleanup: {error}")
-            write_sources_export(config, session, directory=export_dir)
+            try:
+                write_sources_export(config, session, directory=export_dir)
+            except OSError as exc:
+                session.add_error(f"could not export sources: {exc}")
+                session.run_failed = True
             return
     if (
         config.announce_remote_cleanup
@@ -291,7 +295,7 @@ def write_output_file(config: "Config", session: Session) -> None:
         output = write_unique_output(config.output, cleanup.text + "\n")
     else:
         output = config.output
-        output.write_text(cleanup.text + "\n", encoding="utf-8")
+        atomic_write_text(output, cleanup.text + "\n")
     session.paths["output"] = str(output)
 
 
@@ -315,8 +319,18 @@ def write_sources_export(config: "Config", session: Session, *, directory: Path 
     directory = directory or config.export_sources
     if directory is None:
         return
+    if "exported_sources" in session.paths:
+        return  # A cap-limited run already exported these same sources.
     sources = cleanup_sources(session)
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    base = directory
+    while True:
+        directory = unique_directory_path(base)
+        try:
+            directory.mkdir()
+            break
+        except FileExistsError:
+            continue
     written: list[str] = []
     if config.organizer.mode == "llama" and sources:
         plan = cleanup_request_plan(
@@ -355,33 +369,58 @@ def write_sources_export(config: "Config", session: Session, *, directory: Path 
 
 def commit_artifacts(config: "Config", session: Session) -> None:
     """Single commit point for all artifacts, including full-auto diagnostics."""
-    if config.full_auto and session.recorded_audio and (
-        session.errors or session.cleanup is None or not session.cleanup.text
-    ):
-        # Full-auto's temporary artifacts are deleted on exit. A failed microphone
-        # run has no other copy of its input, so keep a recoverable WAV beside its
-        # diagnostics instead of discarding the user's recording.
-        anchor = config.output or Path.cwd() / "speech-note"
-        recovery = unique_output_path(anchor.parent, f"{anchor.stem}-recording", ".wav")
-        write_wav(recovery, bytes(session.recorded_audio), session.recording_sample_rate)
-        session.paths["recovery_recording"] = str(recovery)
-        print(f"saved recovery recording: {recovery}", file=sys.stderr)
-    write_output_file(config, session)
-    write_sources_export(config, session)
+    for label, writer in (("output", write_output_file), ("source export", write_sources_export)):
+        try:
+            writer(config, session)
+        except OSError as exc:
+            session.add_error(f"could not save {label}: {exc}")
+            session.run_failed = True
     diagnostics_path: Path | None = None
+    diagnostics_handle = None
     if config.full_auto:
         anchor = Path(session.paths["output"]) if "output" in session.paths else (
             config.output if config.output is not None else Path.cwd() / "speech-note"
         )
-        anchor.parent.mkdir(parents=True, exist_ok=True)
-        diagnostics_path = unique_output_path(anchor.parent, f"{anchor.stem}-diagnostics", ".json")
+        try:
+            anchor.parent.mkdir(parents=True, exist_ok=True)
+            diagnostics_path, diagnostics_handle = open_unique_output(
+                anchor.with_name(f"{anchor.stem}-diagnostics.json")
+            )
+        except OSError as exc:
+            session.add_error(f"could not save diagnostics beside output: {exc}")
+            session.run_failed = True
+            # Full-auto scratch is removed at exit. Use a persistent recovery
+            # directory if the requested destination itself cannot be written.
+            recovery = Path(tempfile.mkdtemp(prefix="speech-note-recovery-"))
+            diagnostics_path, diagnostics_handle = open_unique_output(recovery / "diagnostics.json")
         session.paths["diagnostics"] = str(diagnostics_path)
         if session.errors:
             session.paths["error_diagnostics"] = str(diagnostics_path)
     store = ArtifactStore(config.artifacts_dir, config.archive_dir)
-    store.commit(session)
-    if diagnostics_path is not None:
-        shutil.copyfile(Path(session.paths["latest_diagnostics"]), diagnostics_path)
+    try:
+        if diagnostics_path is not None and session.recorded_audio and (
+            session.errors or session.cleanup is None or not session.cleanup.text
+        ):
+            anchor = config.output or Path.cwd() / "speech-note"
+            recovery = unique_output_path(diagnostics_path.parent, f"{anchor.stem}-recording", ".wav")
+            try:
+                write_wav(recovery, bytes(session.recorded_audio), session.recording_sample_rate)
+                session.paths["recovery_recording"] = str(recovery)
+                print(f"saved recovery recording: {recovery}", file=sys.stderr)
+            except OSError as exc:
+                session.add_error(f"could not save recovery recording: {exc}")
+                session.run_failed = True
+        try:
+            store.commit(session)
+        except OSError as exc:
+            session.add_error(f"could not save runtime artifacts: {exc}")
+            session.run_failed = True
+        if diagnostics_handle is not None:
+            # Serialize this session, never another concurrent run's latest file.
+            diagnostics_handle.write(json.dumps(store.diagnostics_payload(session), indent=2) + "\n")
+    finally:
+        if diagnostics_handle is not None:
+            diagnostics_handle.close()
 
 
 def review_panels(session: Session) -> list[tuple[str, str]]:
@@ -550,13 +589,13 @@ def finalize(config: "Config", session: Session, organizer: Organizer) -> None:
         session.clipboard_status = "skipped"
         if (session.cleanup is None or not session.cleanup.text) and not session.errors:
             session.add_error("cleanup produced no text")
-    commit_artifacts(config, session)
-    report(config, session)
     cleanup = session.cleanup
-    session.run_failed = not session.produced_output or (
+    session.run_failed = session.run_failed or not session.produced_output or (
         config.full_auto
         and (cleanup is None or not cleanup.text or bool(cleanup.error))
     )
+    commit_artifacts(config, session)
+    report(config, session)
 
 
 # --- transcript file inputs ---

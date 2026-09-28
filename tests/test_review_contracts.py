@@ -4,6 +4,10 @@ import json
 import tempfile
 import unittest
 import requests
+import dataclasses
+import threading
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -11,10 +15,11 @@ from unittest import mock
 from speech_note import annotate, pipeline
 from speech_note.asr import build_transcriber, run_source
 from speech_note.chat import ChatClient
-from speech_note.cli import parse_args, resolve_config
+from speech_note.cli import parse_args, resolve_config, validate
 from speech_note.config import parse_asr_source
-from speech_note.model import Transcript
+from speech_note.model import Transcript, CleanupOutcome
 from speech_note.organizer import Organizer, cleanup_request_plan
+from speech_note.session import Session, ArtifactStore
 from tools import annotation_eval, asr_eval, cleanup_eval
 
 
@@ -126,6 +131,77 @@ class CleanupAndAuditContracts(unittest.TestCase):
             second = organizer.cleanup([])
         self.assertEqual(len(first.attempts), 1)
         self.assertEqual(second.attempts, [])
+
+
+class ArtifactContracts(unittest.TestCase):
+    def test_output_failure_keeps_computed_text_and_nonzero_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            blocked = root / 'blocked'
+            blocked.mkdir()
+            cfg = config('-f', '-t', 'Complete transcript.', '-o', str(blocked))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                result = pipeline.run_dry_text_pipeline(cfg)
+            self.assertTrue(result.run_failed)
+            evidence = json.loads(Path(result.paths['diagnostics']).read_text())
+            self.assertEqual(evidence['cleanup']['text'], 'Complete transcript.')
+            self.assertTrue(evidence['run_failed'])
+            self.assertTrue(evidence['errors'])
+
+    def test_repeated_exports_do_not_mix_sources_or_keep_stale_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            export = root / 'sources'
+            cfg = config('-t', 'New.', '--export-sources', str(export), '--artifacts-dir', str(root / 'artifacts'))
+            first = Session(cfg)
+            first.add_transcript(Transcript('s', 'old', 'external', 'Old source.'))
+            first.cleanup = CleanupOutcome(text='Old clean.')
+            pipeline.write_sources_export(cfg, first)
+            second = Session(cfg)
+            second.add_transcript(Transcript('s', 'new', 'external', 'New source.'))
+            pipeline.write_sources_export(cfg, second)
+            new_export = Path(second.paths['exported_sources'])
+            self.assertNotEqual(new_export, export)
+            self.assertEqual((export / 'clean.txt').read_text(), 'Old clean.\n')
+            self.assertFalse((new_export / 'clean.txt').exists())
+            self.assertEqual([p.name for p in new_export.iterdir()], ['01-new.txt'])
+
+    def test_archive_diagnostics_keep_original_zip_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / 'input.zip'
+            with zipfile.ZipFile(archive, 'w') as handle:
+                handle.writestr('audio.wav', b'not decoded in no-ASR mode')
+                handle.writestr('source.txt', 'Complete transcript.')
+            cfg = config('-f', '--no-asr', '-i', str(archive), '-o', str(root / 'clean.txt'))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                result = pipeline.run_archive_pipeline(cfg)
+            evidence = json.loads(Path(result.paths['diagnostics']).read_text())
+            self.assertEqual(evidence['config']['input_archive'], str(archive))
+            self.assertFalse(Path(evidence['config']['input_file']).exists())
+
+    def test_output_cannot_replace_source_input(self):
+        for flag in ('-x', '-i', '--replay-input-file'):
+            with self.subTest(flag=flag), self.assertRaisesRegex(SystemExit, 'overwrite an input'):
+                validate(config(flag, '/tmp/synthetic-input.txt', '-o', '/tmp/synthetic-input.txt'))
+
+    def test_concurrent_failed_runs_get_distinct_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config('-f', '-t', 'source', '-o', str(root / 'same.txt'))
+            barrier = threading.Barrier(2)
+            def commit(index):
+                worker = dataclasses.replace(cfg, artifacts_dir=root / str(index), archive_dir=root / str(index) / 'logs')
+                session = Session(worker)
+                session.add_transcript(Transcript('s', 'm', 'user', f'source {index}'))
+                session.add_error(f'failure {index}')
+                barrier.wait(timeout=2)
+                pipeline.commit_artifacts(worker, session)
+                return Path(session.paths['diagnostics'])
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                paths = list(pool.map(commit, (1, 2)))
+            self.assertEqual(len(set(paths)), 2)
+            self.assertEqual({json.loads(p.read_text())['errors'][0] for p in paths}, {'failure 1', 'failure 2'})
 
 
 if __name__ == '__main__':

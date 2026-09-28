@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 
 from .textproc import sanitize_filename_stem
 
@@ -47,37 +47,47 @@ def transcript_base_stem(path: Path) -> str:
 
 def unique_output_path(directory: Path, stem: str, suffix: str) -> Path:
     candidate = directory / f"{stem}{suffix}"
-    if not candidate.exists():
+    if not candidate.exists() and not candidate.is_symlink():
         return candidate
     for index in range(2, 1000):
         candidate = directory / f"{stem}-{index}{suffix}"
-        if not candidate.exists():
+        if not candidate.exists() and not candidate.is_symlink():
             return candidate
     raise RuntimeError(f"could not choose unused output filename for {stem}{suffix}")
 
 
 def unique_directory_path(directory: Path) -> Path:
-    if not directory.exists():
+    if not directory.exists() and not directory.is_symlink():
         return directory
     for index in range(2, 1000):
         candidate = directory.with_name(f"{directory.name}-{index}")
-        if not candidate.exists():
+        if not candidate.exists() and not candidate.is_symlink():
             return candidate
     raise RuntimeError(f"could not choose unused directory for {directory}")
 
 
-def write_unique_output(path: Path, content: str) -> Path:
-    """Claim and write an auto-named output without overwriting a concurrent run."""
+def open_unique_output(path: Path) -> tuple[Path, TextIO]:
+    """Claim a unique name atomically; the caller owns the returned handle."""
     for _ in range(1000):
         candidate = unique_output_path(path.parent, path.stem, path.suffix)
         try:
             handle = candidate.open("x", encoding="utf-8")
         except FileExistsError:
             continue  # another worker claimed it between the lookup and the open
+        return candidate, handle
+    raise RuntimeError(f"could not claim unused output filename for {path}")
+
+
+def write_unique_output(path: Path, content: str) -> Path:
+    """Claim and write an auto-named output without overwriting a concurrent run."""
+    candidate, handle = open_unique_output(path)
+    try:
         with handle:
             handle.write(content)
-        return candidate
-    raise RuntimeError(f"could not claim unused output filename for {path}")
+    except BaseException:
+        candidate.unlink(missing_ok=True)
+        raise
+    return candidate
 
 
 def full_auto_source_stem(config: "Config") -> str:

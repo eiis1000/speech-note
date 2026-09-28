@@ -119,7 +119,6 @@ class Config:
     def with_archive_contents(self, audio_path: Path, transcript_paths: list[Path]) -> "Config":
         derived = dataclasses.replace(
             self,
-            input_archive=None,
             input_file=audio_path,
             extra_transcripts=self.extra_transcripts + tuple(transcript_paths),
         )
@@ -664,6 +663,10 @@ def resolve_config(args: argparse.Namespace) -> Config:
 
 
 def validate(config: Config) -> None:
+    if config.output is not None:
+        inputs = [config.input_file, config.input_archive, config.replay_input_file, *config.extra_transcripts]
+        if any(path is not None and path.resolve() == config.output.resolve() for path in inputs):
+            raise SystemExit("--output must not overwrite an input recording or transcript")
     for flag, value in (
         ("sample-rate", config.sample_rate),
         ("max-segment-seconds", config.max_segment_seconds),

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -210,8 +212,8 @@ class ArtifactStore:
             content = text + ("\n" if text else "")
             latest = self.artifacts_dir / name
             archived = self.archive_dir / f"{slug}-{archive_suffix}"
-            latest.write_text(content, encoding="utf-8")
-            archived.write_text(content, encoding="utf-8")
+            atomic_write_text(archived, content)
+            atomic_write_text(latest, content)
             # The path keys are identifiers callers write as session.paths["latest_x"],
             # so they use the suffix's underscore form, not its filename form.
             key = archive_suffix.replace("-", "_")
@@ -236,14 +238,16 @@ class ArtifactStore:
             write_wav(archive_wav, bytes(session.recorded_audio), session.recording_sample_rate)
             session.paths["latest_recording"] = str(latest_wav)
             session.paths["archive_recording"] = str(archive_wav)
+        else:
+            (self.artifacts_dir / "recording.latest.wav").unlink(missing_ok=True)
 
         latest_diag = self.artifacts_dir / "diagnostics.latest.json"
         archive_diag = self.archive_dir / f"{slug}-diagnostics.json"
         session.paths["latest_diagnostics"] = str(latest_diag)
         session.paths["archive_diagnostics"] = str(archive_diag)
         payload = json.dumps(self.diagnostics_payload(session), indent=2, ensure_ascii=True) + "\n"
-        latest_diag.write_text(payload, encoding="utf-8")
-        archive_diag.write_text(payload, encoding="utf-8")
+        atomic_write_text(archive_diag, payload)
+        atomic_write_text(latest_diag, payload)
 
     @staticmethod
     def diagnostics_payload(session: Session) -> dict[str, object]:
@@ -253,6 +257,7 @@ class ArtifactStore:
             # Schema 7 retains cleanup/audit attempts, provider errors and final text.
             "schema": 7,
             "version": __version__,
+            "run_failed": session.run_failed,
             "started_at": session.started_at.isoformat(),
             "duration_seconds": round(session.elapsed(), 3),
             "config": _jsonable(dataclasses.asdict(config)),
@@ -332,3 +337,14 @@ class ArtifactStore:
             "paths": session.paths,
             "events": session.events,
         }
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Leave an existing artifact intact if writing its replacement fails."""
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
