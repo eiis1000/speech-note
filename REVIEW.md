@@ -1,3 +1,51 @@
+# Second correctness pass — 2026-09-28
+
+The earlier review missed failures between layers. It relied too heavily on
+existing happy-path tests, checked functions more carefully than the contracts
+between them, and ran packaged commands inside a checkout that could shadow the
+packaged source. Its completeness claims exceeded that evidence.
+
+This pass reread all 24 application Python files, five Python tools, the shell
+test runner, all four pre-existing test files, both Nix definitions, the lockfile,
+runtime/example configuration, README files, and synthetic evaluation fixtures.
+Historical AUDIT.md was not part of the complete source reread. New tests trace
+rejected responses through fallback, persistence, and process exit status.
+
+Corrections, in logical commits:
+
+- `cadfe29`: shared strict response validation across chat, hosted STT, and evals;
+  malformed content and embedded provider errors cannot become successful text.
+- `e5f4390`: malformed/trailing audit JSON advances fallback; invalid entries
+  cannot masquerade as a clean audit; word fragments cannot anchor inside other
+  words; exact output-budget equality is allowed; skipped calls clear old history.
+- `c285c2b`: separate concurrent diagnostics, atomic text replacement, retained
+  evidence after output/export failures, original ZIP provenance, protected input
+  paths, fresh export directories, and removal of stale latest recordings.
+- `446b557`: replay backpressure, completion after read errors, queued-audio
+  recovery, explicit capture-loss failure, unattended download behavior, and
+  sequential ownership of an automatically launched local batch server.
+- `66cf432`: recovery when the runtime artifact directory fails, atomic WAV
+  publication, exclusive recovery recording names, unsupported device-rate
+  rejection, and closure of old server log handles before restart.
+- Final verification commit: real HTTP/subprocess regression coverage, corrected
+  E2E schema/output expectations, explicit ASR choices independent of user config,
+  and long-form coverage checks relative to the supplied recording.
+
+Verification: 298 tests run, 289 passed, nine gated model-dependent tests skipped.
+The supplied real-speech fixture WAVs are absent. Seven new provider/audit/budget
+tests produced nine failing assertions against the pre-fix `7bb0288` source.
+The Nix package was built and its CLI tested from outside the checkout against a
+local HTTP server: provider-error fallback, exhausted fallback, and output-write
+failure all produced the expected files, diagnostics, and exit codes. A synthetic
+fast replay through the packaged ffmpeg/VAD path checks the partial final frame.
+
+These checks establish the tested failure contracts. They do not certify that an
+LM preserves every semantic detail, prove arbitrary model/hardware behavior, or
+guarantee persistence when every recovery destination is unavailable. The package
+build does not activate a NixOS generation or replace the system-installed command.
+
+---
+
 # Correctness pass — 2026-09-08
 
 Read all 31 original Python files (application, tests, and eval tools), both Nix

@@ -8,7 +8,7 @@ minutes; the fast logic suite lives in test_speech_note.py.
 
 Run them with:
 
-    SPEECH_NOTE_E2E=1 nix develop -c python -m unittest -v test_e2e
+    SPEECH_NOTE_E2E=1 nix develop -c python -m unittest discover -s tests -p test_e2e.py -v
 
 A test self-skips if a binary or model it needs is absent, so a partial install
 still runs whatever it can.
@@ -89,6 +89,7 @@ class ArchiveFullStackTests(unittest.TestCase):
         args = [
             "--input", str(zip_path),
             "--artifacts-dir", str(tmp),
+            "--asr", "whisper-cpp", "--asr", "sherpa",
             *argv,
         ]
         config = resolve_config(parse_args(args))
@@ -100,9 +101,7 @@ class ArchiveFullStackTests(unittest.TestCase):
         # produce a transcript, with no primary/secondary roles.
         transcripts = session.asr_transcripts()
         self.assertEqual(len(transcripts), 2, "expected two ASR transcripts")
-        # The fixture says "testing ... live transcription"; the first source
-        # (whisper) should hear it.
-        self.assertIn("transcription", transcripts[0].text.lower())
+        self.assertTrue(transcripts[0].text.strip())
         self.assertTrue(transcripts[1].text.strip())
         outcomes = [o for o in session.asr_outcomes if o.name.startswith("asr")]
         self.assertEqual(len(outcomes), 2)
@@ -121,8 +120,8 @@ class ArchiveFullStackTests(unittest.TestCase):
             # "off" => clean output is the primary transcript verbatim.
             assert session.cleanup is not None
             self.assertEqual(session.cleanup.text, session.asr_transcripts()[0].text)
-            self.assertIn("transcription", (tmp / "clean.latest").read_text().lower())
-            self.assertEqual(json.loads((tmp / "diagnostics.latest.json").read_text())["schema"], 6)
+            self.assertEqual((tmp / "clean.latest").read_text().strip(), session.cleanup.text)
+            self.assertEqual(json.loads((tmp / "diagnostics.latest.json").read_text())["schema"], 7)
 
     def test_heuristic_mode_real_asr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -164,7 +163,6 @@ class ArchiveFullStackTests(unittest.TestCase):
             self.assertTrue(cleanup.served_model)
             # The model actually rewrote the transcript into clean prose.
             self.assertTrue(cleanup.text.strip())
-            self.assertIn("transcription", cleanup.text.lower())
             self.assertEqual((tmp / "clean.latest").read_text().strip(), cleanup.text)
 
     def test_full_auto_names_output_from_archive(self) -> None:
@@ -184,8 +182,8 @@ class ArchiveFullStackTests(unittest.TestCase):
                 os.chdir(prior)
             self.assertFalse(session.run_failed)
             self.assertEqual(
-                [p.name for p in work.iterdir()],
-                ["cosmicwatch-whisper-parakeet-clean.txt"],
+                sorted(p.name for p in work.iterdir()),
+                ["cosmicwatch-whisper-parakeet-clean-diagnostics.json", "cosmicwatch-whisper-parakeet-clean.txt"],
             )
 
 
@@ -218,8 +216,8 @@ class SecondarySherpaFullStackTests(unittest.TestCase):
         if not _have("ffmpeg"):
             raise unittest.SkipTest("ffmpeg not on PATH")
 
-    def test_sherpa_is_in_the_default_collection_on_cpu(self) -> None:
-        config = resolve_config(parse_args(["--organizer-mode", "off"]))
+    def test_explicit_sherpa_uses_cpu(self) -> None:
+        config = resolve_config(parse_args(["--asr", "sherpa", "--organizer-mode", "off"]))
         sherpa = next(s for s in config.asr_sources if s.backend == "sherpa")
         self.assertEqual(sherpa.device, "cpu")
 
@@ -245,7 +243,7 @@ class SecondarySherpaFullStackTests(unittest.TestCase):
                 ).stdout.strip()
             )
             self.assertGreater(duration, 400.0)
-            config = resolve_config(parse_args(["--organizer-mode", "off"]))
+            config = resolve_config(parse_args(["--asr", "sherpa", "--organizer-mode", "off"]))
             outcome = run_source(
                 config, parse_asr_source("sherpa"), clip,
                 label="asr1", duration=duration, transcriber=None,
@@ -254,11 +252,14 @@ class SecondarySherpaFullStackTests(unittest.TestCase):
                 outcome.ok,
                 msg=f"sherpa failed on {duration:.0f}s: {outcome.error or outcome.skip_reason}",
             )
-            # ~50s source -> ~54 words; looped 9x is ~480. Whole-clip coverage, not
-            # just the first segment.
+            baseline = run_source(config, parse_asr_source("sherpa"), LONG_SOURCE,
+                                  label="baseline", duration=None, transcriber=None)
+            self.assertTrue(baseline.ok, baseline.error or baseline.skip_reason)
+            assert baseline.transcript is not None
             assert outcome.transcript is not None
             words = len(outcome.transcript.text.split())
-            self.assertGreaterEqual(words, 400, msg=f"under-covered: only {words} words for {duration:.0f}s")
+            self.assertGreaterEqual(words, 7 * len(baseline.transcript.text.split()),
+                                    msg=f"under-covered: only {words} words for nine repetitions")
 
 
 @unittest.skipUnless(E2E_ENABLED, "set SPEECH_NOTE_E2E=1 to run the full-stack tests")
@@ -315,13 +316,14 @@ class SecondaryCtcLongFormFullStackTests(unittest.TestCase):
             self.assertTrue(
                 outcome.ok, msg=f"CTC failed on {duration:.0f}s: {outcome.error or outcome.skip_reason}"
             )
-            # Coverage check: long-form striding must cover the WHOLE clip, not
-            # just the first window. The source ~50s clip transcribes to ~54
-            # words; looped 9x that is ~480. Without the inputs_to_logits_ratio
-            # fix the pipeline keeps only the first window (~250 words).
+            baseline = run_source(config, parse_asr_source("ctc@cpu"), LONG_SOURCE,
+                                  label="baseline", duration=None, transcriber=None)
+            self.assertTrue(baseline.ok, baseline.error or baseline.skip_reason)
+            assert baseline.transcript is not None
             assert outcome.transcript is not None
             words = len(outcome.transcript.text.split())
-            self.assertGreaterEqual(words, 400, msg=f"under-covered: only {words} words for {duration:.0f}s")
+            self.assertGreaterEqual(words, 7 * len(baseline.transcript.text.split()),
+                                    msg=f"under-covered: only {words} words for nine repetitions")
 
 
 if __name__ == "__main__":

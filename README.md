@@ -154,6 +154,9 @@ responses (including provider errors and generation IDs, but no authorization
 headers). Other runtime artifacts stay in a temporary directory.
 If a microphone run fails or is interrupted, its captured audio is also saved as
 `<output-stem>-recording.wav` beside the diagnostics so it can be transcribed again.
+If the destination cannot be written, diagnostics are retained in a reported
+`speech-note-recovery-*` directory under the system temporary directory. Capture
+overflows mark the run incomplete and make it exit nonzero.
 
 Pass several inputs after one `--input` (or repeat the flag), or pass a directory
 to process each top-level audio/zip as an independent full-auto job. Batch outputs
@@ -174,6 +177,9 @@ about 1.5 GB, so an unbounded fan-out over a directory of long files exhausts
 RAM rather than going faster. `--parallel-workers N` raises the ceiling when the
 inputs are short or the machine is large. Failures remain per-item: the rest of
 the batch completes, and the command exits nonzero if any item failed.
+Batches that may launch the local cleanup server run sequentially so one item
+cannot shut down a server another item is using. Full-auto and worker-thread
+model preparation never prompts; missing models require `--auto-download`.
 Auto-named outputs are claimed exclusively when written, so inputs sharing a stem
 (for example `note.wav` and `note.mp3`) receive separate files even in parallel.
 
@@ -200,6 +206,9 @@ can compare what each source heard or reuse a single source later as an
 speech-note --input rec.m4a --export-sources ./rec-sources/
 # -> rec-sources/01-<source>.txt, 02-<source>.txt, ..., clean.txt
 ```
+
+An existing export directory is preserved; another run uses a numbered sibling
+directory so old sources or cleaned text cannot appear to belong to the new run.
 
 Cleanup-only modes:
 
@@ -563,6 +572,7 @@ zeros for file runs.
 
 Exit code is `0` only if the run produced output (and, under `--full-auto`,
 cleanup succeeded).
+Capture data loss or artifact-write failure also makes the exit code nonzero.
 
 ## License
 
