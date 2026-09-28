@@ -1076,7 +1076,7 @@ class OrganizerLlmTests(unittest.TestCase):
             calls.append(model)
             if model == "first":
                 return fake_response(429, {"error": {"message": "rate-limited"}})
-            return fake_response(200, self.chat_payload("clean " * 90, model="second"))
+            return fake_response(200, self.chat_payload("clean " * 89 + "done.", model="second"))
 
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
         with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
@@ -1102,7 +1102,7 @@ class OrganizerLlmTests(unittest.TestCase):
             calls.append(model)
             if model == "stale:free":
                 return fake_response(404, {"error": {"message": "no longer exists"}})
-            return fake_response(200, self.chat_payload("clean " * 90, model="working:free"))
+            return fake_response(200, self.chat_payload("clean " * 89 + "done.", model="working:free"))
 
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
         with mock.patch.dict("os.environ", {"OPENROUTER_API_KEY": "k"}):
@@ -1129,7 +1129,7 @@ class OrganizerLlmTests(unittest.TestCase):
                 calls.append(model)
                 if model == "first":
                     return fake_response(_status, _body)
-                return fake_response(200, self.chat_payload("clean " * 90, model="second"))
+                return fake_response(200, self.chat_payload("clean " * 89 + "done.", model="second"))
 
             sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
             with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
@@ -1183,7 +1183,7 @@ class OrganizerLlmTests(unittest.TestCase):
             calls.append(model)
             if model == "first":
                 return fake_response(200, {"error": {"message": "rate-limited upstream", "code": 429}})
-            return fake_response(200, self.chat_payload("clean " * 90, model="second"))
+            return fake_response(200, self.chat_payload("clean " * 89 + "done.", model="second"))
 
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
         with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
@@ -1215,7 +1215,7 @@ class OrganizerLlmTests(unittest.TestCase):
                 bad.text = "<html>502 Bad Gateway</html>"
                 bad.json.side_effect = ValueError("not json")
                 return bad
-            return fake_response(200, self.chat_payload("clean " * 90, model="second"))
+            return fake_response(200, self.chat_payload("clean " * 89 + "done.", model="second"))
 
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
         with mock.patch("speech_note.chat.requests.post", side_effect=fake_post):
@@ -1233,19 +1233,18 @@ class OrganizerLlmTests(unittest.TestCase):
         assert outcome.error is not None
         self.assertIn("truncated", outcome.error)
 
-    def test_short_output_is_flagged_but_kept(self) -> None:
+    def test_short_output_is_rejected_and_retained_as_evidence(self) -> None:
         organizer = make_llm_organizer()
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
         response = fake_response(200, self.chat_payload("too short"))
         with mock.patch("speech_note.chat.requests.post", return_value=response):
             outcome = organizer.cleanup(sources)
-        self.assertEqual(outcome.text, "too short")
+        self.assertEqual(outcome.text, "")
+        self.assertEqual(outcome.attempts[0]["response"]["choices"][0]["message"]["content"], "too short")
         self.assertTrue(outcome.flagged_short)
-        self.assertIsNone(outcome.error)
-        assert outcome.warning is not None
-        self.assertIn("short", outcome.warning)
+        self.assertIn("short", outcome.error)
 
-    def test_mid_sentence_output_is_flagged_but_kept(self) -> None:
+    def test_mid_sentence_output_is_rejected_and_retained_as_evidence(self) -> None:
         organizer = make_llm_organizer()
         sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
         # Long enough to pass the length ratio, but cut off mid-sentence (no terminal
@@ -1256,11 +1255,10 @@ class OrganizerLlmTests(unittest.TestCase):
         response = fake_response(200, self.chat_payload(cut_off))
         with mock.patch("speech_note.chat.requests.post", return_value=response):
             outcome = organizer.cleanup(sources)
-        self.assertEqual(outcome.text, cut_off.strip())  # output preserved, not deleted
+        self.assertEqual(outcome.text, "")
+        self.assertEqual(outcome.attempts[0]["response"]["choices"][0]["message"]["content"], cut_off)
         self.assertTrue(outcome.flagged_short)
-        self.assertIsNone(outcome.error)  # a flag, never an error/deletion
-        assert outcome.warning is not None
-        self.assertIn("mid-sentence", outcome.warning)
+        self.assertIn("mid-sentence", outcome.error)
 
     def test_complete_output_is_not_flagged_mid_sentence(self) -> None:
         # A faithful trail-off that the speaker actually made still ends in '.', '?', '!'
@@ -1292,7 +1290,7 @@ class OrganizerLlmTests(unittest.TestCase):
             # The real data rides in the LAST user turn; earlier turns are the
             # worked example, whose own sources must not trip this assertion.
             prompts.append(json.loads(data)["messages"][-1]["content"])
-            return fake_response(200, self.chat_payload("clean " * 90))
+            return fake_response(200, self.chat_payload("clean " * 89 + "done."))
 
         same = "word " * 100
         sources = [
@@ -1695,7 +1693,7 @@ class PipelineEndToEndTests(unittest.TestCase):
             tmp = Path(tmp_dir)
             self.run_dry(tmp)
             payload = json.loads((tmp / "diagnostics.latest.json").read_text())
-            self.assertEqual(payload["schema"], 6)
+            self.assertEqual(payload["schema"], 7)
             self.assertEqual(payload["cleanup"]["method"], "heuristic")
             self.assertFalse(payload["audio_levels"]["measured"])
             self.assertEqual(payload["transcripts"][0]["label"], "user")
@@ -1881,7 +1879,7 @@ class FullAutoTests(unittest.TestCase):
             report(config, session)
         self.assertIn("very quiet", err.getvalue())
 
-    def test_full_auto_success_writes_only_clean_file(self) -> None:
+    def test_full_auto_success_preserves_diagnostics_beside_clean_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
             output = tmp / "note-clean.txt"
@@ -1900,7 +1898,8 @@ class FullAutoTests(unittest.TestCase):
             self.assertFalse(session.run_failed)
             self.assertTrue(output.exists())
             self.assertEqual(
-                [path.name for path in tmp.iterdir()], ["note-clean.txt"]
+                sorted(path.name for path in tmp.iterdir()),
+                ["note-clean-diagnostics.json", "note-clean.txt"],
             )
 
 
@@ -3254,21 +3253,21 @@ class UncertaintyAnnotationTests(unittest.TestCase):
     def test_annotation_failure_leaves_the_transcript_untouched(self) -> None:
         organizer, client = self._annotating_organizer()
         client.chat.side_effect = [
-            ChatResponse(content="Clean text.", served_model="m", finish_reason="stop"),
+            ChatResponse(content="She liked the letter.", served_model="m", finish_reason="stop"),
             RuntimeError("annotation endpoint down"),
         ]
         outcome = organizer.cleanup(self._sources())
-        self.assertEqual(outcome.text, "Clean text.")
+        self.assertEqual(outcome.text, "She liked the letter.")
         self.assertEqual(outcome.annotation_count, 0)
         assert outcome.annotation_error is not None
         self.assertIn("annotation endpoint down", outcome.annotation_error)
         self.assertIsNone(outcome.error)  # the run itself did not fail
 
     def test_truncated_reply_is_reported_not_patched_up(self) -> None:
-        """The schema makes this unreachable; if it happens anyway, say so plainly."""
+        """Provider failures and token limits can interrupt even schema-bound replies."""
         organizer, client = self._annotating_organizer()
         client.chat.side_effect = [
-            ChatResponse(content="Clean text.", served_model="m", finish_reason="stop"),
+            ChatResponse(content="She liked the letter.", served_model="m", finish_reason="stop"),
             ChatResponse(
                 content='{"uncertain": [{"quote": "Clean text.", "alternat',
                 served_model="m",
@@ -3276,25 +3275,25 @@ class UncertaintyAnnotationTests(unittest.TestCase):
             ),
         ]
         outcome = organizer.cleanup(self._sources())
-        self.assertEqual(outcome.text, "Clean text.")
+        self.assertEqual(outcome.text, "She liked the letter.")
         assert outcome.annotation_error is not None
-        self.assertIn("output limit", outcome.annotation_error)
+        self.assertIn("output token limit", outcome.annotation_error)
 
     def test_organizer_records_unusable_annotation_output(self) -> None:
         organizer, client = self._annotating_organizer()
         client.chat.side_effect = [
-            ChatResponse(content="Clean text.", served_model="m", finish_reason="stop"),
+            ChatResponse(content="She liked the letter.", served_model="m", finish_reason="stop"),
             ChatResponse(content="I could not find any issues!", served_model="m", finish_reason="stop"),
         ]
         outcome = organizer.cleanup(self._sources())
-        self.assertEqual(outcome.text, "Clean text.")
+        self.assertEqual(outcome.text, "She liked the letter.")
         assert outcome.annotation_error is not None
         self.assertIn("did not return the requested JSON", outcome.annotation_error)
 
     def test_well_formed_empty_result_is_not_an_error(self) -> None:
         organizer, client = self._annotating_organizer()
         client.chat.side_effect = [
-            ChatResponse(content="Clean text.", served_model="m", finish_reason="stop"),
+            ChatResponse(content="She liked the letter.", served_model="m", finish_reason="stop"),
             ChatResponse(content='{"uncertain": []}', served_model="m", finish_reason="stop"),
         ]
         outcome = organizer.cleanup(self._sources())

@@ -23,7 +23,7 @@ import time
 from typing import TYPE_CHECKING, Callable
 
 from . import annotate as annotation
-from .chat import ChatClient, request_timeout_seconds
+from .chat import ChatClient, ChatResponse, request_timeout_seconds
 from .config import (
     CLEANUP_MIN_LENGTH_RATIO,
     CLEANUP_TARGET_LENGTH_RATIO,
@@ -308,6 +308,8 @@ class Organizer:
         sources = _dedupe_sources(sources)
         started = time.monotonic()
         outcome = self._cleanup_inner(sources, plan)
+        if isinstance(self.client, ChatClient):
+            outcome.attempts = list(self.client.last_attempts)
         # Annotate only a usable result: there is nothing to audit on an error or a
         # truncated transcript, and the sources must actually disagree to have a signal.
         if (
@@ -324,8 +326,8 @@ class Organizer:
     def _annotate(self, outcome: CleanupOutcome, sources: list[Transcript]) -> None:
         """Mark the claims the sources do not jointly support (see annotate.py).
 
-        Best-effort by construction: the transcript is already complete and correct
-        without markers, so a failure is recorded and the text left alone.
+        Best-effort by construction: cleanup has passed its completion checks;
+        an audit failure is recorded and the text left alone.
         """
         assert self.annotation_client is not None
         if self.status_label_callback is not None:
@@ -339,6 +341,8 @@ class Organizer:
             sources=sources,
             context_tokens=self.context_tokens,
         )
+        if isinstance(self.annotation_client, ChatClient):
+            outcome.annotation_attempts = list(self.annotation_client.last_attempts)
         outcome.annotation_seconds = round(time.monotonic() - started, 3)
         outcome.annotation_error = result.error
         outcome.annotation_rejected_citations = result.rejected_citations
@@ -363,7 +367,10 @@ class Organizer:
         except PromptTooLargeError as exc:
             return CleanupOutcome(method="skipped-too-large", error=str(exc))
         except Exception as exc:
-            return CleanupOutcome(method="error", error=f"cleanup request failed: {exc}")
+            return CleanupOutcome(
+                method="error", error=f"cleanup request failed: {exc}",
+                flagged_short=any(term in str(exc) for term in ("truncated", "mid-sentence", "suspiciously short")),
+            )
 
     def _cleanup_with_llm(
         self, sources: list[Transcript], plan: CleanupRequestPlan | None
@@ -395,6 +402,7 @@ class Organizer:
             cleanup_messages(plan),
             max_tokens=plan.requested_output_tokens,
             timeout=timeout,
+            validate_response=lambda reply: cleanup_response_error(reply, plan),
             on_model_attempt=(
                 # Just the model name — the status phase already says "Cleanup".
                 (lambda model: label_callback(model))
@@ -404,7 +412,9 @@ class Organizer:
             on_model_failure=(
                 (
                     lambda model, next_model: note_callback(
-                        f"Cleanup LM failed: {model}; trying {next_model}"
+                        f"Cleanup LM failed: {model}: "
+                        f"{self.client.last_attempts[-1].get('error', 'unusable response')}; "
+                        f"trying {next_model}"
                     )
                 )
                 if note_callback
@@ -420,40 +430,27 @@ class Organizer:
             requested_output_tokens=plan.requested_output_tokens,
             request_timeout=round(timeout, 3),
         )
-        if not outcome.text:
-            outcome.method = "empty"
-            outcome.error = "cleanup model returned empty output"
-            return outcome
-        if response.finish_reason == "length":
-            outcome.flagged_short = True
-            outcome.error = (
-                "cleanup output was truncated at the output token limit "
-                f"({plan.requested_output_tokens} tokens); the transcript is incomplete"
-            )
-            return outcome
-        cleaned_words = count_words(outcome.text)
-        flags: list[str] = []
-        if cleaned_words < plan.minimum_words:
-            flags.append(
-                f"suspiciously short ({cleaned_words} words < {plan.minimum_words} expected "
-                f"from the average source length)"
-            )
-        if _ends_mid_sentence(outcome.text):
-            # finish_reason="length" (handled above) is the clean truncation signal, but
-            # some providers report "stop" on a stream that was cut off anyway; a dangling
-            # final word catches those.
-            flags.append(
-                f'ends mid-sentence ("...{_tail_snippet(outcome.text)}"), so the model may '
-                f"have been cut off before finishing"
-            )
-        if flags:
-            # A warning, not a gate: the output is still the best cleanup we have, so it is
-            # kept and written — only flagged for review, never discarded.
-            outcome.flagged_short = True
-            outcome.warning = (
-                "cleanup output flagged — " + "; ".join(flags) + "; review before trusting it"
-            )
+        # Also enforce the contract for alternate clients implementing chat().
+        outcome.error = cleanup_response_error(response, plan)
+        outcome.flagged_short = outcome.error is not None
         return outcome
+
+
+def cleanup_response_error(response: ChatResponse, plan: CleanupRequestPlan) -> str | None:
+    """Reject incomplete cleanup inside the model fallback loop, before annotation."""
+    failure = response.failure_reason()
+    if failure:
+        return failure
+    text = response.content.strip()
+    if not text:
+        return "cleanup model returned empty output"
+    flags = []
+    words = count_words(text)
+    if words < plan.minimum_words:
+        flags.append(f"suspiciously short ({words} words < {plan.minimum_words} expected)")
+    if _ends_mid_sentence(text):
+        flags.append(f'ends mid-sentence ("...{_tail_snippet(text)}")')
+    return "incomplete cleanup: " + "; ".join(flags) if flags else None
 
 
 _SENTENCE_FINAL = ".?!…"

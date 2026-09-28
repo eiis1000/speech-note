@@ -80,6 +80,8 @@ class CleanupOutcome:
     # analysis never has to parse anchors back out of the rendered text.
     annotation_notes: list[dict[str, object]] | None = None
     annotation_error: str | None = None
+    attempts: list[dict[str, object]] = dataclasses.field(default_factory=list)
+    annotation_attempts: list[dict[str, object]] = dataclasses.field(default_factory=list)
 
     @property
     def ok(self) -> bool:

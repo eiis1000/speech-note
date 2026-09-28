@@ -368,17 +368,20 @@ def commit_artifacts(config: "Config", session: Session) -> None:
         print(f"saved recovery recording: {recovery}", file=sys.stderr)
     write_output_file(config, session)
     write_sources_export(config, session)
-    error_diag_path: Path | None = None
-    if config.full_auto and session.errors:
+    diagnostics_path: Path | None = None
+    if config.full_auto:
         anchor = Path(session.paths["output"]) if "output" in session.paths else (
             config.output if config.output is not None else Path.cwd() / "speech-note"
         )
-        error_diag_path = unique_output_path(anchor.parent, f"{anchor.stem}-diagnostics", ".json")
-        session.paths["error_diagnostics"] = str(error_diag_path)
+        anchor.parent.mkdir(parents=True, exist_ok=True)
+        diagnostics_path = unique_output_path(anchor.parent, f"{anchor.stem}-diagnostics", ".json")
+        session.paths["diagnostics"] = str(diagnostics_path)
+        if session.errors:
+            session.paths["error_diagnostics"] = str(diagnostics_path)
     store = ArtifactStore(config.artifacts_dir, config.archive_dir)
     store.commit(session)
-    if error_diag_path is not None:
-        shutil.copyfile(Path(session.paths["latest_diagnostics"]), error_diag_path)
+    if diagnostics_path is not None:
+        shutil.copyfile(Path(session.paths["latest_diagnostics"]), diagnostics_path)
 
 
 def review_panels(session: Session) -> list[tuple[str, str]]:
@@ -451,9 +454,7 @@ def choose_and_copy(session: Session, panels: list[tuple[str, str]]) -> None:
 def print_cleanup_notes(session: Session, *, full_auto: bool) -> None:
     """The cleanup/audit lines both report modes owe the reader.
 
-    A flagged-but-kept cleanup (short, or cut off mid-sentence) is still written, so
-    the warning has to be printed or the file looks clean. A skipped audit likewise:
-    silence would be indistinguishable from a clean bill of health. Only the audit
+    Warnings and skipped audits must remain visible. Only the audit
     skip differs between modes — the interactive path already prints it in the skips
     tail, which full-auto returns before reaching.
     """
@@ -500,8 +501,8 @@ def report(config: "Config", session: Session) -> None:
         if "exported_sources" in session.paths:
             print(f"exported sources: {session.paths['exported_sources']}", file=err)
         print_errors(session)
-        if "error_diagnostics" in session.paths:
-            print(f"error diagnostics: {session.paths['error_diagnostics']}", file=err)
+        if "diagnostics" in session.paths:
+            print(f"saved diagnostics: {session.paths['diagnostics']}", file=err)
         return
     print(f"saved raw: {session.paths.get('latest_raw')} and {session.paths.get('archive_raw')}", file=err)
     print(

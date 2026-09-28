@@ -138,7 +138,7 @@ only as a fallback when the final Whisper pass fails.
 speech-note --input /path/to/audio.m4a
 ```
 
-Unattended runs that should leave only a cleaned transcript in the current
+Unattended runs that leave a cleaned transcript and its diagnostics in the current
 directory:
 
 ```sh
@@ -147,8 +147,11 @@ speech-note --input /path/to/audio.m4a --full-auto
 
 `--full-auto` writes an auto-named `<input>-clean.txt` only if cleanup actually
 succeeded (failed, empty, or truncated cleanup writes nothing and the process
-exits nonzero), keeps the usual artifacts in a temporary directory, and on any
-error drops a matching `<input>-clean-diagnostics.json` next to the output.
+exits nonzero). Every run keeps a matching `<input>-clean-diagnostics.json` next
+to the output, including successful runs that recovered from a provider failure.
+It contains the source transcripts, final text, and cleanup/audit requests and
+responses (including provider errors and generation IDs, but no authorization
+headers). Other runtime artifacts stay in a temporary directory.
 If a microphone run fails or is interrupted, its captured audio is also saved as
 `<output-stem>-recording.wav` beside the diagnostics so it can be transcribed again.
 
@@ -411,14 +414,16 @@ dropped instead of becoming retry noise. **Privacy:** this sends your full
 transcript off-machine, and free-tier endpoints may log or train on inputs;
 the run prints a notice when that's about to happen.
 
-Robustness details: the request timeout scales with the estimated work; a
-response with `finish_reason == "length"` is reported as a truncated (failed)
-cleanup rather than passed off as complete; output that is suspiciously short
-relative to the *mean* source length — the mean, so one filler-heavy source
-cannot demand a bloated transcript — is kept but flagged with a warning in the
-output and diagnostics. An HTTP error advances to the next model in the chain;
-only a rejected credential fails the run outright, since that is the one failure
-another model cannot fix.
+Robustness details: the request timeout scales with the estimated work. Provider
+errors inside HTTP 200 responses, refusals, and incomplete finish reasons advance
+to the next model, retaining the rejected response in diagnostics. Cleanup that
+ends mid-sentence or is suspiciously short relative to the mean source length
+also advances to the next model, even if its finish reason claims success.
+Annotation runs only after cleanup passes these checks. If the chain is exhausted,
+full-auto exits nonzero and writes diagnostics without a clean transcript; the
+sources and failed responses remain available for recovery. These checks detect
+obvious truncation, not every possible semantic omission. A rejected credential
+fails the run outright, since another model cannot fix it.
 
 For arbitrary prompts against the same local server, keep it running yourself
 and use `curl http://127.0.0.1:8011/v1/chat/completions`.
@@ -545,10 +550,11 @@ GPU.
 jq '.timings, .asr, .cleanup, .errors, .skips' diagnostics.latest.json
 ```
 
-The diagnostics file (schema 6) records the resolved config, the input
+The diagnostics file (schema 7) records the resolved config, the input
 duration, every transcript with its provenance (label, producing model, kind),
 per-pass timing *and realtime factor*, the leveling gain actually applied,
-cleanup telemetry (served model, finish reason, token estimates), the
+cleanup telemetry (served model, finish reason, token estimates), every cleanup
+and annotation attempt's request and response, the final cleaned text, the
 annotation pass's applied notes as structured data (quote / alternatives /
 anchored) with its rejected-citation count and timing, and an event timeline
 stamped in seconds since run start. Errors and skips are separate lists;

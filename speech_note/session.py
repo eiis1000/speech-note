@@ -250,11 +250,8 @@ class ArtifactStore:
         config = session.config
         cleanup = session.cleanup
         return {
-            # schema 6: input.available_input_devices is gone — nothing ever wrote it,
-            # so every run reported an empty list (5 added structured annotation notes,
-            # the rejected-citation count and the pass timing; 4 added the annotation
-            # fields; 3 and earlier predate the annotation pass).
-            "schema": 6,
+            # Schema 7 retains cleanup/audit attempts, provider errors and final text.
+            "schema": 7,
             "version": __version__,
             "started_at": session.started_at.isoformat(),
             "duration_seconds": round(session.elapsed(), 3),
@@ -306,6 +303,9 @@ class ArtifactStore:
                 "annotation_notes": cleanup.annotation_notes,
                 "annotation_error": cleanup.annotation_error,
                 "text_before_annotation": cleanup.text_before_annotation,
+                "text": cleanup.text,
+                "attempts": cleanup.attempts,
+                "annotation_attempts": cleanup.annotation_attempts,
             },
             "audio_levels": {
                 "measured": session.audio_measured,

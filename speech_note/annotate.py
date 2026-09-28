@@ -669,14 +669,13 @@ def annotate(
     except Exception as exc:  # noqa: BLE001 — annotation must never fail the run
         return AnnotationResult(text=cleaned_text, error=f"uncertainty annotation failed: {exc}")
 
-    if response.finish_reason == "length":
-        # Should be unreachable: the schema bounds the reply. If it happens, say so
-        # plainly rather than trying to piece together a half-written answer.
+    if response.failure_reason():
+        # A schema cannot prevent provider failures or generation limits. Reject
+        # partial replies even when an alternate client bypasses transport checks.
         return AnnotationResult(
             text=cleaned_text,
             error=(
-                "uncertainty annotation hit the output limit despite the bounded schema "
-                f"({requested} tokens); no notes applied"
+                f"uncertainty annotation failed: {response.failure_reason()}; no notes applied"
             ),
         )
     notes, understood = decode_response(response.content)

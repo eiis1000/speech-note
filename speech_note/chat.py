@@ -40,6 +40,23 @@ class ChatResponse:
     content: str
     served_model: str | None
     finish_reason: str | None
+    request_id: str | None = None
+    provider: str | None = None
+    native_finish_reason: str | None = None
+    usage: dict[str, Any] | None = None
+    error: object = None
+
+    def failure_reason(self) -> str | None:
+        """A partial body is not success, even when HTTP status was 200."""
+        if self.error:
+            return f"provider error: {json.dumps(self.error, ensure_ascii=False)}"
+        if self.finish_reason == "length":
+            return "response was truncated at the output token limit"
+        if self.finish_reason not in (None, "stop"):
+            return f"incomplete response (finish_reason={self.finish_reason!r})"
+        if self.native_finish_reason in ("error", "length", "max_tokens", "content_filter"):
+            return f"incomplete response (native_finish_reason={self.native_finish_reason!r})"
+        return None
 
 
 class ChatClient:
@@ -75,6 +92,9 @@ class ChatClient:
         self.last_served_model: str | None = None
         self._catalog_checked = False
         self._available_models: list[str] | None = None
+        # No headers or credentials: retain the exact model requests and replies
+        # so a recovered failure can still be diagnosed after full-auto exits.
+        self.last_attempts: list[dict[str, Any]] = []
 
     def models_url(self) -> str:
         if self.api_base.endswith("/chat/completions"):
@@ -149,7 +169,9 @@ class ChatClient:
         on_model_attempt: Callable[[str], None] | None = None,
         on_model_failure: Callable[[str, str], None] | None = None,
         response_format: dict[str, Any] | None = None,
+        validate_response: Callable[[ChatResponse], str | None] | None = None,
     ) -> ChatResponse:
+        self.last_attempts = []
         failures: list[str] = []
         models = self.candidate_models()
         for index, model in enumerate(models):
@@ -166,9 +188,8 @@ class ChatClient:
                 "max_tokens": max_tokens,
             }
             if response_format is not None:
-                # A schema here is *enforced*: llama.cpp compiles it to a GBNF grammar and
-                # constrains sampling, so a reply cannot come back malformed or truncated
-                # mid-string. See annotate.RESPONSE_SCHEMA.
+                # Constrain the response shape. Generation limits and upstream
+                # failures can still interrupt a schema-bound reply.
                 payload["response_format"] = response_format
                 if "openrouter" in self.api_base:
                     # OpenRouter routes to providers that silently IGNORE parameters
@@ -178,6 +199,8 @@ class ChatClient:
                     payload["provider"] = {"require_parameters": True}
             if self.reasoning_effort is not None:
                 payload["reasoning"] = {"effort": self.reasoning_effort}
+            attempt: dict[str, Any] = {"request": payload}
+            self.last_attempts.append(attempt)
             try:
                 response = requests.post(
                     self.api_base,
@@ -185,8 +208,17 @@ class ChatClient:
                     headers=self.request_headers(),
                     data=json.dumps(payload),
                 )
+                attempt["http_status"] = response.status_code
+                try:
+                    data = response.json()
+                    attempt["response"] = data
+                    decoded_json = True
+                except ValueError:
+                    attempt["response"] = response.text
+                    decoded_json = False
                 if not response.ok:
                     body = " ".join(response.text.split())[:500]
+                    attempt["error"] = f"HTTP {response.status_code}: {body}"
                     failures.append(f"{model}: HTTP {response.status_code} {body}")
                     # A bad credential is the only failure another model cannot fix
                     # (see FATAL_STATUS); everything else falls through the chain.
@@ -200,10 +232,9 @@ class ChatClient:
                 # OpenRouter surfaces upstream rate limits and outages this way. Treat
                 # an unusable body as a failed attempt and fall through instead of
                 # crashing on data["choices"][0].
-                try:
-                    data = response.json()
-                except ValueError:
+                if not decoded_json:
                     snippet = " ".join(response.text.split())[:300]
+                    attempt["error"] = "HTTP 200 with non-JSON body"
                     failures.append(f"{model}: HTTP 200 with non-JSON body: {snippet}")
                     self._advance_or_raise(
                         failures, index=index, models=models, on_model_failure=on_model_failure
@@ -212,15 +243,40 @@ class ChatClient:
                 choices = data.get("choices") if isinstance(data, dict) else None
                 if not isinstance(choices, list) or not choices:
                     detail = data.get("error", data) if isinstance(data, dict) else data
+                    attempt["error"] = f"HTTP 200 but no choices ({json.dumps(detail)[:300]})"
                     failures.append(f"{model}: HTTP 200 but no choices ({json.dumps(detail)[:300]})")
                     self._advance_or_raise(
                         failures, index=index, models=models, on_model_failure=on_model_failure
                     )
                     continue
-                choice = choices[0]
-                message = choice.get("message") if isinstance(choice, dict) else None
-                content = _content_to_text(message.get("content")) if isinstance(message, dict) else ""
+                choice = choices[0] if isinstance(choices[0], dict) else {}
+                message = choice.get("message")
+                message = message if isinstance(message, dict) else {}
+                content = _content_to_text(message.get("content"))
+                result = ChatResponse(
+                    content=content,
+                    served_model=data.get("model") or model,
+                    finish_reason=choice.get("finish_reason"),
+                    request_id=data.get("id"),
+                    provider=data.get("provider"),
+                    native_finish_reason=choice.get("native_finish_reason"),
+                    usage=data.get("usage"),
+                    error=data.get("error") or choice.get("error") or message.get("refusal"),
+                )
+                rejection = result.failure_reason()
+                if not rejection and "openrouter.ai" in self.api_base and result.finish_reason is None:
+                    rejection = "response has no finish_reason"
+                if not rejection and content and validate_response is not None:
+                    rejection = validate_response(result)
+                if rejection:
+                    attempt["error"] = rejection
+                    failures.append(f"{model} ({result.provider or 'unknown provider'}): {rejection}")
+                    self._advance_or_raise(
+                        failures, index=index, models=models, on_model_failure=on_model_failure
+                    )
+                    continue
                 if not content:
+                    attempt["error"] = "HTTP 200 but empty or malformed message"
                     failures.append(f"{model}: HTTP 200 but empty or malformed message")
                     self._advance_or_raise(
                         failures, index=index, models=models, on_model_failure=on_model_failure
@@ -228,14 +284,10 @@ class ChatClient:
                     continue
                 # Record what the server says it served; for llama-server the
                 # requested name is decorative, the response is authoritative.
-                served = data.get("model") or model
-                self.last_served_model = served
-                return ChatResponse(
-                    content=content,
-                    served_model=served,
-                    finish_reason=choice.get("finish_reason"),
-                )
+                self.last_served_model = result.served_model
+                return result
             except requests.RequestException as exc:
+                attempt["error"] = str(exc)
                 failures.append(f"{model}: {exc}")
                 self._advance_or_raise(
                     failures, index=index, models=models,
