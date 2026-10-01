@@ -15,6 +15,8 @@
   whisper-cpp-vulkan,
   wl-clipboard,
   writeShellApplication,
+  fetchurl,
+  autoPatchelfHook,
   crispasr-src,
 }:
 
@@ -76,6 +78,18 @@ let
     ];
   };
 
+  phononPython = import ./phonon.nix {
+    inherit lib python3 fetchurl autoPatchelfHook stdenv;
+  };
+  phononWorker = writeShellApplication {
+    name = "speech-note-phonon";
+    text = ''
+      unset PYTHONHOME VIRTUAL_ENV __PYVENV_LAUNCHER__
+      export PYTHONPATH=${runtimeSrc}
+      exec ${phononPython}/bin/python -P -m speech_note.phonon_worker "$@"
+    '';
+  };
+
   speechNote = writeShellApplication {
     name = "speech-note";
     runtimeInputs = [
@@ -87,6 +101,7 @@ let
       vulkan-tools
       whisper-cpp-vulkan
       wl-clipboard
+      phononWorker
     ];
     text = ''
       unset PYTHONHOME VIRTUAL_ENV __PYVENV_LAUNCHER__
@@ -101,4 +116,5 @@ in
   crispasr-vulkan = crispAsrVulkan;
   speech-note = speechNote;
   speech-note-python = pythonEnv;
+  speech-note-phonon = phononWorker;
 }

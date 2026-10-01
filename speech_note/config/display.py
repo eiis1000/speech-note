@@ -37,6 +37,7 @@ ASR_MODEL_NOTES: dict[str, dict[str, str]] = {
 # glance and blows out the line width), so these are curated. ASR sources are named
 # by backend; the cleanup LM is named by model id. Unknowns fall back to the leaf.
 ASR_BACKEND_SHORT_NAMES: dict[str, str] = {
+    "phonon": "phonon",
     "whisper-cpp": "whisper",
     "faster-whisper": "faster-whisper",
     "sherpa": "parakeet",

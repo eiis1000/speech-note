@@ -137,4 +137,15 @@ ancestry is not evidence of independent errors.
 Aggregate data and exact versions/hashes: [phonon2-local-20261001.json](phonon2-local-20261001.json).
 Private raw results, segments, logs and benchmark scripts are under the ignored
 `evals/out/phonon2-local-20261001/`; the prepared audio and isolated runtime remain
-under `tmp/phonon-bench/`. Application code and installed commands are unchanged.
+under `tmp/phonon-bench/`. The benchmark itself did not change application code
+or installed commands.
+
+The subsequent integration adds optional `--asr phonon` in version 2.2.49,
+with isolated pinned dependencies and unchanged defaults. The Nix-store CLI
+passed offline short and 65-minute MP3 runs from outside the checkout; the long
+output was byte-identical to the benchmark's 9,185-word transcript. The packaged
+worker decoded all 131 windows in 41.63 s with passive OpenMP waiting, which is
+now the adapter's default unless explicitly overridden. Missing-cache full-auto
+runs refuse to download or write accepted text without consent. Regression
+coverage includes failed workers, malformed results, incomplete window coverage,
+truncation, and MP3-container versus normalized-PCM duration differences.

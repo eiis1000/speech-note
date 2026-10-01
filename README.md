@@ -273,6 +273,7 @@ Available backends:
 | `faster-whisper` | `Systran/faster-whisper-medium.en` | CPU |
 | `sherpa` | `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8` | CPU |
 | `ctc` | `nvidia/parakeet-ctc-0.6b` | CPU (`@cuda:0` to force GPU) |
+| `phonon` | `FermionResearch/Phonon-2` | CPU, English only |
 | `onnx` | `nemo-parakeet-tdt-0.6b-v2` int8 | CPU |
 | `crispasr` | `parakeet-tdt-0.6b-v2-q4_k.gguf` | GPU (Vulkan) |
 | `pocketsphinx` | bundled en-us | CPU |
@@ -301,6 +302,18 @@ actually ran); `--asr-cpu-threads` sets the CPU thread budget;
 
 ### Backend notes
 
+- **`phonon`** is an optional Phonon 2 CPU backend, packaged with an isolated,
+  pinned Fermion runtime. Select it with `--asr phonon`, or pair it with Whisper:
+  `speech-note --input rec.m4a --asr whisper-cpp --asr phonon --asr-cpu-threads 12 --auto-download`.
+  The first use downloads 164 MB with consent; the model plus generated CPU cache
+  occupies about 460 MiB, excluding the retained download archive. It uses the
+  Fermion cache (`FERMION_CACHE_DIR`, otherwise the XDG cache directory's `fermion`);
+  `--download-root DIR` overrides this with `DIR/phonon`. Inference stays local.
+  On this machine it decoded a 65-minute recording in 42 seconds at 12 threads,
+  with about 2.6 GiB peak RSS; startup adds roughly 10 seconds with a warm cache.
+  See [the local evaluation](evals/README.md) for accuracy limits and comparisons.
+  Defaults remain unchanged. Full-duration window coverage and truncation flags
+  are checked before accepting text; this cannot guarantee every spoken word was recognized.
 - **`sherpa`** decodes the Parakeet-TDT-0.6B-v2 transducer in C++ at ~48–70x
   realtime on the CPU, with punctuation and casing. It has no length limit: silero
   VAD segments the audio (each segment capped at `SHERPA_MAX_SEGMENT_SECONDS`, 20s)

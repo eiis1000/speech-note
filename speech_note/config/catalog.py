@@ -199,6 +199,8 @@ class BackendSpec:
 # measured), with punctuation/casing and no length limit, so it is a natural CPU
 # companion to a GPU Whisper source (the two devices don't contend → they overlap).
 ASR_BACKENDS: dict[str, BackendSpec] = {
+    # Object-managed preparation; inference uses a separate pinned interpreter.
+    "phonon": BackendSpec("FermionResearch/Phonon-2", in_process=True, device_kind="cpu"),
     "whisper-cpp": BackendSpec("medium-q8_0", in_process=True, device_kind="gpu"),
     "faster-whisper": BackendSpec("Systran/faster-whisper-medium.en", in_process=True, device_kind="cpu"),
     "sherpa": BackendSpec("csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", in_process=True, device_kind="cpu"),
@@ -230,6 +232,8 @@ class AsrSource:
         spec = ASR_BACKENDS[self.backend]
         model = self.model or spec.default_model
         device = self.device if self.device and self.device != "auto" else _default_device(self.backend)
+        if self.backend == "phonon" and (model != spec.default_model or device != "cpu"):
+            raise ValueError("phonon supports only FermionResearch/Phonon-2 on cpu")
         return AsrSource(self.backend, model, device)
 
     @property

@@ -21,6 +21,7 @@
           crispasr-vulkan
           speech-note
           speech-note-python
+          speech-note-phonon
           ;
       };
       pkgs = import nixpkgs {
@@ -36,6 +37,7 @@
         default = pkgs.speech-note;
         speech-note = pkgs.speech-note;
         speech-note-python = pkgs.speech-note-python;
+        speech-note-phonon = pkgs.speech-note-phonon;
         llama-cpp-vulkan = pkgs.llama-cpp-vulkan;
         crispasr-vulkan = pkgs.crispasr-vulkan;
         whisper-cpp-vulkan = pkgs.whisper-cpp-vulkan;
@@ -50,6 +52,7 @@
         packages = with pkgs; [
           speech-note
           speech-note-python
+          speech-note-phonon
           ffmpeg
           portaudio
           crispasr-vulkan

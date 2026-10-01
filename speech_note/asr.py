@@ -36,6 +36,7 @@ from .config import (
     short_source_name,
 )
 from .model import AsrOutcome, Transcript
+from .phonon import PhononTranscriber
 from .terminal import debug_log, status_phase
 from .textproc import is_parakeet_model, normalize_spacing, strip_parakeet_timestamps
 from .transcribers import (
@@ -105,6 +106,10 @@ def build_transcriber(config: "Config", source: AsrSource) -> Transcriber | None
     if not ASR_BACKENDS[source.backend].in_process:
         return None
     backend = source.backend
+    if backend == "phonon":
+        return PhononTranscriber(cpu_threads=config.asr_cpu_threads,
+                                 download_root=config.download_root,
+                                 auto_download=config.auto_download)
     if backend == "whisper-cpp":
         device_index = int(source.device) if source.device.isdigit() else 0
         return WhisperCppTranscriber(
