@@ -1,0 +1,723 @@
+{
+  "date": "2026-10-01",
+  "hardware": "AMD Ryzen AI 9 HX 370, 12 physical cores / 24 threads, Linux x86_64",
+  "question": "Is Phonon-2 worth adding as an optional local CPU ASR backend?",
+  "recommendation": "Yes, as an optional backend; leave the default unchanged pending broader labeled evaluation and reproducible packaging.",
+  "runtime_versions": {
+    "fermion-research": "0.2.4",
+    "transformers_phonon": "5.17.0",
+    "torch": "2.11.0",
+    "sherpa-onnx": "1.12.38",
+    "numpy": "2.4.4",
+    "tokenizers_phonon": "0.23.1",
+    "safetensors_phonon": "0.8.0"
+  },
+  "phonon_wheel_sha256": "a5442a940d83cd37071247ae87d418f52cd92e72e065ca68f0acdb3db3a03c68",
+  "phonon_weights_sha256": "98125795b6dda72f5c6eee9ba33d19815df65dcb18b50a357bf9f73c9935309e",
+  "sherpa_weights_revision": "1ab9323565ddb038682214b292f588070a538ce2",
+  "cli_smoke": {
+    "model": "FermionResearch/Phonon-2",
+    "profile": "five-value",
+    "backend": "phonon2-five-value",
+    "engine": "cpu",
+    "duration_seconds": 132.395,
+    "decode_seconds": 1.751,
+    "wall_seconds": 10.961,
+    "segment_count": 5,
+    "truncated": false
+  },
+  "storage": {
+    "phonon_download_bytes": 163515201,
+    "phonon_runtime_directory_bytes": 481501657,
+    "note": "Runtime directory includes the generated CPU plane cache; retained compressed download is additional."
+  },
+  "method": [
+    "Two independent recordings: 132.3946875-second quiet dictation (original and denoised variants) and 3913.984-second technical discussion.",
+    "Both backends receive the same 16 kHz mono WAV produced by speech_note.audio.normalize_audio_for_asr. Preparation time excluded.",
+    "Sequential processes on the same machine; downloads excluded; no recording uploaded.",
+    "Phonon uses the upstream default C int8 encoder and C TDT decoder with 12 threads. Baseline uses the shipped SherpaTranscriber with Silero VAD and default 16 threads; 12-thread rerun controls thread count.",
+    "Transcription timing includes file read and frontend processing; model load/import time reported separately. RSS is process lifetime high-water mark, not incremental model memory.",
+    "Two repeats for short cases per process; one long decode per process. Phonon long decode repeated in a fresh process with cached planes.",
+    "Windowed Sherpa ablation bypasses VAD and decodes Phonon's exact five windows on each quiet variant.",
+    "Anchor recall uses existing user-confirmed labels and exact normalized word sequences, not full-transcript WER.",
+    "Long-file coverage checked by contiguous input windows and independent 60-second beginning/middle/end decodes; no human reference for full WER."
+  ],
+  "inputs": [
+    {
+      "case": "jul18",
+      "source_sha256": "e51321fabd39177ab0ac3885dfa8a3821705e25fab1a34eb881d1fba7e23efa9",
+      "normalization": {
+        "gain": 5.695752946533167,
+        "input_stats": {
+          "peak_abs": 32768,
+          "rms_abs": 805.5623775734261
+        },
+        "applied": true,
+        "gain_db_min": 13.39,
+        "gain_db_max": 16.15,
+        "speech_dbfs_before": -34.76,
+        "speech_dbfs_after": -23.62,
+        "spread_db_before": 13.78,
+        "spread_db_after": 10.11,
+        "compressed_db": 21.8,
+        "limited_blocks": 0
+      }
+    },
+    {
+      "case": "jul18dn",
+      "source_sha256": "287ec41a831df5c028521aa446d49a44ea6828169d960faf75675dcf829064b9",
+      "normalization": {
+        "gain": 1.7456496801093528,
+        "input_stats": {
+          "peak_abs": 32768,
+          "rms_abs": 2340.8764040393717
+        },
+        "applied": true,
+        "gain_db_min": 3.2,
+        "gain_db_max": 6.19,
+        "speech_dbfs_before": -24.46,
+        "speech_dbfs_after": -24.2,
+        "spread_db_before": 16.82,
+        "spread_db_after": 11.62,
+        "compressed_db": 14.1,
+        "limited_blocks": 0
+      }
+    },
+    {
+      "case": "m2long",
+      "source_sha256": "cc4523859958e9dc95bdfd2b0d8a95d3886872d615f81b74f8adb7fca450dff6",
+      "normalization": {
+        "gain": 1.518240690599776,
+        "input_stats": {
+          "peak_abs": 32768,
+          "rms_abs": 2563.770597047037
+        },
+        "applied": true,
+        "gain_db_min": -0.93,
+        "gain_db_max": 8.41,
+        "speech_dbfs_before": -23.41,
+        "speech_dbfs_after": -23.78,
+        "spread_db_before": 12.22,
+        "spread_db_after": 6.38,
+        "compressed_db": 16.21,
+        "limited_blocks": 0
+      }
+    }
+  ],
+  "runs": {
+    "phonon-default": {
+      "load_with_imports_seconds": 23.76345162797952,
+      "runtime": {
+        "kind": "speech",
+        "engine": "cpu",
+        "profile": "five-value",
+        "backend": "phonon2-five-value",
+        "runtime": "cpu: C encoder (packed one-dot int8) + C TDT loop",
+        "activations": "float32",
+        "threads": 12,
+        "five_value_modules": 264,
+        "packed": {
+          "modules": 264,
+          "kernel_id": 4,
+          "library": "libphonon2_enc-linux-x86_64.so",
+          "onedot": true,
+          "plane_cache": "written"
+        },
+        "c_tdt_loop": true,
+        "ctdt_error": null,
+        "c_encoder": true,
+        "cenc_error": null,
+        "selftest": {
+          "shipped": {
+            "gemm": true,
+            "tdt": true,
+            "enc": true
+          },
+          "gemm_loaded": true,
+          "tdt_loaded": true,
+          "enc_loaded": true,
+          "glibc_note": null
+        },
+        "load_seconds": 18.96,
+        "hotwords": [],
+        "hotword_bias": "not available on this decoder"
+      },
+      "results": [
+        {
+          "case": "jul18",
+          "repeat": 0,
+          "audio_seconds": 132.3946875,
+          "seconds": 1.493046207993757,
+          "realtime": 88.67420632473392,
+          "peak_rss_mib": 2082.59765625,
+          "words": 255,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 5,
+          "segment_count": 5,
+          "truncated_flag": false,
+          "segment_end_seconds": 132.395,
+          "segments_contiguous": true
+        },
+        {
+          "case": "jul18",
+          "repeat": 1,
+          "audio_seconds": 132.3946875,
+          "seconds": 1.4191972400294617,
+          "realtime": 93.28843360578377,
+          "peak_rss_mib": 2082.59765625,
+          "words": 255,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 5,
+          "segment_count": 5,
+          "truncated_flag": false,
+          "segment_end_seconds": 132.395,
+          "segments_contiguous": true
+        },
+        {
+          "case": "jul18dn",
+          "repeat": 0,
+          "audio_seconds": 132.3946875,
+          "seconds": 1.622499307966791,
+          "realtime": 81.5992258671027,
+          "peak_rss_mib": 2082.59765625,
+          "words": 250,
+          "uniq8": 0.9958847736625515,
+          "anchors_total": 6,
+          "anchors_hit": 5,
+          "segment_count": 5,
+          "truncated_flag": false,
+          "segment_end_seconds": 132.395,
+          "segments_contiguous": true
+        },
+        {
+          "case": "jul18dn",
+          "repeat": 1,
+          "audio_seconds": 132.3946875,
+          "seconds": 1.5041006279643625,
+          "realtime": 88.02249333489202,
+          "peak_rss_mib": 2082.59765625,
+          "words": 250,
+          "uniq8": 0.9958847736625515,
+          "anchors_total": 6,
+          "anchors_hit": 5,
+          "segment_count": 5,
+          "truncated_flag": false,
+          "segment_end_seconds": 132.395,
+          "segments_contiguous": true
+        },
+        {
+          "case": "m2long",
+          "repeat": 0,
+          "audio_seconds": 3913.984,
+          "seconds": 42.13894773001084,
+          "realtime": 92.88281295198334,
+          "peak_rss_mib": 2646.390625,
+          "words": 9185,
+          "uniq8": 0.9993466187520418,
+          "anchors_total": 0,
+          "anchors_hit": 0,
+          "segment_count": 131,
+          "truncated_flag": false,
+          "segment_end_seconds": 3913.984,
+          "segments_contiguous": true
+        }
+      ]
+    },
+    "phonon-cached-default": {
+      "load_with_imports_seconds": 9.746441520983353,
+      "runtime": {
+        "kind": "speech",
+        "engine": "cpu",
+        "profile": "five-value",
+        "backend": "phonon2-five-value",
+        "runtime": "cpu: C encoder (packed one-dot int8) + C TDT loop",
+        "activations": "float32",
+        "threads": 12,
+        "five_value_modules": 264,
+        "packed": {
+          "modules": 264,
+          "kernel_id": 4,
+          "library": "libphonon2_enc-linux-x86_64.so",
+          "onedot": true,
+          "plane_cache": "hit"
+        },
+        "c_tdt_loop": true,
+        "ctdt_error": null,
+        "c_encoder": true,
+        "cenc_error": null,
+        "selftest": {
+          "shipped": {
+            "gemm": true,
+            "tdt": true,
+            "enc": true
+          },
+          "gemm_loaded": true,
+          "tdt_loaded": true,
+          "enc_loaded": true,
+          "glibc_note": null
+        },
+        "load_seconds": 4.67,
+        "hotwords": [],
+        "hotword_bias": "not available on this decoder"
+      },
+      "results": [
+        {
+          "case": "jul18",
+          "repeat": 0,
+          "audio_seconds": 132.3946875,
+          "seconds": 1.393475415010471,
+          "realtime": 95.01042219607811,
+          "peak_rss_mib": 2071.890625,
+          "words": 255,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 5,
+          "segment_count": 5,
+          "truncated_flag": false,
+          "segment_end_seconds": 132.395,
+          "segments_contiguous": true
+        },
+        {
+          "case": "jul18",
+          "repeat": 1,
+          "audio_seconds": 132.3946875,
+          "seconds": 1.4327000529738143,
+          "realtime": 92.4092151914088,
+          "peak_rss_mib": 2079.92578125,
+          "words": 255,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 5,
+          "segment_count": 5,
+          "truncated_flag": false,
+          "segment_end_seconds": 132.395,
+          "segments_contiguous": true
+        },
+        {
+          "case": "jul18dn",
+          "repeat": 0,
+          "audio_seconds": 132.3946875,
+          "seconds": 1.573322624026332,
+          "realtime": 84.14973857121892,
+          "peak_rss_mib": 2082.8828125,
+          "words": 250,
+          "uniq8": 0.9958847736625515,
+          "anchors_total": 6,
+          "anchors_hit": 5,
+          "segment_count": 5,
+          "truncated_flag": false,
+          "segment_end_seconds": 132.395,
+          "segments_contiguous": true
+        },
+        {
+          "case": "jul18dn",
+          "repeat": 1,
+          "audio_seconds": 132.3946875,
+          "seconds": 1.4488237790064886,
+          "realtime": 91.38080794807763,
+          "peak_rss_mib": 2085.80078125,
+          "words": 250,
+          "uniq8": 0.9958847736625515,
+          "anchors_total": 6,
+          "anchors_hit": 5,
+          "segment_count": 5,
+          "truncated_flag": false,
+          "segment_end_seconds": 132.395,
+          "segments_contiguous": true
+        },
+        {
+          "case": "m2long",
+          "repeat": 0,
+          "audio_seconds": 3913.984,
+          "seconds": 42.19038425502367,
+          "realtime": 92.76957461068764,
+          "peak_rss_mib": 2632.1171875,
+          "words": 9185,
+          "uniq8": 0.9993466187520418,
+          "anchors_total": 0,
+          "anchors_hit": 0,
+          "segment_count": 131,
+          "truncated_flag": false,
+          "segment_end_seconds": 3913.984,
+          "segments_contiguous": true
+        },
+        {
+          "case": "m2start",
+          "repeat": 0,
+          "audio_seconds": 60.0,
+          "seconds": 0.6491198749863543,
+          "realtime": 92.432849943566,
+          "peak_rss_mib": 2632.1171875,
+          "words": 173,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0,
+          "segment_count": 2,
+          "truncated_flag": false,
+          "segment_end_seconds": 60.0,
+          "segments_contiguous": true
+        },
+        {
+          "case": "m2start",
+          "repeat": 1,
+          "audio_seconds": 60.0,
+          "seconds": 0.7255642249947414,
+          "realtime": 82.69426459171807,
+          "peak_rss_mib": 2632.1171875,
+          "words": 173,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0,
+          "segment_count": 2,
+          "truncated_flag": false,
+          "segment_end_seconds": 60.0,
+          "segments_contiguous": true
+        },
+        {
+          "case": "m2middle",
+          "repeat": 0,
+          "audio_seconds": 60.0,
+          "seconds": 0.7173319339635782,
+          "realtime": 83.64328584742255,
+          "peak_rss_mib": 2632.1171875,
+          "words": 182,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0,
+          "segment_count": 2,
+          "truncated_flag": false,
+          "segment_end_seconds": 60.0,
+          "segments_contiguous": true
+        },
+        {
+          "case": "m2middle",
+          "repeat": 1,
+          "audio_seconds": 60.0,
+          "seconds": 0.7000444650184363,
+          "realtime": 85.70884136398371,
+          "peak_rss_mib": 2632.1171875,
+          "words": 182,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0,
+          "segment_count": 2,
+          "truncated_flag": false,
+          "segment_end_seconds": 60.0,
+          "segments_contiguous": true
+        },
+        {
+          "case": "m2tail",
+          "repeat": 0,
+          "audio_seconds": 60.0,
+          "seconds": 0.6950765659566969,
+          "realtime": 86.32142549276793,
+          "peak_rss_mib": 2632.1171875,
+          "words": 67,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0,
+          "segment_count": 2,
+          "truncated_flag": false,
+          "segment_end_seconds": 60.0,
+          "segments_contiguous": true
+        },
+        {
+          "case": "m2tail",
+          "repeat": 1,
+          "audio_seconds": 60.0,
+          "seconds": 0.731659937009681,
+          "realtime": 82.00531006962338,
+          "peak_rss_mib": 2632.1171875,
+          "words": 67,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0,
+          "segment_count": 2,
+          "truncated_flag": false,
+          "segment_end_seconds": 60.0,
+          "segments_contiguous": true
+        }
+      ]
+    },
+    "sherpa-default": {
+      "load_with_imports_seconds": 1.260732107970398,
+      "runtime": {
+        "model": "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+        "threads": 16,
+        "load_seconds": 1.233
+      },
+      "results": [
+        {
+          "case": "jul18",
+          "repeat": 0,
+          "audio_seconds": 132.3946875,
+          "seconds": 9.918807125999592,
+          "realtime": 13.347843729409911,
+          "peak_rss_mib": 1272.203125,
+          "words": 67,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 0
+        },
+        {
+          "case": "jul18",
+          "repeat": 1,
+          "audio_seconds": 132.3946875,
+          "seconds": 1.6889826789847575,
+          "realtime": 78.38723815662932,
+          "peak_rss_mib": 1316.19921875,
+          "words": 67,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 0
+        },
+        {
+          "case": "jul18dn",
+          "repeat": 0,
+          "audio_seconds": 132.3946875,
+          "seconds": 4.0285523509955965,
+          "realtime": 32.864085151402,
+          "peak_rss_mib": 1326.32421875,
+          "words": 219,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 4
+        },
+        {
+          "case": "jul18dn",
+          "repeat": 1,
+          "audio_seconds": 132.3946875,
+          "seconds": 4.117166812007781,
+          "realtime": 32.156746021042636,
+          "peak_rss_mib": 1333.82421875,
+          "words": 219,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 4
+        },
+        {
+          "case": "m2long",
+          "repeat": 0,
+          "audio_seconds": 3913.984,
+          "seconds": 133.18847165995976,
+          "realtime": 29.38680766600203,
+          "peak_rss_mib": 2050.8515625,
+          "words": 7947,
+          "uniq8": 0.9992462311557789,
+          "anchors_total": 0,
+          "anchors_hit": 0
+        },
+        {
+          "case": "m2start",
+          "repeat": 0,
+          "audio_seconds": 60.0,
+          "seconds": 1.9031953029916622,
+          "realtime": 31.52592900249652,
+          "peak_rss_mib": 2050.8515625,
+          "words": 133,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0
+        },
+        {
+          "case": "m2start",
+          "repeat": 1,
+          "audio_seconds": 60.0,
+          "seconds": 1.9154763959813863,
+          "realtime": 31.323800244095022,
+          "peak_rss_mib": 2050.8515625,
+          "words": 133,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0
+        },
+        {
+          "case": "m2middle",
+          "repeat": 0,
+          "audio_seconds": 60.0,
+          "seconds": 1.9619467009906657,
+          "realtime": 30.581870531805777,
+          "peak_rss_mib": 2050.8515625,
+          "words": 157,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0
+        },
+        {
+          "case": "m2middle",
+          "repeat": 1,
+          "audio_seconds": 60.0,
+          "seconds": 1.9822489900398068,
+          "realtime": 30.26864954982023,
+          "peak_rss_mib": 2050.8515625,
+          "words": 157,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0
+        },
+        {
+          "case": "m2tail",
+          "repeat": 0,
+          "audio_seconds": 60.0,
+          "seconds": 0.9880357419606298,
+          "realtime": 60.72654809120338,
+          "peak_rss_mib": 2050.8515625,
+          "words": 61,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0
+        },
+        {
+          "case": "m2tail",
+          "repeat": 1,
+          "audio_seconds": 60.0,
+          "seconds": 0.9347105089691468,
+          "realtime": 64.19099755941708,
+          "peak_rss_mib": 2050.8515625,
+          "words": 61,
+          "uniq8": 1.0,
+          "anchors_total": 0,
+          "anchors_hit": 0
+        }
+      ]
+    },
+    "sherpa-12": {
+      "load_with_imports_seconds": 1.400290835998021,
+      "runtime": {
+        "model": "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+        "threads": 12,
+        "load_seconds": 1.371
+      },
+      "results": [
+        {
+          "case": "jul18",
+          "repeat": 0,
+          "audio_seconds": 132.3946875,
+          "seconds": 4.608557622006629,
+          "realtime": 28.72800957674769,
+          "peak_rss_mib": 1214.61328125,
+          "words": 67,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 0
+        },
+        {
+          "case": "jul18",
+          "repeat": 1,
+          "audio_seconds": 132.3946875,
+          "seconds": 1.9004893809906207,
+          "realtime": 69.66347132704837,
+          "peak_rss_mib": 1259.33984375,
+          "words": 67,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 0
+        },
+        {
+          "case": "jul18dn",
+          "repeat": 0,
+          "audio_seconds": 132.3946875,
+          "seconds": 3.983241119014565,
+          "realtime": 33.23792950117813,
+          "peak_rss_mib": 1269.21484375,
+          "words": 219,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 4
+        },
+        {
+          "case": "jul18dn",
+          "repeat": 1,
+          "audio_seconds": 132.3946875,
+          "seconds": 3.6624905709759332,
+          "realtime": 36.14881320082721,
+          "peak_rss_mib": 1276.359375,
+          "words": 219,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 4
+        },
+        {
+          "case": "m2long",
+          "repeat": 0,
+          "audio_seconds": 3913.984,
+          "seconds": 114.7020876960014,
+          "realtime": 34.12304064049258,
+          "peak_rss_mib": 1992.39453125,
+          "words": 7947,
+          "uniq8": 0.9992462311557789,
+          "anchors_total": 0,
+          "anchors_hit": 0
+        }
+      ]
+    },
+    "sherpa-windowed-default": {
+      "load_with_imports_seconds": 2.846945790981408,
+      "runtime": {
+        "model": "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+        "threads": 16,
+        "load_seconds": 2.739
+      },
+      "results": [
+        {
+          "case": "jul18",
+          "repeat": 0,
+          "audio_seconds": 132.3946875,
+          "seconds": 3.4179337799432687,
+          "realtime": 38.735299167264,
+          "peak_rss_mib": 1244.8828125,
+          "words": 242,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 4
+        },
+        {
+          "case": "jul18",
+          "repeat": 1,
+          "audio_seconds": 132.3946875,
+          "seconds": 3.489551351987757,
+          "realtime": 37.940317864812016,
+          "peak_rss_mib": 1460.1328125,
+          "words": 242,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 4
+        },
+        {
+          "case": "jul18dn",
+          "repeat": 0,
+          "audio_seconds": 132.3946875,
+          "seconds": 3.7707854980253614,
+          "realtime": 35.11063876991434,
+          "peak_rss_mib": 1468.5703125,
+          "words": 235,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 4
+        },
+        {
+          "case": "jul18dn",
+          "repeat": 1,
+          "audio_seconds": 132.3946875,
+          "seconds": 3.2545918120304123,
+          "realtime": 40.67935247996711,
+          "peak_rss_mib": 1469.015625,
+          "words": 235,
+          "uniq8": 1.0,
+          "anchors_total": 6,
+          "anchors_hit": 4
+        }
+      ]
+    }
+  },
+  "limitations": [
+    "One labeled dictation and one unlabeled technical discussion are insufficient to select a universal default.",
+    "Shared Parakeet ancestry means adding both recognizers does not guarantee independent errors.",
+    "Phonon still misses one of six labeled phrases; technical-name accuracy was not scored against a human reference.",
+    "Segment coverage, self-agreement, word count, and low repetition do not certify preservation of every spoken word.",
+    "Nix integration needs a scoped newer Transformers stack: current 5.5.4 has Parakeet CTC but not Parakeet TDT.",
+    "The desktop remained active; timings are sequential observations, not isolated performance guarantees."
+  ]
+}

@@ -91,3 +91,50 @@ you want the same recording to grade cleanup too.
 
 Requires `OPENROUTER_API_KEY` in the environment (the tools read `.env` themselves if
 present).
+
+## Local Phonon-2 evaluation — 2026-10-01
+
+**Decision: worth including as an optional CPU backend; no default change yet.**
+Measured on the Ryzen AI 9 HX 370 using Fermion 0.2.4 with its C int8 encoder and
+C TDT decoder, against the shipped Sherpa 1.12.38 / Parakeet v2 int8 backend.
+Both received identical audio normalized by speech-note. Runs were sequential;
+no audio was uploaded. Downloads and normalization are excluded from the times.
+
+| Measurement | Phonon-2, 12 threads | Current Sherpa, 16 threads |
+| --- | ---: | ---: |
+| 65.2-minute discussion, warm transcription | 42.14–42.19 s (two processes) | 133.19 s |
+| Peak process RSS through long recording | 2.57–2.58 GiB | 2.00 GiB |
+| Quiet 132-second dictation, labeled phrases recovered | 5/6 | 0/6 |
+| Same dictation after denoising, phrases recovered | 5/6 | 4/6 |
+
+Sherpa at a matched 12 threads took **114.70 s** on the long recording, so
+Phonon's advantage remains **2.7×** after controlling thread count. The two
+Phonon long transcripts were byte-identical. Its 131 contiguous decoded windows
+cover the full 3,913.984 seconds; independent beginning/middle/end clips align
+with the corresponding full-transcript passages. This checks for gross cutoff,
+not arbitrary omissions or word accuracy.
+
+The quiet-clip gap is partly **VAD dropping speech**, not purely a model quality
+gap. Bypassing Sherpa's VAD and feeding it Phonon's exact five windows raises its
+score from 0/6 to 4/6 on the original clip; Phonon still gets 5/6. This is a
+separate failure mode from the earlier cleanup-provider cutoff. No production
+VAD threshold or model default was changed by this evaluation.
+
+Costs: initial Phonon loading plus imports took 23.76 s; a new process after CPU
+plane-cache creation took 9.75 s. Warm short-clip decoding was 1.4–1.6 s. The
+164 MB download becomes about 460 MiB of runtime files after building that cache,
+plus the retained archive; it is not a 164 MB RAM model. The public offline CLI
+also passed. Integration needs a scoped newer Transformers stack: the current
+5.5.4 package lacks `ParakeetForTDT`; this test used 5.17.0 with its matching
+tokenizers/safetensors dependencies in an isolated scratch environment.
+
+Scope is two independent recordings, with original/denoised variants of the
+labeled one. There is no human reference transcript for the long technical
+discussion, so **no full WER or technical-term accuracy claim** is justified.
+Keep Whisper as the distinct model family if Phonon is added; shared Parakeet
+ancestry is not evidence of independent errors.
+
+Aggregate data and exact versions/hashes: [phonon2-local-20261001.json](phonon2-local-20261001.json).
+Private raw results, segments, logs and benchmark scripts are under the ignored
+`evals/out/phonon2-local-20261001/`; the prepared audio and isolated runtime remain
+under `tmp/phonon-bench/`. Application code and installed commands are unchanged.
