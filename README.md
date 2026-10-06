@@ -138,8 +138,7 @@ only as a fallback when the final Whisper pass fails.
 speech-note --input /path/to/audio.m4a
 ```
 
-Unattended runs that leave a cleaned transcript and its diagnostics in the current
-directory:
+Unattended runs that leave a cleaned transcript in the current directory:
 
 ```sh
 speech-note --input /path/to/audio.m4a --full-auto
@@ -147,8 +146,11 @@ speech-note --input /path/to/audio.m4a --full-auto
 
 `--full-auto` writes an auto-named `<input>-clean.txt` only if cleanup actually
 succeeded (failed, empty, or truncated cleanup writes nothing and the process
-exits nonzero). Every run keeps a matching `<input>-clean-diagnostics.json` next
-to the output, including successful runs that recovered from a provider failure.
+exits nonzero). Every run retains diagnostics under
+`${XDG_STATE_HOME:-~/.local/state}/speech-note/diagnostics/`. Runs with errors
+also keep a matching `<input>-clean-diagnostics.json` next to the output,
+including runs where an ASR source failed but the remaining sources succeeded.
+Successful runs without errors leave only the transcript in the output directory.
 It contains the source transcripts, final text, and cleanup/audit requests and
 responses (including provider errors and generation IDs, but no authorization
 headers). Other runtime artifacts stay in a temporary directory.

@@ -234,8 +234,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Non-interactive: write an auto-named cleaned transcript to the current "
-            "directory, or beside each input in batch mode, and retain a diagnostics "
-            "sidecar for every run; keep other artifacts in a temporary directory."
+            "directory, or beside each input in batch mode. Save diagnostics in "
+            "$XDG_STATE_HOME/speech-note/diagnostics (default ~/.local/state); "
+            "also save a sidecar on errors. Other artifacts are temporary."
         ),
     )
     parser.add_argument(

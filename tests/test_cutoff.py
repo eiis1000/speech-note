@@ -139,14 +139,15 @@ class CutoffTests(unittest.TestCase):
                 "--no-annotate-uncertainty",
             ]))
             replies = [response(broken()), response(body() if recover else broken())]
-            with mock.patch.dict("os.environ", {"OPENROUTER_API_KEY": "synthetic-test-secret"}), \
+            with mock.patch.dict("os.environ", {"OPENROUTER_API_KEY": "synthetic-test-secret", "XDG_STATE_HOME": str(root / "state")}), \
                  mock.patch("speech_note.chat.requests.get", side_effect=RuntimeError("offline")), \
                  mock.patch("speech_note.chat.requests.post", side_effect=replies), \
                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 session = run_dry_text_pipeline(cfg)
             self.assertEqual(session.run_failed, not recover)
             self.assertEqual(output.exists(), recover)
-            saved = output.with_name("note-diagnostics.json")
+            self.assertEqual(output.with_name("note-diagnostics.json").exists(), not recover)
+            saved = Path(session.paths["persistent_diagnostics"])
             self.assertTrue(saved.exists())
             evidence = json.loads(saved.read_text())
             self.assertEqual(evidence["transcripts"][0]["text"], TEXT)

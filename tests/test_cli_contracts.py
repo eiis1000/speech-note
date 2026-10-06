@@ -59,6 +59,7 @@ class CliContracts(unittest.TestCase):
                     with self.subTest(model=model, blocked=blocked):
                         directory = root / str(len(list(root.iterdir())))
                         directory.mkdir()
+                        env['XDG_STATE_HOME'] = str(directory / 'state')
                         output = directory / 'clean.txt'
                         if blocked:
                             output.mkdir()
@@ -69,7 +70,8 @@ class CliContracts(unittest.TestCase):
                             '--organizer-api-base', f'http://127.0.0.1:{server.server_port}/v1/chat/completions',
                         ], cwd=tmp, env=env, capture_output=True, text=True, timeout=30)
                         self.assertEqual(run.returncode, expected, run.stderr)
-                        evidence = json.loads(next(directory.glob('*diagnostics.json')).read_text())
+                        evidence = json.loads(next((directory / 'state' / 'speech-note' / 'diagnostics').glob('*.json')).read_text())
+                        self.assertEqual(bool(list(directory.glob('*diagnostics.json'))), bool(expected))
                         self.assertEqual(evidence['run_failed'], bool(expected))
                         self.assertEqual(seen, model.split(','))
                         if expected == 0:

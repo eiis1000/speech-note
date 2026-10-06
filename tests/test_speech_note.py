@@ -1879,7 +1879,7 @@ class FullAutoTests(unittest.TestCase):
             report(config, session)
         self.assertIn("very quiet", err.getvalue())
 
-    def test_full_auto_success_preserves_diagnostics_beside_clean_file(self) -> None:
+    def test_full_auto_success_preserves_diagnostics_in_app_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
             output = tmp / "note-clean.txt"
@@ -1893,14 +1893,19 @@ class FullAutoTests(unittest.TestCase):
                     ]
                 )
             )
-            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            state = tmp / "state"
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state)}), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 session = run_dry_text_pipeline(config)
             self.assertFalse(session.run_failed)
             self.assertTrue(output.exists())
             self.assertEqual(
                 sorted(path.name for path in tmp.iterdir()),
-                ["note-clean-diagnostics.json", "note-clean.txt"],
+                ["note-clean.txt", "state"],
             )
+            diagnostic = Path(session.paths["persistent_diagnostics"])
+            self.assertEqual(diagnostic.parent, state / "speech-note" / "diagnostics")
+            self.assertEqual(session.paths["diagnostics"], str(diagnostic))
+            self.assertFalse(json.loads(diagnostic.read_text())["run_failed"])
 
 
 class SessionTests(unittest.TestCase):

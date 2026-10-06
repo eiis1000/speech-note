@@ -1,5 +1,6 @@
 """Cross-layer failure contracts from the second full review; synthetic inputs only."""
 import io
+import os
 import json
 import tempfile
 import unittest
@@ -138,6 +139,35 @@ class CleanupAndAuditContracts(unittest.TestCase):
 
 
 class ArtifactContracts(unittest.TestCase):
+    def test_full_auto_source_error_keeps_both_diagnostic_copies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = config('-f', '-t', 'Complete transcript.', '-o', str(root / 'clean.txt'))
+            session = Session(cfg)
+            session.cleanup = CleanupOutcome(text='Complete transcript.')
+            session.add_error('MAI source failed')
+            with mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(root / 'state')}):
+                pipeline.commit_artifacts(cfg, session)
+            sidecar = root / 'clean-diagnostics.json'
+            central = Path(session.paths['persistent_diagnostics'])
+            self.assertEqual(json.loads(sidecar.read_text()), json.loads(central.read_text()))
+            self.assertEqual(json.loads(central.read_text())['errors'], ['MAI source failed'])
+
+    def test_full_auto_state_failure_preserves_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            blocked = root / 'state'
+            blocked.write_text('not a directory')
+            cfg = config('-f', '-t', 'Complete transcript.', '-o', str(root / 'clean.txt'))
+            with mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(blocked)}), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                session = pipeline.run_dry_text_pipeline(cfg)
+            self.assertTrue(session.run_failed)
+            sidecar = root / 'clean-diagnostics.json'
+            self.assertEqual(session.paths['diagnostics'], str(sidecar))
+            evidence = json.loads(sidecar.read_text())
+            self.assertTrue(any('persistent diagnostics' in error for error in evidence['errors']))
+
     def test_wav_replacement_failure_preserves_previous_recording(self):
         from speech_note.audio import write_wav
         with tempfile.TemporaryDirectory() as tmp:

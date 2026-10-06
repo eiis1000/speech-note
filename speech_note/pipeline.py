@@ -11,6 +11,7 @@ import concurrent.futures
 import contextlib
 import dataclasses
 import json
+import os
 import re
 import sys
 import tempfile
@@ -380,7 +381,10 @@ def commit_artifacts(config: "Config", session: Session) -> None:
             session.run_failed = True
     diagnostics_path: Path | None = None
     diagnostics_handle = None
-    if config.full_auto:
+    def open_error_diagnostics() -> None:
+        nonlocal diagnostics_path, diagnostics_handle
+        if diagnostics_handle is not None:
+            return
         anchor = Path(session.paths["output"]) if "output" in session.paths else (
             config.output if config.output is not None else Path.cwd() / "speech-note"
         )
@@ -397,8 +401,10 @@ def commit_artifacts(config: "Config", session: Session) -> None:
             recovery = Path(tempfile.mkdtemp(prefix="speech-note-recovery-"))
             diagnostics_path, diagnostics_handle = open_unique_output(recovery / "diagnostics.json")
         session.paths["diagnostics"] = str(diagnostics_path)
-        if session.errors:
-            session.paths["error_diagnostics"] = str(diagnostics_path)
+        session.paths["error_diagnostics"] = str(diagnostics_path)
+
+    if config.full_auto and (session.errors or session.run_failed):
+        open_error_diagnostics()
     store = ArtifactStore(config.artifacts_dir, config.archive_dir)
     def save_recovery_audio() -> None:
         if diagnostics_path is not None and session.recorded_audio and (
@@ -426,13 +432,35 @@ def commit_artifacts(config: "Config", session: Session) -> None:
             session.add_error(f"could not save runtime artifacts: {exc}")
             session.run_failed = True
             if diagnostics_handle is None:
-                recovery_dir = Path(tempfile.mkdtemp(prefix="speech-note-recovery-"))
-                diagnostics_path, diagnostics_handle = open_unique_output(recovery_dir / "diagnostics.json")
-                session.paths["diagnostics"] = str(diagnostics_path)
-                session.paths["error_diagnostics"] = str(diagnostics_path)
-                print(f"saved recovery diagnostics: {diagnostics_path}", file=sys.stderr)
+                if config.full_auto:
+                    open_error_diagnostics()
+                else:
+                    recovery_dir = Path(tempfile.mkdtemp(prefix="speech-note-recovery-"))
+                    diagnostics_path, diagnostics_handle = open_unique_output(recovery_dir / "diagnostics.json")
+                    session.paths["diagnostics"] = str(diagnostics_path)
+                    session.paths["error_diagnostics"] = str(diagnostics_path)
+                    print(f"saved recovery diagnostics: {diagnostics_path}", file=sys.stderr)
             if "recovery_recording" not in session.paths:
                 save_recovery_audio()
+        if config.full_auto:
+            # Full-auto's ArtifactStore is scratch and disappears at exit. Keep
+            # every run in app state; output-adjacent copies are for errors only.
+            state_root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+            directory = state_root / "speech-note" / "diagnostics"
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                persistent_path, handle = open_unique_output(directory / f"{session.timestamp_slug()}.json")
+                with handle:
+                    session.paths["persistent_diagnostics"] = str(persistent_path)
+                    if diagnostics_handle is None:
+                        session.paths["diagnostics"] = str(persistent_path)
+                    handle.write(json.dumps(store.diagnostics_payload(session), indent=2) + "\n")
+            except OSError as exc:
+                session.add_error(f"could not save persistent diagnostics: {exc}")
+                session.run_failed = True
+                open_error_diagnostics()
+                if "recovery_recording" not in session.paths:
+                    save_recovery_audio()
         if diagnostics_handle is not None:
             # Serialize this session, never another concurrent run's latest file.
             diagnostics_handle.write(json.dumps(store.diagnostics_payload(session), indent=2) + "\n")
