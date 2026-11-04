@@ -303,6 +303,47 @@ def write_output_file(config: "Config", session: Session) -> None:
     session.paths["output"] = str(output)
 
 
+def write_too_short_cleans(config: "Config", session: Session) -> None:
+    """Keep rejected short candidates readable beside the accepted output.
+
+    These are evidence, not accepted transcripts. Preserve their returned text
+    and use exclusive filenames so retries and concurrent runs cannot erase it.
+    """
+    if config.output is None or session.cleanup is None:
+        return
+    anchor = Path(session.paths.get("output", str(config.output)))
+    saved = []
+    for index, attempt in enumerate(session.cleanup.attempts, start=1):
+        error = attempt.get("error", "")
+        if not isinstance(error, str) or not error.startswith("incomplete cleanup:") or "suspiciously short (" not in error:
+            continue
+        key = f"too_short_clean_{index}"
+        if key in session.paths:
+            continue
+        response = attempt.get("response")
+        choices = response.get("choices") if isinstance(response, dict) else None
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            continue
+        message = choices[0].get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list) and all(
+            isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+            for block in content
+        ):
+            content = "\n".join(block["text"] for block in content)
+        if not isinstance(content, str) or not content.strip():
+            continue
+        anchor.parent.mkdir(parents=True, exist_ok=True)
+        path = write_unique_output(
+            anchor.with_name(f"{anchor.stem.removesuffix('-clean')}-too-short-clean.txt"), content
+        )
+        session.paths[key] = str(path)
+        saved.append({"path": str(path), "attempt": index,
+                      "model": response.get("model") or attempt.get("request", {}).get("model"),
+                      "reason": error})
+        session.note_fact("too_short_cleans", saved.copy())
+
+
 def auto_sources_export_dir(config: "Config") -> Path:
     if config.output is not None:
         stem = config.output.stem
@@ -373,7 +414,8 @@ def write_sources_export(config: "Config", session: Session, *, directory: Path 
 
 def commit_artifacts(config: "Config", session: Session) -> None:
     """Single commit point for all artifacts, including full-auto diagnostics."""
-    for label, writer in (("output", write_output_file), ("source export", write_sources_export)):
+    for label, writer in (("output", write_output_file), ("too-short cleanup", write_too_short_cleans),
+                          ("source export", write_sources_export)):
         try:
             writer(config, session)
         except OSError as exc:
@@ -442,6 +484,7 @@ def commit_artifacts(config: "Config", session: Session) -> None:
                     print(f"saved recovery diagnostics: {diagnostics_path}", file=sys.stderr)
             if "recovery_recording" not in session.paths:
                 save_recovery_audio()
+        persistent_payload: str | None = None
         if config.full_auto:
             # Full-auto's ArtifactStore is scratch and disappears at exit. Keep
             # every run in app state; output-adjacent copies are for errors only.
@@ -454,8 +497,10 @@ def commit_artifacts(config: "Config", session: Session) -> None:
                     session.paths["persistent_diagnostics"] = str(persistent_path)
                     if diagnostics_handle is None:
                         session.paths["diagnostics"] = str(persistent_path)
-                    handle.write(json.dumps(store.diagnostics_payload(session), indent=2) + "\n")
+                    persistent_payload = json.dumps(store.diagnostics_payload(session), indent=2) + "\n"
+                    handle.write(persistent_payload)
             except OSError as exc:
+                persistent_payload = None
                 session.add_error(f"could not save persistent diagnostics: {exc}")
                 session.run_failed = True
                 open_error_diagnostics()
@@ -463,7 +508,7 @@ def commit_artifacts(config: "Config", session: Session) -> None:
                     save_recovery_audio()
         if diagnostics_handle is not None:
             # Serialize this session, never another concurrent run's latest file.
-            diagnostics_handle.write(json.dumps(store.diagnostics_payload(session), indent=2) + "\n")
+            diagnostics_handle.write(persistent_payload or json.dumps(store.diagnostics_payload(session), indent=2) + "\n")
     finally:
         if diagnostics_handle is not None:
             diagnostics_handle.close()
@@ -569,6 +614,9 @@ def print_errors(session: Session) -> None:
 
 def report(config: "Config", session: Session) -> None:
     err = sys.stderr
+    for key, path in session.paths.items():
+        if key.startswith("too_short_clean_"):
+            print(f"saved rejected too-short clean: {path}", file=err)
     if not session.produced_output:
         print("no speech captured", file=err)
     if config.full_auto:

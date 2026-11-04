@@ -150,8 +150,12 @@ exits nonzero). Every run retains diagnostics under
 `${XDG_STATE_HOME:-~/.local/state}/speech-note/diagnostics/`. Runs with errors
 also keep a matching `<input>-clean-diagnostics.json` next to the output,
 including runs where an ASR source failed but the remaining sources succeeded.
-Successful runs without errors leave only the transcript in the output directory.
-It contains the source transcripts, final text, and cleanup/audit requests and
+Successful runs without errors leave no diagnostics sidecar in the output directory.
+If a cleanup candidate is rejected as suspiciously short, its text is also saved
+beside the output as `*-too-short-clean.txt` (numbered when necessary). These are
+rejected candidates, not accepted final transcripts; diagnostics record the model,
+attempt, and rejection reason. They are retained even when every candidate fails.
+Diagnostics contain the source transcripts, final text, and cleanup/audit requests and
 responses (including provider errors and generation IDs, but no authorization
 headers). Other runtime artifacts stay in a temporary directory.
 If a microphone run fails or is interrupted, its captured audio is also saved as

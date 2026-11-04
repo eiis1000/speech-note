@@ -30,7 +30,7 @@ class CliContracts(unittest.TestCase):
                 self.wfile.write(data)
 
             def do_GET(self):
-                self.reply({'data': [{'id': name} for name in ('bad', 'good')]})
+                self.reply({'data': [{'id': name} for name in ('bad', 'short', 'good')]})
 
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
@@ -40,6 +40,8 @@ class CliContracts(unittest.TestCase):
                 if model == 'bad':
                     choice.update(message={'content': 'Partial'}, finish_reason='error',
                                   error={'code': 502, 'message': 'synthetic upstream failure'})
+                elif model == 'short':
+                    choice['message']['content'] = 'Brief.'
                 self.reply({'model': model, 'choices': [choice]})
 
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -55,7 +57,8 @@ class CliContracts(unittest.TestCase):
                 env['PYTHONPATH'] = str(Path(__file__).resolve().parent.parent)
                 binary = env.get('SPEECH_NOTE_TEST_BINARY')
                 command = [binary] if binary else [sys.executable, '-m', 'speech_note']
-                for model, blocked, expected in [('bad,good', False, 0), ('bad', False, 1), ('good', True, 1)]:
+                for model, blocked, expected in [('bad,good', False, 0), ('short,good', False, 0),
+                                                  ('bad', False, 1), ('good', True, 1)]:
                     with self.subTest(model=model, blocked=blocked):
                         directory = root / str(len(list(root.iterdir())))
                         directory.mkdir()
@@ -77,6 +80,8 @@ class CliContracts(unittest.TestCase):
                         if expected == 0:
                             self.assertEqual(output.read_text().strip(), 'Complete transcript.')
                             self.assertEqual(len(evidence['cleanup']['attempts']), 2)
+                            if model.startswith('short'):
+                                self.assertEqual((directory / 'clean-too-short-clean.txt').read_text(), 'Brief.')
                         elif blocked:
                             self.assertEqual(evidence['cleanup']['text'], 'Complete transcript.')
                         else:
