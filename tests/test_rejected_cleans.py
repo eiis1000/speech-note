@@ -37,7 +37,7 @@ class RejectedCleanTests(unittest.TestCase):
             root = Path(temp)
             raw = '  Short result.\n\n'
             config, session = self.run_case(root, attempts=[candidate(raw)])
-            path = root / 'note-too-short-clean.txt'
+            path = root / 'note-gemini-too-short-clean.txt'
             self.assertEqual(path.read_text(), raw)
             self.assertEqual((root / 'note-clean.txt').read_text(), 'Accepted transcript.\n')
             data = json.loads(Path(session.paths['persistent_diagnostics']).read_text())
@@ -51,12 +51,12 @@ class RejectedCleanTests(unittest.TestCase):
     def test_all_rejections_saved_without_overwriting_existing_file(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            old = root / 'note-too-short-clean.txt'
+            old = root / 'note-gemini-too-short-clean.txt'
             old.write_text('Earlier run')
             _, session = self.run_case(root, text='', attempts=[candidate('First.'), candidate('Second.', 'other')])
             self.assertEqual(old.read_text(), 'Earlier run')
-            self.assertEqual((root / 'note-too-short-clean-2.txt').read_text(), 'First.')
-            self.assertEqual((root / 'note-too-short-clean-3.txt').read_text(), 'Second.')
+            self.assertEqual((root / 'note-gemini-too-short-clean-2.txt').read_text(), 'First.')
+            self.assertEqual((root / 'note-other-too-short-clean.txt').read_text(), 'Second.')
             self.assertFalse((root / 'note-clean.txt').exists())
             self.assertTrue(session.run_failed)
 

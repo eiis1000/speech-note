@@ -181,10 +181,11 @@ class ArchiveFullStackTests(unittest.TestCase):
             finally:
                 os.chdir(prior)
             self.assertFalse(session.run_failed)
-            self.assertEqual(
-                sorted(p.name for p in work.iterdir()),
-                ["cosmicwatch-whisper-parakeet-clean-diagnostics.json", "cosmicwatch-whisper-parakeet-clean.txt"],
-            )
+            output = Path(session.paths['output'])
+            self.assertTrue(output.name.startswith('cosmicwatch-whisper-'))
+            self.assertIn('parakeet', output.name)
+            self.assertTrue(output.name.endswith('-heuristic-clean.txt'))
+            self.assertEqual(list(work.iterdir()), [output])
 
 
 CTC_MODEL_CACHE = (

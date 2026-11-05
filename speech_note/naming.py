@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
@@ -10,6 +11,7 @@ from .textproc import sanitize_filename_stem
 
 if TYPE_CHECKING:
     from .cli import Config
+    from .session import Session
 
 SOURCE_WORDS = {
     "whisper",
@@ -120,5 +122,52 @@ def full_auto_source_stem(config: "Config") -> str:
 
 
 def full_auto_output_path(config: "Config", directory: Path) -> Path:
-    stem = f"{sanitize_filename_stem(full_auto_source_stem(config))}-clean"
+    stem = bounded_stem(f"{sanitize_filename_stem(full_auto_source_stem(config))}-clean")
     return unique_output_path(directory, stem, ".txt")
+
+
+def model_filename_tag(model: str) -> str:
+    """Keep model versions, unlike source-file tags that discard numeric suffixes."""
+    leaf = model.rsplit("/", 1)[-1].removesuffix(":free").removesuffix(".bin")
+    if leaf.startswith("ggml-"):
+        leaf = "whisper-" + leaf.removeprefix("ggml-")
+    leaf = leaf.removeprefix("sherpa-onnx-nemo-")
+    return sanitize_filename_stem(leaf)
+
+
+def bounded_stem(stem: str) -> str:
+    """Leave room for diagnostics suffixes and collision counters on common filesystems."""
+    stem = sanitize_filename_stem(stem)
+    if len(stem) <= 210:
+        return stem
+    digest = hashlib.sha256(stem.encode()).hexdigest()[:12]
+    return f"{stem[:95]}-{digest}-{stem[-95:]}"
+
+
+def produced_transcript_path(config: "Config", session: "Session", *,
+                             model: str | None = None, rejected: bool = False) -> Path:
+    """Name generated outputs from actual ASR results and the model that produced this text.
+
+    Called after cleanup: the configured first-choice model may have failed.
+    Explicit output filenames remain the caller's choice for accepted transcripts.
+    """
+    assert config.output is not None
+    if config.output_auto_named:
+        source_path = config.input_archive or config.input_file or config.replay_input_file
+        base = Path(source_path).stem if source_path else full_auto_source_stem(config)
+        tags = []
+        backends = {f"asr{index}": source.backend for index, source in enumerate(config.asr_sources, start=1)}
+        for transcript in session.asr_transcripts():
+            tag = model_filename_tag(transcript.model)
+            # Local Whisper often reports only the quantized checkpoint name.
+            if backends.get(transcript.label) in {"whisper-cpp", "faster-whisper"} and "whisper" not in tag:
+                tag = "whisper-" + tag
+            tags.append(tag)
+        base = "-".join([base, *dict.fromkeys(tags)])
+    else:
+        base = config.output.stem.removesuffix("-clean")
+    cleanup = session.cleanup
+    producer = model or (cleanup.served_model or cleanup.method if cleanup else "unknown-model")
+    suffix = "too-short-clean" if rejected else "clean"
+    stem = bounded_stem(f"{base}-{model_filename_tag(producer)}-{suffix}")
+    return config.output.with_name(f"{stem}.txt")

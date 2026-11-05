@@ -151,8 +151,12 @@ exits nonzero). Every run retains diagnostics under
 also keep a matching `<input>-clean-diagnostics.json` next to the output,
 including runs where an ASR source failed but the remaining sources succeeded.
 Successful runs without errors leave no diagnostics sidecar in the output directory.
+Auto-named transcripts include the ASR models that produced sources and the cleanup
+model that actually succeeded, including fallbacks: for example,
+`meeting-whisper-large-v3-turbo-mai-transcribe-1-5-gemini-3-flash-preview-clean.txt`.
+An explicit `-o` filename is kept as specified. Existing files are not renamed.
 If a cleanup candidate is rejected as suspiciously short, its text is also saved
-beside the output as `*-too-short-clean.txt` (numbered when necessary). These are
+beside the output as `*-<model>-too-short-clean.txt` (numbered when necessary). These are
 rejected candidates, not accepted final transcripts; diagnostics record the model,
 attempt, and rejection reason. They are retained even when every candidate fails.
 Diagnostics contain the source transcripts, final text, and cleanup/audit requests and

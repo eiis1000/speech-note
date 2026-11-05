@@ -81,7 +81,7 @@ class CliContracts(unittest.TestCase):
                             self.assertEqual(output.read_text().strip(), 'Complete transcript.')
                             self.assertEqual(len(evidence['cleanup']['attempts']), 2)
                             if model.startswith('short'):
-                                self.assertEqual((directory / 'clean-too-short-clean.txt').read_text(), 'Brief.')
+                                self.assertEqual((directory / 'clean-short-too-short-clean.txt').read_text(), 'Brief.')
                         elif blocked:
                             self.assertEqual(evidence['cleanup']['text'], 'Complete transcript.')
                         else:

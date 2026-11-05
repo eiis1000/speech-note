@@ -31,7 +31,7 @@ from .config import (
 )
 from .model import CleanupOutcome, Transcript
 from .install import download_prompts
-from .naming import full_auto_output_path, open_unique_output, unique_directory_path, unique_output_path, write_unique_output
+from .naming import full_auto_output_path, open_unique_output, produced_transcript_path, unique_directory_path, unique_output_path, write_unique_output
 from .textproc import sanitize_filename_stem
 from .organizer import Organizer, build_organizer, cleanup_messages, cleanup_request_plan
 from .session import ArtifactStore, Session, atomic_write_text
@@ -296,7 +296,7 @@ def write_output_file(config: "Config", session: Session) -> None:
         return
     config.output.parent.mkdir(parents=True, exist_ok=True)
     if config.output_auto_named:
-        output = write_unique_output(config.output, cleanup.text + "\n")
+        output = write_unique_output(produced_transcript_path(config, session), cleanup.text + "\n")
     else:
         output = config.output
         atomic_write_text(output, cleanup.text + "\n")
@@ -311,7 +311,6 @@ def write_too_short_cleans(config: "Config", session: Session) -> None:
     """
     if config.output is None or session.cleanup is None:
         return
-    anchor = Path(session.paths.get("output", str(config.output)))
     saved = []
     for index, attempt in enumerate(session.cleanup.attempts, start=1):
         error = attempt.get("error", "")
@@ -333,13 +332,14 @@ def write_too_short_cleans(config: "Config", session: Session) -> None:
             content = "\n".join(block["text"] for block in content)
         if not isinstance(content, str) or not content.strip():
             continue
-        anchor.parent.mkdir(parents=True, exist_ok=True)
+        model = response.get("model") or attempt.get("request", {}).get("model") or "unknown-model"
+        config.output.parent.mkdir(parents=True, exist_ok=True)
         path = write_unique_output(
-            anchor.with_name(f"{anchor.stem.removesuffix('-clean')}-too-short-clean.txt"), content
+            produced_transcript_path(config, session, model=model, rejected=True), content
         )
         session.paths[key] = str(path)
         saved.append({"path": str(path), "attempt": index,
-                      "model": response.get("model") or attempt.get("request", {}).get("model"),
+                      "model": model,
                       "reason": error})
         session.note_fact("too_short_cleans", saved.copy())
 
