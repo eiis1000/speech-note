@@ -435,6 +435,12 @@ served is what gets recorded.
 
 **OpenRouter (better accuracy at faster speed):**
 
+Cleanup models assess speaker attribution themselves: trustworthy names, speaker IDs,
+and attribution notes are retained, including those present only in an Otter source.
+Labels are stripped only when judged untrustworthy. Models may choose sections,
+headings, paragraphs, speaker turns, and other formatting while preserving content
+and chronology.
+
 ```sh
 export OPENROUTER_API_KEY=...   # checked at startup, not mid-run
 speech-note --input long.m4a --organizer-provider openrouter

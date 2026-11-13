@@ -81,7 +81,11 @@ SYSTEM_PROMPT = (
     "clause; (2) AGGRESSIVELY strip disfluencies — um, uh, er, filler 'like', 'you know', "
     "'I mean', false starts, and stutters — so the transcript reads cleanly. Removing a "
     "disfluency is good; removing real content is bad. Do both at once. Output only the "
-    "final transcript text — no notes, no summary."
+    "final transcript, with whatever formatting best serves it. Preserve trustworthy "
+    "speaker labels and attribution notes; assess their reliability yourself and strip "
+    "only labels you judge untrustworthy. You may use sections, headings, paragraphs, "
+    "speaker turns, and other formatting at your discretion while preserving content "
+    "and chronology. Add no editorial commentary or summary."
 )
 
 
@@ -95,14 +99,15 @@ SYSTEM_PROMPT = (
 #   * union: the spare-tire sentence exists in one source only and is kept;
 #   * corroboration decides HOW, not WHETHER: two sources' "chain ... ring" beats the
 #     lone fluent "train ... rails" misdecode;
-#   * disfluencies stripped, nothing summarized, chronology preserved.
+#   * disfluencies stripped, nothing summarized, chronology preserved;
+#   * useful speaker attribution retained even when other recognizers omit it.
 _EXAMPLE_SOURCES = [
     Transcript(
         label="asr1",
         model="recognizer-a",
         kind="asr-final",
         text=(
-            "so this morning i finally fixed the bike um the the chain kept slipping "
+            "Mara: so this morning i finally fixed the bike um the the chain kept slipping "
             "off the ring you know so i cleaned it and tightened the derailleur. i "
             "also pumped the spare tire while i was down there. then i rode to the "
             "market before it got hot"
@@ -131,7 +136,7 @@ _EXAMPLE_SOURCES = [
 ]
 
 _EXAMPLE_CLEAN = (
-    "This morning I finally fixed the bike. The chain kept slipping off the ring, so I "
+    "Mara: This morning I finally fixed the bike. The chain kept slipping off the ring, so I "
     "cleaned it and tightened the derailleur. I also pumped the spare tire while I was "
     "down there. Then I rode to the market before it got hot."
 )
@@ -198,7 +203,13 @@ def build_user_prompt(sources: list[Transcript]) -> str:
         "- A passage carried by a single source SHOULD be kept unless it is clearly recognition "
         "garbage (random unconnected words, a degenerate repeated loop, an obvious mis-decode).\n"
         "- Align the sources chronologically and reconstruct the full spoken content that best "
-        "explains all of them together.\n\n"
+        "explains all of them together.\n"
+        "- Assess speaker labels and attribution notes using your own judgment, considering "
+        "their provenance, consistency across turns, and the conversation. MUST retain "
+        "trustworthy attribution, including names or speaker IDs supplied by just one "
+        "source (for example, an Otter transcript). Unlabeled ASR sources do not contradict "
+        "labeled ones. Strip speaker labels ONLY when you judge them untrustworthy; "
+        "correct them when supported, and do not invent identities.\n\n"
         "Length expectation:\n"
         f"On average the sources are {reference_length} words. Because you are keeping the "
         f"UNION of what every source heard, the result should land near {target_words} words "
@@ -218,7 +229,8 @@ def build_user_prompt(sources: list[Transcript]) -> str:
         "- MUST NOT output a summary or outline, paraphrase away spoken content, or replace "
         "a stretch of speech with a shorter description.\n"
         "- MUST NOT invent content that no source supports.\n"
-        "- MUST NOT write notes about the transcript or mention the editing process.\n"
+        "- MUST NOT add editorial notes about the transcript or mention the editing process. "
+        "This does not prohibit preserving trustworthy speaker attribution notes.\n"
         "- MUST remove long runs of repeated short acknowledgments (okay/yeah/yes) "
         "and degenerate repeated loops.\n"
         "- MAY fix punctuation, casing, repeated fragments, and clear mishearings.\n"
@@ -226,10 +238,10 @@ def build_user_prompt(sources: list[Transcript]) -> str:
         "change the meaning or emphasis.\n"
         "- MAY merge adjacent fragments only when they are clearly part of the same spoken "
         "thought.\n"
-        "- SHOULD put a blank line after every 3 to 6 sentences at natural pauses.\n"
-        "- MAY add light structure (speaker labels, headings) only if it clarifies the "
-        "transcript, and MUST NOT let formatting replace, shorten, reorder, or summarize "
-        "spoken content.\n"
+        "- Use your own judgment about formatting: sections, headings, paragraphs, speaker "
+        "turns, and other structure are all allowed. Keep or improve useful existing "
+        "formatting. The example is illustrative, not a required layout. MUST NOT let "
+        "formatting replace, shorten, reorder, or summarize spoken content.\n"
         "- MUST output only the final transcript.\n\n"
         f"{joined_sources}\n\n"
         "Output the reconstructed transcript now: keep all real content, strip the filler. "
