@@ -211,8 +211,7 @@ class ChatClient:
                 )
                 attempt["http_status"] = response.status_code
                 try:
-                    data = response.json()
-                    attempt["response"] = data
+                    attempt["response"] = response.json()
                     decoded_json = True
                 except ValueError:
                     attempt["response"] = response.text
@@ -243,7 +242,7 @@ class ChatClient:
                     continue
                 try:
                     result = parse_chat_response(
-                        data, model=model, require_finish_reason="openrouter.ai" in self.api_base
+                        attempt["response"], model=model, require_finish_reason="openrouter.ai" in self.api_base
                     )
                 except ValueError as exc:
                     attempt["error"] = str(exc)
@@ -294,9 +293,11 @@ def parse_chat_response(
     data: object, *, model: str = "", require_finish_reason: bool = False,
 ) -> ChatResponse:
     """Decode one complete reply. Shared by runtime and evals so failures cannot score."""
-    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        raise ValueError(f"HTTP 200 but no choices ({json.dumps(data)[:300]})")
+    choices = data.get("choices")
     if not isinstance(choices, list) or not choices:
-        detail = data.get("error", data) if isinstance(data, dict) else data
+        detail = data.get("error", data)
         raise ValueError(f"HTTP 200 but no choices ({json.dumps(detail)[:300]})")
     choice = choices[0] if isinstance(choices[0], dict) else {}
     message = choice.get("message")

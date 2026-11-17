@@ -296,7 +296,8 @@ class Organizer:
     def _cleanup_with_llm(
         self, sources: list[Transcript], plan: CleanupRequestPlan | None
     ) -> CleanupOutcome:
-        assert self.client is not None
+        client = self.client
+        assert client is not None
         if plan is None:
             plan = cleanup_request_plan(
                 sources,
@@ -315,13 +316,13 @@ class Organizer:
         if self.supervisor is not None:
             self.supervisor.ensure_running()
         timeout = request_timeout_seconds(
-            configured_timeout=self.client.timeout,
+            configured_timeout=client.timeout,
             estimated_prompt_tokens=plan.estimated_prompt_tokens,
             requested_output_tokens=plan.requested_output_tokens,
         )
         label_callback = self.status_label_callback
         note_callback = self.status_note_callback
-        response = self.client.chat(
+        response = client.chat(
             cleanup_messages(plan),
             max_tokens=plan.requested_output_tokens,
             timeout=timeout,
@@ -336,7 +337,7 @@ class Organizer:
                 (
                     lambda model, next_model: note_callback(
                         f"Cleanup LM failed: {model}: "
-                        f"{self.client.last_attempts[-1].get('error', 'unusable response')}; "
+                        f"{client.last_attempts[-1].get('error', 'unusable response')}; "
                         f"trying {next_model}"
                     )
                 )

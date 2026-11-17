@@ -320,7 +320,9 @@ def write_too_short_cleans(config: "Config", session: Session) -> None:
         if key in session.paths:
             continue
         response = attempt.get("response")
-        choices = response.get("choices") if isinstance(response, dict) else None
+        if not isinstance(response, dict):
+            continue
+        choices = response.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             continue
         message = choices[0].get("message")
@@ -332,7 +334,12 @@ def write_too_short_cleans(config: "Config", session: Session) -> None:
             content = "\n".join(block["text"] for block in content)
         if not isinstance(content, str) or not content.strip():
             continue
-        model = response.get("model") or attempt.get("request", {}).get("model") or "unknown-model"
+        model = response.get("model")
+        if not isinstance(model, str) or not model:
+            request = attempt.get("request")
+            model = request.get("model") if isinstance(request, dict) else None
+        if not isinstance(model, str) or not model:
+            model = "unknown-model"
         config.output.parent.mkdir(parents=True, exist_ok=True)
         path = write_unique_output(
             produced_transcript_path(config, session, model=model, rejected=True), content

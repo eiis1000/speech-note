@@ -16,7 +16,7 @@ from .transcribers import Transcriber, thread_env
 def validate_result(result: dict, duration: float | None) -> str:
     """Reject incomplete window coverage before handing text to cleanup."""
     def number(value: object) -> float:
-        if type(value) not in (float, int) or not math.isfinite(value):
+        if (type(value) is not float and type(value) is not int) or not math.isfinite(value):
             raise ValueError("Phonon returned an invalid time")
         return float(value)
 
