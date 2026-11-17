@@ -91,8 +91,9 @@ class CutoffTests(unittest.TestCase):
                 self.assertEqual(len(transport.last_attempts), 2)
                 self.assertIn("error", transport.last_attempts[0])
 
-    def test_short_and_mid_sentence_stop_replies_trigger_model_fallback(self):
-        for text in ("Brief.", "We discussed the project and reviewed the evidence before deciding to"):
+    def test_short_and_copied_example_replies_trigger_model_fallback(self):
+        from speech_note.organizer import _EXAMPLES
+        for text in ("Brief.", _EXAMPLES[0][1].replace("Lin:", "**Lin:**")):
             with self.subTest(text=text):
                 transport = client()
                 with mock.patch("speech_note.chat.requests.post", side_effect=[response(body(text)), response(body())]):

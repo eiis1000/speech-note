@@ -454,7 +454,7 @@ the run prints a notice when that's about to happen.
 Robustness details: the request timeout scales with the estimated work. Provider
 errors inside HTTP 200 responses, refusals, and incomplete finish reasons advance
 to the next model, retaining the rejected response in diagnostics. Cleanup that
-ends mid-sentence or is suspiciously short relative to the mean source length
+copies a worked example or is suspiciously short relative to the mean source length
 also advances to the next model, even if its finish reason claims success.
 Annotation runs only after cleanup passes these checks. If the chain is exhausted,
 full-auto exits nonzero and writes diagnostics without a clean transcript; the

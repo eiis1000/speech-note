@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 import shutil
 import sys
 import time
@@ -71,45 +72,62 @@ Where the sources disagree, consider the nearby exchange, usage elsewhere in the
 
 Edit speech into readable prose. Remove empty fillers, stutters, accidental duplicates, and false starts that the speaker immediately replaces. Keep a restart when it changes the claim, a repetition when it adds emphasis, and a sound when it conveys something the participants refer to. Preserve substantive details, qualifications, examples, side conversations, and the distinction between a question and its answer. Even in a long recording, give later passages the same care as the opening. Avoid padding the result with recognizer loops or compressing a stretch of dialogue into a description of its topic.
 
-Assess who spoke separately from what was said. Keep trustworthy names, speaker IDs, and attribution notes even when only one source supplies them. Consider whether the labels consistently track people across the exchange. A recognizer can split one person’s sentence between several IDs or put two people under one label. Where you can resolve the attribution, use it. Where you cannot, keep the speech and leave the attribution open.
+Keep names, speaker IDs, and attribution notes if and only if they are trustworthy — even if only one source supplies them. For example, named speaker labels (e.g. "Alice:") are often reliable, whereas automatic speaker assignment (e.g. "Speaker 5:") is usually not. If none of the transcripts include reliable speaker labels, do not include any speaker labels in the final transcript.
 
 Make the structure of the speech visible on the page. Use section headings for distinct topics, lists when someone enumerates points, and emphasis where the delivery or wording warrants it. When someone reads from a slide or another text, let the layout show where the reading begins and their commentary resumes. Use your judgment about which choices help here. Keep the speaker’s words, sequence, and level of detail throughout."""
 
 
-_EXAMPLE_MESSAGES = (
-    ("user", """Source 1:
+_EXAMPLES = (
+    ("""Source 1:
 Lin: Did both sensors fail?
-Jo: I thought so. But after we swapped the cables,
-[Speaker 6] the left one came back. The right one still reads zero.
+Jo: I thought so. But after we swapped the cables, the left one came back. The right one still reads zero.
 Lin: So the right sensor is broken?
 Jo: Maybe. We haven't tested the spare cable.
 
 Source 2:
-Did both sensors fail? I thought so, but after we swapped the cables the left one came back. The right one still reads zero. So the right sensor is broken? Maybe, we haven't tested the spare cable."""),
-    ("assistant", """Lin: Did both sensors fail?
+Did both sensors fail? I thought so, but after we swapped the cables the left one came back. The right one still reads zero. So the right sensor is broken? Maybe, we haven't tested the spare cable.""",
+     """Lin: Did both sensors fail?
 
 Jo: I thought so. But after we swapped the cables, the left one came back. The right one still reads zero.
 
 Lin: So the right sensor is broken?
 
 Jo: Maybe. We haven't tested the spare cable."""),
-    ("user", """Source 1:
-there are two things for the meeting first um bring the green the green folder on Friday. Actually Thursday. The lease is in there too. Second call Sal before you leave. Before is the important part.
+    ("""Source 1:
+there are two things for the meeting first um bring the green the green folder on Friday. Actually Thursday. The lee uh lease is in there too. Second call Sal before you leave. Emphasis on before.
 
 Source 2:
-There are two things for the meeting. First bring the green holder on Friday. Actually Thursday. Second call Sal before you leave. Before is the important part."""),
-    ("assistant", """There are two things for the meeting.
+**Speaker 4:** There are two things for the meeting. First bring the green holder on
+**Speaker 2:** Friday. Actually Thursday. Second call Sal before you leave.
+**Speaker 4:** Emphasis on before.""",
+     """There are two things for the meeting.
 
 1. Bring the green folder on Friday. Actually, Thursday. The lease is in there too.
-2. Call Sal **before** you leave. Before is the important part."""),
+2. Call Sal **before** you leave. Emphasis on before."""),
+    ("""Source 1:
+I finally fixed the bike. The chain kept slipping off the ring. I cleaned it and tightened the derailleur. I pumped the spare tire too. Then I rode to the market.
+Source 2:
+I finally fixed the bike. The train kept slipping off the rails so I cleaned it and tightened the derailleur then rode to the market.""",
+     "I finally fixed the bike. The chain kept slipping off the ring, so I cleaned it and tightened the derailleur. I pumped the spare tire too. Then I rode to the market."),
+    ("""Source 1:
+She asked whether the tickets were refundable. I said I thought they were, but only if you
+Source 2:
+She asked whether the tickets were refundable I said I thought they were but only if you""",
+     "She asked whether the tickets were refundable. I said I thought they were, but only if you—"),
 )
+
+# Demonstrations are reference material inside the instruction. Only the user
+# message contains the current recording, including on single-turn chat templates.
+_CLEANUP_INSTRUCTIONS = SYSTEM_PROMPT + "\n\n" + "\n\n".join(
+    f"Worked example {i} (fictional)\n{sources}\nEdited example:\n{output}"
+    for i, (sources, output) in enumerate(_EXAMPLES, 1)
+) + "\n\nEnd of examples. Reconstruct only the recording in the user message."
 
 
 def cleanup_messages(plan: "CleanupRequestPlan") -> list[dict[str, str]]:
     """Messages shared by the live cleanup request and its exported prompt."""
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        *({"role": role, "content": text} for role, text in _EXAMPLE_MESSAGES),
+        {"role": "system", "content": _CLEANUP_INSTRUCTIONS},
         {"role": "user", "content": plan.user_prompt},
     ]
 
@@ -135,7 +153,7 @@ def build_user_prompt(sources: list[Transcript]) -> str:
             header += f" — {source.quality_hint}"
         header += f" — {len(source.text)} chars / {source.words} words"
         source_blocks.append(f"{header}:\n{source.text}")
-    return "\n\n".join([*source_blocks, "Write the complete transcript. Carry through the details each source contributes, and use formatting to bring out the speaker’s structure and emphasis."])
+    return "\n\n".join(["Current recording", *source_blocks, "Write the complete transcript. Carry through the details each source contributes, and use formatting to bring out the speaker’s structure and emphasis."])
 
 
 def cleanup_request_plan(
@@ -148,8 +166,7 @@ def cleanup_request_plan(
     sources = _dedupe_sources([source for source in sources if source.text.strip()])
     user_prompt = build_user_prompt(sources)
     estimated_prompt_tokens = (
-        estimate_text_tokens(SYSTEM_PROMPT)
-        + sum(estimate_text_tokens(text) for _, text in _EXAMPLE_MESSAGES)
+        estimate_text_tokens(_CLEANUP_INSTRUCTIONS)
         + estimate_text_tokens(user_prompt)
         + 32
     )
@@ -273,7 +290,7 @@ class Organizer:
         except Exception as exc:
             return CleanupOutcome(
                 method="error", error=f"cleanup request failed: {exc}",
-                flagged_short=any(term in str(exc) for term in ("truncated", "mid-sentence", "suspiciously short")),
+                flagged_short=any(term in str(exc) for term in ("truncated", "suspiciously short")),
             )
 
     def _cleanup_with_llm(
@@ -359,34 +376,11 @@ def cleanup_response_error(response: ChatResponse, plan: CleanupRequestPlan) -> 
     words = count_words(text)
     if words < plan.minimum_words:
         flags.append(f"suspiciously short ({words} words < {plan.minimum_words} expected)")
-    if _ends_mid_sentence(text):
-        flags.append(f'ends mid-sentence ("...{_tail_snippet(text)}")')
+    # Ignore changes to Markdown, capitalization, and punctuation in a copied demo.
+    words_in_reply = re.findall(r"\w+", text.casefold())
+    if any(words_in_reply == re.findall(r"\w+", output.casefold()) for _, output in _EXAMPLES):
+        flags.append("returned a worked example instead of the recording")
     return "incomplete cleanup: " + "; ".join(flags) if flags else None
-
-
-_SENTENCE_FINAL = ".?!…"
-_TRAILING_CLOSERS = "\"')]}”’»"
-
-
-def _ends_mid_sentence(text: str) -> bool:
-    """True when cleaned text ends without sentence-final punctuation.
-
-    A complete cleanup ends on '.', '?', '!' or '…' (optionally wrapped in a closing
-    quote/bracket). A dangling word like "And" instead signals the model was cut off
-    mid-stream — a truncation that finish_reason does not always report. A faithful
-    trail-off the speaker actually made ("...the time is...") still ends in '.', so it
-    is not flagged.
-    """
-    stripped = text.rstrip()
-    while stripped and stripped[-1] in _TRAILING_CLOSERS:
-        stripped = stripped[:-1].rstrip()
-    if not stripped:
-        return False
-    return stripped[-1] not in _SENTENCE_FINAL
-
-
-def _tail_snippet(text: str, words: int = 6) -> str:
-    return " ".join(text.split()[-words:])
 
 
 def _dedupe_sources(sources: list[Transcript]) -> list[Transcript]:

@@ -1217,21 +1217,13 @@ class OrganizerLlmTests(unittest.TestCase):
         self.assertTrue(outcome.flagged_short)
         self.assertIn("short", outcome.error)
 
-    def test_mid_sentence_output_is_rejected_and_retained_as_evidence(self) -> None:
+    def test_recording_can_end_mid_sentence(self):
+        source = "Everything was fine until we tried to"
         organizer = make_llm_organizer()
-        sources = [Transcript("primary", "whisper", "asr-final", "word " * 100)]
-        # Long enough to pass the length ratio, but cut off mid-sentence (no terminal
-        # punctuation). Observed on a real recording: a cleanup reply stopped
-        # mid-sentence yet reported finish_reason="stop", so truncation looked like a
-        # complete answer and nothing flagged it.
-        cut_off = "clean " * 89 + "and then I"
-        response = fake_response(200, self.chat_payload(cut_off))
-        with mock.patch("speech_note.chat.requests.post", return_value=response):
-            outcome = organizer.cleanup(sources)
-        self.assertEqual(outcome.text, "")
-        self.assertEqual(outcome.attempts[0]["response"]["choices"][0]["message"]["content"], cut_off)
-        self.assertTrue(outcome.flagged_short)
-        self.assertIn("mid-sentence", outcome.error)
+        with mock.patch("speech_note.chat.requests.post", return_value=fake_response(200, self.chat_payload(source))):
+            outcome = organizer.cleanup([Transcript("one", "m", "asr-final", source)])
+        self.assertEqual(outcome.text, source)
+        self.assertIsNone(outcome.error)
 
     def test_complete_output_is_not_flagged_mid_sentence(self) -> None:
         # A faithful trail-off that the speaker actually made still ends in '.', '?', '!'
@@ -1749,7 +1741,9 @@ class PipelineEndToEndTests(unittest.TestCase):
             self.assertEqual(prompt, expected)
             self.assertEqual(messages[0]["role"], "system")
             self.assertEqual(messages[-1]["role"], "user")
-            self.assertIn("assistant", [m["role"] for m in messages[1:-1]])
+            self.assertEqual(len(messages), 2)
+            self.assertIn("Worked example", messages[0]["content"])
+            self.assertTrue(messages[1]["content"].startswith("Current recording"))
 
     def test_extra_transcripts_reach_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
