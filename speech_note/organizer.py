@@ -63,16 +63,53 @@ class CleanupRequestPlan:
     minimum_words: int
 
 
-SYSTEM_PROMPT = """Reconstruct a readable, near-verbatim transcript from the supplied accounts of the same recording. Preserve the speakers’ meaning, wording, and order, including meaningful material heard by only one source. Use context and the other accounts to resolve transcription errors. Remove filler, false starts, and accidental repetition where doing so preserves meaning. Do not summarize or invent content.
+SYSTEM_PROMPT = """Turn the supplied transcripts of the same recording into one readable, near-verbatim transcript. Someone reading it should be able to follow the whole conversation in the speakers’ own words, including the steps by which they reached a conclusion. Return only the finished transcript.
 
-Judge speaker attribution separately from the words. Keep labels you trust and leave uncertain turns unattributed. Use whatever formatting best serves the conversation. Return only the finished transcript."""
+Reconstruct the conversation in order. Find where the sources describe the same moment, combine what they heard, and render that moment once. Recognizers differ in what they pick up. When one contains a passage and the others resume later, keep the passage if it makes sense in context. Agreement helps resolve competing readings of a phrase. Before returning the transcript, check each source for details that disappeared between shared passages. Even an incidental remark belongs if someone said it.
+
+Where the sources disagree, consider the nearby exchange, usage elsewhere in the recording, and any source-specific reliability notes. A reply can clarify what the preceding question was. Prefer the wording that best accounts for the evidence, even when a different version reads more smoothly. Preserve a speaker’s factual mistakes, uncertainty, and changes of mind. Correct errors introduced by transcription. If none of the readings is intelligible, mark the uncertainty briefly rather than supplying a confident guess.
+
+Edit speech into readable prose. Remove empty fillers, stutters, accidental duplicates, and false starts that the speaker immediately replaces. Keep a restart when it changes the claim, a repetition when it adds emphasis, and a sound when it conveys something the participants refer to. Preserve substantive details, qualifications, examples, side conversations, and the distinction between a question and its answer. Even in a long recording, give later passages the same care as the opening. Avoid padding the result with recognizer loops or compressing a stretch of dialogue into a description of its topic.
+
+Assess who spoke separately from what was said. Keep trustworthy names, speaker IDs, and attribution notes even when only one source supplies them. Consider whether the labels consistently track people across the exchange. A recognizer can split one person’s sentence between several IDs or put two people under one label. Where you can resolve the attribution, use it. Where you cannot, keep the speech and leave the attribution open.
+
+Make the structure of the speech visible on the page. Use section headings for distinct topics, lists when someone enumerates points, and emphasis where the delivery or wording warrants it. When someone reads from a slide or another text, let the layout show where the reading begins and their commentary resumes. Use your judgment about which choices help here. Keep the speaker’s words, sequence, and level of detail throughout."""
+
+
+_EXAMPLE_MESSAGES = (
+    ("user", """Source 1:
+Lin: Did both sensors fail?
+Jo: I thought so. But after we swapped the cables,
+[Speaker 6] the left one came back. The right one still reads zero.
+Lin: So the right sensor is broken?
+Jo: Maybe. We haven't tested the spare cable.
+
+Source 2:
+Did both sensors fail? I thought so, but after we swapped the cables the left one came back. The right one still reads zero. So the right sensor is broken? Maybe, we haven't tested the spare cable."""),
+    ("assistant", """Lin: Did both sensors fail?
+
+Jo: I thought so. But after we swapped the cables, the left one came back. The right one still reads zero.
+
+Lin: So the right sensor is broken?
+
+Jo: Maybe. We haven't tested the spare cable."""),
+    ("user", """Source 1:
+there are two things for the meeting first um bring the green the green folder on Friday. Actually Thursday. The lease is in there too. Second call Sal before you leave. Before is the important part.
+
+Source 2:
+There are two things for the meeting. First bring the green holder on Friday. Actually Thursday. Second call Sal before you leave. Before is the important part."""),
+    ("assistant", """There are two things for the meeting.
+
+1. Bring the green folder on Friday. Actually, Thursday. The lease is in there too.
+2. Call Sal **before** you leave. Before is the important part."""),
+)
 
 
 def cleanup_messages(plan: "CleanupRequestPlan") -> list[dict[str, str]]:
-    """The full message list for one cleanup request — the single source of truth,
-    shared by the live request and the --export-sources prompt dump."""
+    """Messages shared by the live cleanup request and its exported prompt."""
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
+        *({"role": role, "content": text} for role, text in _EXAMPLE_MESSAGES),
         {"role": "user", "content": plan.user_prompt},
     ]
 
@@ -98,7 +135,7 @@ def build_user_prompt(sources: list[Transcript]) -> str:
             header += f" — {source.quality_hint}"
         header += f" — {len(source.text)} chars / {source.words} words"
         source_blocks.append(f"{header}:\n{source.text}")
-    return "\n\n".join(source_blocks)
+    return "\n\n".join([*source_blocks, "Write the complete transcript. Carry through the details each source contributes, and use formatting to bring out the speaker’s structure and emphasis."])
 
 
 def cleanup_request_plan(
@@ -112,6 +149,7 @@ def cleanup_request_plan(
     user_prompt = build_user_prompt(sources)
     estimated_prompt_tokens = (
         estimate_text_tokens(SYSTEM_PROMPT)
+        + sum(estimate_text_tokens(text) for _, text in _EXAMPLE_MESSAGES)
         + estimate_text_tokens(user_prompt)
         + 32
     )

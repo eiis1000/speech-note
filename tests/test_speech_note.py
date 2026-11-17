@@ -1747,7 +1747,9 @@ class PipelineEndToEndTests(unittest.TestCase):
             # The exported prompt mirrors the actual request.
             expected = "\n\n".join(f"[{m['role']}]\n{m['content']}" for m in messages) + "\n"
             self.assertEqual(prompt, expected)
-            self.assertEqual([m["role"] for m in messages], ["system", "user"])
+            self.assertEqual(messages[0]["role"], "system")
+            self.assertEqual(messages[-1]["role"], "user")
+            self.assertIn("assistant", [m["role"] for m in messages[1:-1]])
 
     def test_extra_transcripts_reach_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
