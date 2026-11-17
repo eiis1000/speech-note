@@ -300,6 +300,9 @@ class ArtifactStore:
             else {
                 "method": cleanup.method,
                 "served_model": cleanup.served_model,
+                "requested_model": cleanup.requested_model,
+                "checkpoint": cleanup.checkpoint,
+                "checkpoint_source": cleanup.checkpoint_source,
                 "finish_reason": cleanup.finish_reason,
                 "flagged_short": cleanup.flagged_short,
                 "error": cleanup.error,

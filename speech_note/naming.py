@@ -167,7 +167,7 @@ def produced_transcript_path(config: "Config", session: "Session", *,
     else:
         base = config.output.stem.removesuffix("-clean")
     cleanup = session.cleanup
-    producer = model or (cleanup.served_model or cleanup.method if cleanup else "unknown-model")
+    producer = model or (cleanup.checkpoint or cleanup.served_model or cleanup.method if cleanup else "unknown-model")
     suffix = "too-short-clean" if rejected else "clean"
     stem = bounded_stem(f"{base}-{model_filename_tag(producer)}-{suffix}")
     return config.output.with_name(f"{stem}.txt")

@@ -594,6 +594,11 @@ def print_cleanup_notes(session: Session, *, full_auto: bool) -> None:
     err = sys.stderr
     if cleanup.warning:
         print(f"warning: {cleanup.warning}", file=err)
+    if cleanup.method == "llama":
+        print(f"cleanup model: {cleanup.served_model or 'unreported'} "
+              f"(requested {cleanup.requested_model or 'unknown'})", file=err)
+        if cleanup.checkpoint_source:
+            print(f"cleanup checkpoint: {cleanup.checkpoint or 'unknown (server did not identify checkpoint)'}", file=err)
     if cleanup.annotation_count:
         print(
             f"marked {cleanup.annotation_count} uncertain passage(s) where the ASR "

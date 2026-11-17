@@ -330,12 +330,15 @@ class Organizer:
         outcome = CleanupOutcome(
             text=response.content.strip(),
             method="llama",
+            requested_model=response.requested_model,
             served_model=response.served_model,
             finish_reason=response.finish_reason,
             estimated_prompt_tokens=plan.estimated_prompt_tokens,
             requested_output_tokens=plan.requested_output_tokens,
             request_timeout=round(timeout, 3),
         )
+        if self.supervisor is not None:
+            outcome.checkpoint, outcome.checkpoint_source = self.supervisor.checkpoint_identity(response.served_model)
         # Also enforce the contract for alternate clients implementing chat().
         outcome.error = cleanup_response_error(response, plan)
         outcome.flagged_short = outcome.error is not None
@@ -455,6 +458,7 @@ def build_organizer(config: "Config") -> Organizer:
     supervisor: LocalServerSupervisor | None = None
     if config.organizer.provider == "local":
         launch_command = config.organizer.server_command
+        launch_checkpoint = None
         if launch_command is None and config.organizer.api_base == DEFAULT_LOCAL_API_BASE:
             model_path = config.organizer.gguf or DEFAULT_GGUF_MODEL
             have_server = bool(shutil.which("llama-server"))
@@ -475,6 +479,8 @@ def build_organizer(config: "Config") -> Organizer:
                 kv_offload=config.organizer.kv_offload,
                 model_path=config.organizer.gguf,
             )
+            if launch_command:
+                launch_checkpoint = launch_command[launch_command.index("--model") + 1]
             if launch_command is None and have_server and not model_path.exists():
                 # Reached only if auto-install was declined/unavailable or a custom
                 # --organizer-gguf path is missing — point the user at the fix.
@@ -487,6 +493,7 @@ def build_organizer(config: "Config") -> Organizer:
                 )
         supervisor = LocalServerSupervisor(
             launch_command=launch_command,
+            launch_checkpoint=launch_checkpoint,
             healthcheck_url=client.models_url(),
         )
     return Organizer(

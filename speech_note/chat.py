@@ -45,6 +45,7 @@ class ChatResponse:
     native_finish_reason: str | None = None
     usage: dict[str, Any] | None = None
     error: object = None
+    requested_model: str | None = None
 
     def failure_reason(self) -> str | None:
         """A partial body is not success, even when HTTP status was 200."""
@@ -302,7 +303,8 @@ def parse_chat_response(
     message = message if isinstance(message, dict) else {}
     result = ChatResponse(
         content=_content_to_text(message.get("content")),
-        served_model=data.get("model") or model,
+        requested_model=model or None,
+        served_model=data.get("model") if isinstance(data.get("model"), str) else None,
         finish_reason=choice.get("finish_reason"),
         request_id=data.get("id"), provider=data.get("provider"),
         native_finish_reason=choice.get("native_finish_reason"),

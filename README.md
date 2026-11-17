@@ -431,7 +431,10 @@ older stacks. One 890M-specific note for the 26B: `--organizer-gpu-layers auto`
 (the default) spills its expert tensors to the CPU at the 64k default context
 (~8.5 tok/s); at `--organizer-context-tokens 32768` or less, `--organizer-gpu-layers
 999` fits fully on the iGPU and runs ~20 tok/s. The model the server *says* it
-served is what gets recorded.
+served is recorded separately from the model requested on the successful attempt.
+The terminal and diagnostics also identify the local checkpoint from the running
+child's launch arguments or server metadata. When an existing server exposes only
+an alias, speech-note reports the checkpoint as unknown.
 
 **OpenRouter (better accuracy at faster speed):**
 

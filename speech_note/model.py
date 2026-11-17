@@ -82,6 +82,9 @@ class CleanupOutcome:
     annotation_error: str | None = None
     attempts: list[dict[str, object]] = dataclasses.field(default_factory=list)
     annotation_attempts: list[dict[str, object]] = dataclasses.field(default_factory=list)
+    requested_model: str | None = None
+    checkpoint: str | None = None
+    checkpoint_source: str | None = None
 
     @property
     def ok(self) -> bool:

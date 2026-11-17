@@ -30,6 +30,9 @@ class CliContracts(unittest.TestCase):
                 self.wfile.write(data)
 
             def do_GET(self):
+                if self.path == '/props':
+                    self.reply({'model_path': '/models/test-e2b.gguf'} if 'short' in seen else {})
+                    return
                 self.reply({'data': [{'id': name} for name in ('bad', 'short', 'good')]})
 
             def do_POST(self):
@@ -42,7 +45,10 @@ class CliContracts(unittest.TestCase):
                                   error={'code': 502, 'message': 'synthetic upstream failure'})
                 elif model == 'short':
                     choice['message']['content'] = 'Brief.'
-                self.reply({'model': model, 'choices': [choice]})
+                payload = {'choices': [choice]}
+                if model != 'good' or 'short' in seen:
+                    payload['model'] = 'cleanup-alias' if model == 'good' else model
+                self.reply(payload)
 
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -78,6 +84,19 @@ class CliContracts(unittest.TestCase):
                         self.assertEqual(evidence['run_failed'], bool(expected))
                         self.assertEqual(seen, model.split(','))
                         if expected == 0:
+                            cleanup = evidence['cleanup']
+                            self.assertEqual(cleanup['requested_model'], 'good')
+                            if model.startswith('short'):
+                                self.assertEqual(cleanup['served_model'], 'cleanup-alias')
+                                self.assertIn('cleanup model: cleanup-alias (requested good)', run.stderr)
+                                self.assertEqual(cleanup['checkpoint'], '/models/test-e2b.gguf')
+                                self.assertIn('cleanup checkpoint: /models/test-e2b.gguf', run.stderr)
+                            else:
+                                self.assertIsNone(cleanup['served_model'])
+                                self.assertIn('cleanup model: unreported (requested good)', run.stderr)
+                                self.assertIsNone(cleanup['checkpoint'])
+                                self.assertEqual(cleanup['checkpoint_source'], 'unknown')
+                                self.assertIn('server did not identify checkpoint', run.stderr)
                             self.assertEqual(output.read_text().strip(), 'Complete transcript.')
                             self.assertEqual(len(evidence['cleanup']['attempts']), 2)
                             if model.startswith('short'):

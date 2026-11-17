@@ -234,9 +234,11 @@ def ensure_default_cleanup_model(*, auto_yes: bool, interactive: bool | None = N
 class LocalServerSupervisor:
     """Launches and supervises a local llama-server when one isn't running."""
 
-    def __init__(self, *, launch_command: Sequence[str] | None, healthcheck_url: str) -> None:
+    def __init__(self, *, launch_command: Sequence[str] | None, healthcheck_url: str,
+                 launch_checkpoint: str | None = None) -> None:
         self.launch_command = launch_command
         self.healthcheck_url = healthcheck_url
+        self.launch_checkpoint = launch_checkpoint
         self.process: subprocess.Popen[str] | None = None
         self.log_path: Path | None = None
         self._log_handle = None
@@ -247,6 +249,26 @@ class LocalServerSupervisor:
             return requests.get(self.healthcheck_url, timeout=1.5).ok
         except requests.RequestException:
             return False
+
+    def checkpoint_identity(self, reported_model: str | None) -> tuple[str | None, str]:
+        """Identify the serving checkpoint after generation, including reused servers."""
+        if self.process is not None and self.process.poll() is None and self.launch_checkpoint:
+            return self.launch_checkpoint, "launch_command"
+        # llama.cpp exposes model_path even when the completion echoes an alias.
+        if self.healthcheck_url.endswith("/v1/models"):
+            url = self.healthcheck_url.removesuffix("/v1/models") + "/props"
+            try:
+                reply = requests.get(url, timeout=2)
+                reply.raise_for_status()
+                props = reply.json()
+                path = props.get("model_path") if isinstance(props, dict) else None
+                if isinstance(path, str) and path.strip():
+                    return path, "server_props"
+            except (requests.RequestException, ValueError):
+                pass
+        if reported_model and reported_model.lower().endswith(".gguf"):
+            return reported_model, "completion_response"
+        return None, "unknown"
 
     def ensure_running(self, *, startup_timeout: float = 45.0) -> None:
         with self._lock:
