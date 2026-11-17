@@ -26,7 +26,6 @@ from . import annotate as annotation
 from .chat import ChatClient, ChatResponse, request_timeout_seconds
 from .config import (
     CLEANUP_MIN_LENGTH_RATIO,
-    CLEANUP_TARGET_LENGTH_RATIO,
     DEFAULT_GGUF_MODEL,
     DEFAULT_LOCAL_API_BASE,
     OPENROUTER_ANNOTATION_MODELS,
@@ -59,94 +58,14 @@ class CleanupRequestPlan:
     requested_output_tokens: int
     token_budget: int
     output_cap_limited: bool
-    # Length expectation, shared by the prompt and the post-hoc shortness check so
-    # the two can never drift apart.
+    # Used to check the returned transcript for suspiciously short output.
     reference_words: int
     minimum_words: int
 
 
-SYSTEM_PROMPT = (
-    "You are a transcript reconstruction engine. You are given several machine "
-    "transcripts of the SAME recording, each from a different speech recognizer. The "
-    "recognizers differ mainly in SENSITIVITY: some hear faint or fast speech that "
-    "others miss entirely. A passage appearing in only one transcript almost always "
-    "means the other recognizers failed to hear it — NOT that it is fake. Your job is "
-    "to reconstruct the union of what was actually said: keep everything any source "
-    "heard, use the other sources to fix wording and spelling, and drop only true "
-    "non-speech (filler, recognition garbage, degenerate loops). The person "
-    "who made the recording will read your output and can spot a wrong line at a glance, "
-    "so losing real content is far worse than keeping a slightly uncertain line. "
-    "You have two SEPARATE jobs that must not be confused: (1) KEEP all real content, "
-    "including anything only one source heard — never drop a substantive word, phrase, or "
-    "clause; (2) AGGRESSIVELY strip disfluencies — um, uh, er, filler 'like', 'you know', "
-    "'I mean', false starts, and stutters — so the transcript reads cleanly. Removing a "
-    "disfluency is good; removing real content is bad. Do both at once. Output only the "
-    "final transcript, with whatever formatting best serves it. Preserve trustworthy "
-    "speaker labels and attribution notes; assess their reliability yourself and strip "
-    "only labels you judge untrustworthy. You may use sections, headings, paragraphs, "
-    "speaker turns, and other formatting at your discretion while preserving content "
-    "and chronology. Add no editorial commentary or summary."
-)
+SYSTEM_PROMPT = """Reconstruct a readable, near-verbatim transcript from the supplied accounts of the same recording. Preserve the speakers’ meaning, wording, and order, including meaningful material heard by only one source. Use context and the other accounts to resolve transcription errors. Remove filler, false starts, and accidental repetition where doing so preserves meaning. Do not summarize or invent content.
 
-
-# The worked example rides as a real user/assistant exchange, the strongest format
-# anchor there is (measured on the annotation prompt: an example pasted into the
-# system prompt gets its surface imitated; an assistant turn gets its behaviour
-# followed). The user turn is built by build_user_prompt on synthetic transcripts, so
-# the demonstrated format can never drift from the real one. The scene is invented and
-# deliberately NOT one of the eval cases — a prompt must never contain an answer the
-# eval then measures. It demonstrates the invariants that actually go wrong:
-#   * union: the spare-tire sentence exists in one source only and is kept;
-#   * corroboration decides HOW, not WHETHER: two sources' "chain ... ring" beats the
-#     lone fluent "train ... rails" misdecode;
-#   * disfluencies stripped, nothing summarized, chronology preserved;
-#   * useful speaker attribution retained even when other recognizers omit it.
-_EXAMPLE_SOURCES = [
-    Transcript(
-        label="asr1",
-        model="recognizer-a",
-        kind="asr-final",
-        text=(
-            "Mara: so this morning i finally fixed the bike um the the chain kept slipping "
-            "off the ring you know so i cleaned it and tightened the derailleur. i "
-            "also pumped the spare tire while i was down there. then i rode to the "
-            "market before it got hot"
-        ),
-    ),
-    Transcript(
-        label="asr2",
-        model="recognizer-b",
-        kind="asr-final",
-        text=(
-            "so this morning i finally fixed the bike the train kept slipping off the "
-            "rails so i cleaned it and tightened the derailleur then i rode to the "
-            "market before it got hot"
-        ),
-    ),
-    Transcript(
-        label="asr3",
-        model="recognizer-c",
-        kind="asr-final",
-        text=(
-            "this morning i finally fixed the bike the chain kept slipping off the "
-            "ring so i cleaned it and tightened the uh derailleur then i rode to the "
-            "market before it got hot"
-        ),
-    ),
-]
-
-_EXAMPLE_CLEAN = (
-    "Mara: This morning I finally fixed the bike. The chain kept slipping off the ring, so I "
-    "cleaned it and tightened the derailleur. I also pumped the spare tire while I was "
-    "down there. Then I rode to the market before it got hot."
-)
-
-
-def example_messages() -> list[dict[str, str]]:
-    return [
-        {"role": "user", "content": build_user_prompt(_EXAMPLE_SOURCES)},
-        {"role": "assistant", "content": _EXAMPLE_CLEAN},
-    ]
+Judge speaker attribution separately from the words. Keep labels you trust and leave uncertain turns unattributed. Use whatever formatting best serves the conversation. Return only the finished transcript."""
 
 
 def cleanup_messages(plan: "CleanupRequestPlan") -> list[dict[str, str]]:
@@ -154,7 +73,6 @@ def cleanup_messages(plan: "CleanupRequestPlan") -> list[dict[str, str]]:
     shared by the live request and the --export-sources prompt dump."""
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
-        *example_messages(),
         {"role": "user", "content": plan.user_prompt},
     ]
 
@@ -172,16 +90,7 @@ def _reference_words(sources: list[Transcript]) -> int:
 
 
 def build_user_prompt(sources: list[Transcript]) -> str:
-    """Build the cleanup prompt with named sources.
-
-    Sources are identified by what produced them, with quality hints when we have them.
-    The prompt reconstructs the UNION of what every source heard: source disagreement is
-    treated as a difference in sensitivity (one recognizer missed something), not as a
-    vote on whether a passage is real, so content carried by a single source is kept.
-    """
-    reference_length = _reference_words(sources)
-    minimum_words = max(1, math.ceil(reference_length * CLEANUP_MIN_LENGTH_RATIO))
-    target_words = max(minimum_words, math.ceil(reference_length * CLEANUP_TARGET_LENGTH_RATIO))
+    """Present each source with its provenance and original text."""
     source_blocks = []
     for index, source in enumerate(sources, start=1):
         header = f"Source {index} — {source.label} ({source.model})"
@@ -189,64 +98,7 @@ def build_user_prompt(sources: list[Transcript]) -> str:
             header += f" — {source.quality_hint}"
         header += f" — {len(source.text)} chars / {source.words} words"
         source_blocks.append(f"{header}:\n{source.text}")
-    joined_sources = "\n\n".join(source_blocks)
-    return (
-        "Reconstruct one readable near-verbatim transcript that is the UNION of what the "
-        "sources heard, with disfluencies cleaned out.\n\n"
-        "Source handling:\n"
-        "- Each source below is a fallible transcription of the same recording; its header "
-        "says what produced it.\n"
-        "- The sources DISAGREE mostly by sensitivity, not reliability. Where one source has "
-        "content the others lack, assume the others simply missed it and KEEP that content.\n"
-        "- Use agreement between sources to decide HOW a word was said (spelling, which "
-        "homophone, a garbled name), never WHETHER a passage exists.\n"
-        "- A passage carried by a single source SHOULD be kept unless it is clearly recognition "
-        "garbage (random unconnected words, a degenerate repeated loop, an obvious mis-decode).\n"
-        "- Align the sources chronologically and reconstruct the full spoken content that best "
-        "explains all of them together.\n"
-        "- Assess speaker labels and attribution notes using your own judgment, considering "
-        "their provenance, consistency across turns, and the conversation. MUST retain "
-        "trustworthy attribution, including names or speaker IDs supplied by just one "
-        "source (for example, an Otter transcript). Unlabeled ASR sources do not contradict "
-        "labeled ones. Strip speaker labels ONLY when you judge them untrustworthy; "
-        "correct them when supported, and do not invent identities.\n\n"
-        "Length expectation:\n"
-        f"On average the sources are {reference_length} words. Because you are keeping the "
-        f"UNION of what every source heard, the result should land near {target_words} words "
-        f"or more; well below {minimum_words} words means real content was dropped. MUST NOT "
-        "pad with junk or repeated words to hit a length; coverage of real speech is the "
-        "goal, not raw count.\n\n"
-        "Editing contract:\n"
-        "- MUST preserve chronological transcript form.\n"
-        "- MUST keep all meaningful spoken content, INCLUDING content that only one source "
-        "heard. Never drop a substantive word, phrase, clause, name, number, or example.\n"
-        "- SHOULD aggressively remove disfluencies and verbal tics — um, uh, er, filler 'like', "
-        "'you know', 'I mean', false starts, restarts, and repeated stutters — they are not "
-        "content and they hurt readability. This is about HOW things are said, not WHAT was "
-        "said.\n"
-        "- MUST preserve concrete details, examples, caveats, corrections, asides, "
-        "transitions, questions, answers, instructions, names, and numbers.\n"
-        "- MUST NOT output a summary or outline, paraphrase away spoken content, or replace "
-        "a stretch of speech with a shorter description.\n"
-        "- MUST NOT invent content that no source supports.\n"
-        "- MUST NOT add editorial notes about the transcript or mention the editing process. "
-        "This does not prohibit preserving trustworthy speaker attribution notes.\n"
-        "- MUST remove long runs of repeated short acknowledgments (okay/yeah/yes) "
-        "and degenerate repeated loops.\n"
-        "- MAY fix punctuation, casing, repeated fragments, and clear mishearings.\n"
-        "- If a phrase is repeated, keep the first clear instance unless later repetitions "
-        "change the meaning or emphasis.\n"
-        "- MAY merge adjacent fragments only when they are clearly part of the same spoken "
-        "thought.\n"
-        "- Use your own judgment about formatting: sections, headings, paragraphs, speaker "
-        "turns, and other structure are all allowed. Keep or improve useful existing "
-        "formatting. The example is illustrative, not a required layout. MUST NOT let "
-        "formatting replace, shorten, reorder, or summarize spoken content.\n"
-        "- MUST output only the final transcript.\n\n"
-        f"{joined_sources}\n\n"
-        "Output the reconstructed transcript now: keep all real content, strip the filler. "
-        "Start at the beginning of the recording and continue linearly until the end."
-    )
+    return "\n\n".join(source_blocks)
 
 
 def cleanup_request_plan(
@@ -260,7 +112,6 @@ def cleanup_request_plan(
     user_prompt = build_user_prompt(sources)
     estimated_prompt_tokens = (
         estimate_text_tokens(SYSTEM_PROMPT)
-        + sum(estimate_text_tokens(m["content"]) for m in example_messages())
         + estimate_text_tokens(user_prompt)
         + 32
     )

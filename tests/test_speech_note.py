@@ -38,7 +38,6 @@ from speech_note.model import Transcript
 from speech_note.chat import ChatClient, ChatResponse, request_timeout_seconds
 from speech_note.llama_server import default_server_command, ensure_default_cleanup_model
 from speech_note.organizer import (
-    SYSTEM_PROMPT,
     Organizer,
     build_user_prompt,
     cleanup_request_plan,
@@ -978,36 +977,10 @@ class OrganizerPromptTests(unittest.TestCase):
         self.assertIn("primary ASR pass", prompt)
         self.assertIn("Source 2 — secondary (parakeet)", prompt)
         self.assertIn("Source 3 — extra:google.txt (google.txt)", prompt)
-        # Length is anchored to the MEAN source length (robust to one filler-heavy
-        # source): mean of 100/200/150 words is 150.
-        self.assertIn("On average the sources are 150 words", prompt)
-
-    def test_prompt_is_union_recall_not_consensus(self) -> None:
-        """Single-source content must be KEPT (sources differ by sensitivity, not
-        reliability) — the prompt must not tell the model to drop minority content."""
-        sources = [
-            Transcript("whisper", "whisper", "asr-final", "word " * 80),
-            Transcript("gemini", "gemini", "asr-final", "word " * 160),
-        ]
-        prompt = build_user_prompt(sources)
-        lowered = prompt.lower()
-        # Keeps single-source content rather than treating consensus as truth.
-        self.assertIn("single source", lowered)
-        self.assertIn("sensitivity", lowered)
-        self.assertIn("keep that content", lowered)
-        # Anchored to the mean source length (mean of 80/160 is 120), never the shortest.
-        self.assertIn("on average the sources are 120 words", lowered)
-        self.assertNotIn("shortest source", lowered)
-        # Two orthogonal jobs: strip disfluencies, keep content.
-        self.assertIn("disfluencies", lowered)
-
-    def test_system_prompt_frames_union_reconstruction(self) -> None:
-        lowered = SYSTEM_PROMPT.lower()
-        self.assertIn("sensitivity", lowered)
-        self.assertIn("union", lowered)
-        # The asymmetric cost: dropping real content is worse than keeping uncertain.
-        self.assertIn("losing real content", lowered)
-        self.assertNotIn("conservative transcript repair", lowered)
+        plan = cleanup_request_plan(sources, context_tokens=262144, max_output_tokens=65536)
+        self.assertEqual(plan.reference_words, 150)
+        for source in sources:
+            self.assertIn(source.text, prompt)
 
     def test_timeout_scales_with_request_size(self) -> None:
         small = request_timeout_seconds(
@@ -1287,8 +1260,6 @@ class OrganizerLlmTests(unittest.TestCase):
         prompts: list[str] = []
 
         def fake_post(_url, *, data, **_kwargs):
-            # The real data rides in the LAST user turn; earlier turns are the
-            # worked example, whose own sources must not trip this assertion.
             prompts.append(json.loads(data)["messages"][-1]["content"])
             return fake_response(200, self.chat_payload("clean " * 89 + "done."))
 
@@ -1773,11 +1744,10 @@ class PipelineEndToEndTests(unittest.TestCase):
                         run_dry_text_pipeline(config)
             prompt = (export / "cleanup-prompt.txt").read_text()
             messages = cast("list[dict[str, str]]", posted["messages"])
-            # The dump mirrors the real request turn for turn — system prompt, the
-            # worked example exchange, then the actual data.
+            # The exported prompt mirrors the actual request.
             expected = "\n\n".join(f"[{m['role']}]\n{m['content']}" for m in messages) + "\n"
             self.assertEqual(prompt, expected)
-            self.assertEqual([m["role"] for m in messages], ["system", "user", "assistant", "user"])
+            self.assertEqual([m["role"] for m in messages], ["system", "user"])
 
     def test_extra_transcripts_reach_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

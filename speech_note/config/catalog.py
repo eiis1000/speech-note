@@ -43,7 +43,7 @@ __all__ = [
     "ANNOTATION_MAX_VERBATIM_CHARS", "ANNOTATION_WORDS_PER_NOTE",
     "ANNOTATION_MAX_NOTES_CEILING", "ANNOTATION_TOKENS_PER_NOTE",
     "ORGANIZER_CONTEXT_SAFETY",
-    "CLEANUP_MIN_LENGTH_RATIO", "CLEANUP_TARGET_LENGTH_RATIO",
+    "CLEANUP_MIN_LENGTH_RATIO",
     "DEFAULT_PARALLEL_WORKERS",
     "ARCHIVE_AUDIO_EXTENSIONS", "ARCHIVE_TRANSCRIPT_EXTENSIONS",
 ]
@@ -456,10 +456,8 @@ ORGANIZER_CONTEXT_SAFETY = 0.92
 # the shortest would license dropping the extra real content a more sensitive source
 # (e.g. the Gemini audio-LLM) caught — but anchoring to the longest over-counts when
 # that source is long because it kept every disfluency, demanding a bloated output. The
-# mean reduces the influence of one filler-heavy source. These are the rejection floor
-# and soft prompt target as fractions of the mean source length.
+# mean reduces the influence of one filler-heavy source.
 CLEANUP_MIN_LENGTH_RATIO = 0.6
-CLEANUP_TARGET_LENGTH_RATIO = 0.8
 
 # --- independent input batches (--parallel) ---
 # Concurrent batch items, capped. Each item runs a whole pipeline, and the peak is
